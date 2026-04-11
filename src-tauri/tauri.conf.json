@@ -13,8 +13,8 @@
     "windows": [
       {
         "label": "main",
-        "title": "",
-        "titleBarStyle": "Overlay",
+        "title": "LLM Relay",
+        "decorations": true,
         "width": 900,
         "height": 600,
         "minWidth": 700,

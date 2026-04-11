@@ -4,6 +4,7 @@ mod database;
 mod error;
 mod gateway;
 mod health;
+mod proxy_server;
 mod tray;
 
 use std::sync::Arc;
@@ -15,11 +16,26 @@ pub use error::AppError;
 
 pub struct AppState {
     pub db: Arc<Database>,
+    /// Held during any gateway switch to prevent concurrent switches.
+    pub switch_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub fn run() {
+    // Set up panic hook to log crashes
+    let config_dir = get_app_config_dir();
+    setup_panic_hook(&config_dir);
+
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -32,11 +48,16 @@ pub fn run() {
             std::fs::create_dir_all(&app_config_dir).ok();
             let db = Arc::new(Database::init(&app_config_dir)?);
 
-            let state = AppState { db: db.clone() };
+            let state = AppState {
+                db: db.clone(),
+                switch_lock: Arc::new(tokio::sync::Mutex::new(())),
+            };
 
             // Build tray
             let menu = tray::create_tray_menu(app.handle(), &state)?;
+            let icon = app.default_window_icon().cloned().unwrap();
             let _tray = TrayIconBuilder::with_id("main")
+                .icon(icon)
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     tray::handle_tray_menu_event(app, &event.id.0);
@@ -50,6 +71,13 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
             }
+
+            // Start local proxy server (http://127.0.0.1:18080)
+            let db_for_proxy = db.clone();
+            let proxy_app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                proxy_server::start(db_for_proxy, proxy_app_handle).await;
+            });
 
             // Start health check loop
             let app_handle = app.handle().clone();
@@ -77,6 +105,13 @@ pub fn run() {
             commands::get_settings,
             commands::update_settings,
             commands::update_tray_menu,
+            commands::get_health_log,
+            commands::get_client_name,
+            commands::set_client_name,
+            commands::get_autostart,
+            commands::set_autostart,
+            commands::get_traffic_logs,
+            commands::get_usage_stats,
         ]);
 
     let app = builder
@@ -101,4 +136,29 @@ fn get_app_config_dir() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".llm-relay")
+}
+
+fn setup_panic_hook(config_dir: &std::path::Path) {
+    let log_path = config_dir.join("crash.log");
+    std::panic::set_hook(Box::new(move |info| {
+        let now = chrono::Utc::now().to_rfc3339();
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let entry = format!("[{now}] PANIC at {location}: {msg}\n");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let _ = std::io::Write::write_all(&mut f, entry.as_bytes());
+        }
+    }));
 }

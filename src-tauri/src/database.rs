@@ -45,6 +45,7 @@ pub struct ActiveConfig {
     pub gemini_model: Option<String>,
     pub auto_switch: bool,
     pub applied_at: Option<String>,
+    pub last_switched_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,11 +58,44 @@ pub struct HealthCache {
     pub last_checked: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthLogEntry {
+    pub is_healthy: bool,
+    pub latency_ms: Option<i64>,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficLogEntry {
+    pub id: i64,
+    pub gateway_id: String,
+    pub gateway_name: Option<String>,
+    pub path: String,
+    pub status: u16,
+    pub latency_ms: u64,
+    pub error_detail: Option<String>,
+    pub logged_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSummary {
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub requests: i64,
+}
+
 impl Database {
     pub fn init(config_dir: &Path) -> Result<Self, AppError> {
         let db_path = config_dir.join("config.db");
         let conn = Connection::open(db_path)?;
 
+        // Base schema (idempotent)
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS gateways (
@@ -105,6 +139,70 @@ impl Database {
             INSERT OR IGNORE INTO active_config (id, auto_switch) VALUES (1, 1);
             ",
         )?;
+
+        // Run migrations
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        if version < 1 {
+            conn.execute_batch(
+                "ALTER TABLE active_config ADD COLUMN last_switched_at TEXT;",
+            )?;
+            conn.execute_batch("PRAGMA user_version = 1")?;
+        }
+
+        if version < 2 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS health_check_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    gateway_id TEXT NOT NULL,
+                    is_healthy INTEGER NOT NULL,
+                    latency_ms INTEGER,
+                    checked_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_health_log_gateway ON health_check_log (gateway_id, checked_at DESC);
+                ",
+            )?;
+            conn.execute_batch("PRAGMA user_version = 2")?;
+        }
+
+        if version < 3 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS traffic_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    gateway_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    status INTEGER NOT NULL,
+                    latency_ms INTEGER NOT NULL,
+                    error_detail TEXT,
+                    logged_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_traffic_log_time ON traffic_log (logged_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_traffic_log_gw ON traffic_log (gateway_id, logged_at DESC);
+                ",
+            )?;
+            conn.execute_batch("PRAGMA user_version = 3")?;
+        }
+
+        if version < 4 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS usage_log (
+                    gateway_id TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    hour TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                    requests INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (gateway_id, model, hour)
+                );
+                CREATE INDEX IF NOT EXISTS idx_usage_log_hour ON usage_log (hour DESC);
+                ",
+            )?;
+            conn.execute_batch("PRAGMA user_version = 4")?;
+        }
 
         Ok(Database {
             conn: Mutex::new(conn),
@@ -210,8 +308,8 @@ impl Database {
     pub fn delete_gateway(&self, id: &str) -> Result<(), AppError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM health_cache WHERE gateway_id = ?1", params![id])?;
+        conn.execute("DELETE FROM health_check_log WHERE gateway_id = ?1", params![id])?;
         conn.execute("DELETE FROM gateways WHERE id = ?1", params![id])?;
-        // Clear active config if it was using this gateway
         conn.execute(
             "UPDATE active_config SET gateway_id = NULL, key_id = NULL, key_name = NULL, key_value = NULL
              WHERE gateway_id = ?1",
@@ -238,7 +336,7 @@ impl Database {
         let result = conn.query_row(
             "SELECT gateway_id, key_id, key_name, key_value,
                     claude_model, claude_small_model, codex_model, gemini_model,
-                    auto_switch, applied_at
+                    auto_switch, applied_at, last_switched_at
              FROM active_config WHERE id = 1",
             [],
             |row| {
@@ -253,6 +351,7 @@ impl Database {
                     gemini_model: row.get(7)?,
                     auto_switch: row.get::<_, i32>(8)? != 0,
                     applied_at: row.get(9)?,
+                    last_switched_at: row.get(10)?,
                 })
             },
         )?;
@@ -265,7 +364,7 @@ impl Database {
             "UPDATE active_config SET
                 gateway_id = ?1, key_id = ?2, key_name = ?3, key_value = ?4,
                 claude_model = ?5, claude_small_model = ?6, codex_model = ?7, gemini_model = ?8,
-                auto_switch = ?9, applied_at = ?10
+                auto_switch = ?9, applied_at = ?10, last_switched_at = ?11
              WHERE id = 1",
             params![
                 config.gateway_id,
@@ -278,6 +377,7 @@ impl Database {
                 config.gemini_model,
                 config.auto_switch as i32,
                 config.applied_at,
+                config.last_switched_at,
             ],
         )?;
         Ok(())
@@ -340,6 +440,47 @@ impl Database {
         Ok(result)
     }
 
+    // ─── Health Log ───
+
+    pub fn add_health_log(&self, gateway_id: &str, is_healthy: bool, latency_ms: Option<i64>) -> Result<(), AppError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO health_check_log (gateway_id, is_healthy, latency_ms, checked_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![gateway_id, is_healthy as i32, latency_ms, now],
+        )?;
+        // Prune to last 1440 entries per gateway (24h at 1-min intervals)
+        conn.execute(
+            "DELETE FROM health_check_log WHERE gateway_id = ?1
+             AND id NOT IN (
+                 SELECT id FROM health_check_log WHERE gateway_id = ?1
+                 ORDER BY checked_at DESC LIMIT 1440
+             )",
+            params![gateway_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_health_log(&self, gateway_id: &str, limit: usize) -> Result<Vec<HealthLogEntry>, AppError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT is_healthy, latency_ms, checked_at
+             FROM health_check_log WHERE gateway_id = ?1
+             ORDER BY checked_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![gateway_id, limit as i64], |row| {
+            Ok(HealthLogEntry {
+                is_healthy: row.get::<_, i32>(0)? != 0,
+                latency_ms: row.get(1)?,
+                checked_at: row.get(2)?,
+            })
+        })?;
+        let mut entries: Vec<HealthLogEntry> = rows.filter_map(|r| r.ok()).collect();
+        entries.reverse(); // oldest first for chart rendering
+        Ok(entries)
+    }
+
     // ─── Settings ───
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, AppError> {
@@ -363,5 +504,174 @@ impl Database {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    // ─── Traffic Log ───
+
+    pub fn add_traffic_log(
+        &self,
+        gateway_id: &str,
+        path: &str,
+        status: u16,
+        latency_ms: u64,
+        error_detail: Option<&str>,
+    ) -> Result<(), AppError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO traffic_log (gateway_id, path, status, latency_ms, error_detail, logged_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![gateway_id, path, status as i32, latency_ms as i64, error_detail, now],
+        )?;
+        // Purge entries older than 24 hours
+        conn.execute(
+            "DELETE FROM traffic_log WHERE logged_at < datetime('now', '-1 day')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Returns recent anomalous traffic entries (newest first).
+    /// `gateway_id = None` returns across all gateways.
+    pub fn get_traffic_log(
+        &self,
+        gateway_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TrafficLogEntry>, AppError> {
+        let conn = self.conn.lock().unwrap();
+        let entries = if let Some(gid) = gateway_id {
+            let mut stmt = conn.prepare(
+                "SELECT t.id, t.gateway_id, g.name, t.path, t.status, t.latency_ms, t.error_detail, t.logged_at
+                 FROM traffic_log t LEFT JOIN gateways g ON g.id = t.gateway_id
+                 WHERE t.gateway_id = ?1
+                 ORDER BY t.logged_at DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![gid, limit as i64], |row| {
+                Ok(TrafficLogEntry {
+                    id: row.get(0)?,
+                    gateway_id: row.get(1)?,
+                    gateway_name: row.get(2)?,
+                    path: row.get(3)?,
+                    status: row.get::<_, i32>(4)? as u16,
+                    latency_ms: row.get::<_, i64>(5)? as u64,
+                    error_detail: row.get(6)?,
+                    logged_at: row.get(7)?,
+                })
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT t.id, t.gateway_id, g.name, t.path, t.status, t.latency_ms, t.error_detail, t.logged_at
+                 FROM traffic_log t LEFT JOIN gateways g ON g.id = t.gateway_id
+                 ORDER BY t.logged_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![limit as i64], |row| {
+                Ok(TrafficLogEntry {
+                    id: row.get(0)?,
+                    gateway_id: row.get(1)?,
+                    gateway_name: row.get(2)?,
+                    path: row.get(3)?,
+                    status: row.get::<_, i32>(4)? as u16,
+                    latency_ms: row.get::<_, i64>(5)? as u64,
+                    error_detail: row.get(6)?,
+                    logged_at: row.get(7)?,
+                })
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        Ok(entries)
+    }
+
+    // ─── Usage Log ───
+
+    pub fn record_usage(
+        &self,
+        gateway_id: &str,
+        model: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+        cache_read_tokens: i64,
+        cache_creation_tokens: i64,
+    ) -> Result<(), AppError> {
+        if input_tokens == 0 && output_tokens == 0 {
+            return Ok(());
+        }
+        // Current UTC hour as "YYYY-MM-DDTHH"
+        let hour = chrono::Utc::now().format("%Y-%m-%dT%H").to_string();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO usage_log (gateway_id, model, hour, input_tokens, output_tokens,
+                                    cache_read_tokens, cache_creation_tokens, requests)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
+             ON CONFLICT (gateway_id, model, hour) DO UPDATE SET
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                requests = requests + 1",
+            params![gateway_id, model, hour, input_tokens, output_tokens,
+                    cache_read_tokens, cache_creation_tokens],
+        )?;
+        Ok(())
+    }
+
+    /// Aggregate usage grouped by model for a given time period.
+    /// period: "today" | "week" | "7d" | "30d"
+    /// gateway_id: None = all gateways
+    pub fn get_usage_stats(
+        &self,
+        gateway_id: Option<&str>,
+        period: &str,
+    ) -> Result<Vec<UsageSummary>, AppError> {
+        let since = match period {
+            "today"  => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
+            "week"   => "strftime('%Y-%m-%dT%H', date('now', 'weekday 1', '-7 days'))".to_string(),
+            "7d"     => "strftime('%Y-%m-%dT%H', datetime('now', '-7 days'))".to_string(),
+            "30d"    => "strftime('%Y-%m-%dT%H', datetime('now', '-30 days'))".to_string(),
+            _        => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
+        };
+
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT model,
+                    SUM(input_tokens), SUM(output_tokens),
+                    SUM(cache_read_tokens), SUM(cache_creation_tokens),
+                    SUM(requests)
+             FROM usage_log
+             WHERE hour >= ({since}){gw_filter}
+             GROUP BY model
+             ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC",
+            since = since,
+            gw_filter = if gateway_id.is_some() { " AND gateway_id = ?1" } else { "" },
+        );
+
+        let entries = if let Some(gid) = gateway_id {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![gid], |row| {
+                Ok(UsageSummary {
+                    model: row.get(0)?,
+                    input_tokens: row.get(1)?,
+                    output_tokens: row.get(2)?,
+                    cache_read_tokens: row.get(3)?,
+                    cache_creation_tokens: row.get(4)?,
+                    requests: row.get(5)?,
+                })
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        } else {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| {
+                Ok(UsageSummary {
+                    model: row.get(0)?,
+                    input_tokens: row.get(1)?,
+                    output_tokens: row.get(2)?,
+                    cache_read_tokens: row.get(3)?,
+                    cache_creation_tokens: row.get(4)?,
+                    requests: row.get(5)?,
+                })
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        Ok(entries)
     }
 }

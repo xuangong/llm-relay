@@ -111,14 +111,22 @@ pub async fn fetch_models(url: &str, auth: &str) -> Result<ModelList, AppError> 
 }
 
 /// Health check a gateway by calling GET /api/models with a 10s timeout.
+/// Retries up to 3 times with exponential backoff (100ms, 200ms).
 /// Returns (is_healthy, latency_ms, model_count).
 pub async fn health_check(url: &str, auth: &str) -> (bool, Option<i64>, Option<i32>) {
-    let start = std::time::Instant::now();
-    match fetch_models(url, auth).await {
-        Ok(models) => {
-            let latency = start.elapsed().as_millis() as i64;
-            (true, Some(latency), Some(models.data.len() as i32))
+    for attempt in 0u32..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(100 * 2_u64.pow(attempt - 1))).await;
         }
-        Err(_) => (false, None, None),
+        let start = std::time::Instant::now();
+        match fetch_models(url, auth).await {
+            Ok(models) => {
+                let latency = start.elapsed().as_millis() as i64;
+                return (true, Some(latency), Some(models.data.len() as i32));
+            }
+            Err(_) if attempt < 2 => continue,
+            Err(_) => return (false, None, None),
+        }
     }
+    (false, None, None)
 }

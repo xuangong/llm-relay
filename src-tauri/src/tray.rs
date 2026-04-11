@@ -120,20 +120,26 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
         }
         "auto_switch" => {
             // Toggle auto-switch
-            if let Some(state) = app.try_state::<AppState>() {
-                if let Ok(mut config) = state.db.get_active_config() {
-                    config.auto_switch = !config.auto_switch;
-                    let _ = state.db.set_active_config(&config);
-                    refresh_tray_menu(app);
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Ok(mut config) = state.db.get_active_config() {
+                        config.auto_switch = !config.auto_switch;
+                        let _ = state.db.set_active_config(&config);
+                        refresh_tray_menu(&app);
+                    }
                 }
-            }
+            });
         }
         _ if event_id.starts_with("gw_") => {
             // Switch gateway
-            let gw_id = &event_id[3..];
-            if let Some(state) = app.try_state::<AppState>() {
-                handle_gateway_switch(app, state.inner(), gw_id);
-            }
+            let gw_id = event_id[3..].to_string();
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = app.try_state::<AppState>() {
+                    handle_gateway_switch(&app, state.inner(), &gw_id);
+                }
+            });
         }
         _ => {}
     }
@@ -148,7 +154,19 @@ fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: &str) 
 
     let config = match state.db.get_active_config() {
         Ok(c) => c,
-        _ => return,
+        Err(_) => crate::database::ActiveConfig {
+            gateway_id: None,
+            key_id: None,
+            key_name: None,
+            key_value: None,
+            claude_model: None,
+            claude_small_model: None,
+            codex_model: None,
+            gemini_model: None,
+            auto_switch: true,
+            applied_at: None,
+            last_switched_at: None,
+        },
     };
 
     let api_key = config.key_value.as_deref().unwrap_or(&gw.auth_key);
@@ -173,20 +191,24 @@ fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: &str) 
         codex_model: config.codex_model,
         gemini_model: config.gemini_model,
         auto_switch: config.auto_switch,
-        applied_at: Some(now),
+        applied_at: Some(now.clone()),
+        last_switched_at: Some(now),
     };
     let _ = state.db.set_active_config(&new_config);
 
     refresh_tray_menu(app);
 
     use tauri::Emitter;
-    let _ = app.emit(
-        "gateway-switched",
-        &serde_json::json!({
-            "gatewayId": gw.id,
-            "gatewayName": gw.name,
-        }),
-    );
+    log::info!("Tray switch to gateway: {} ({})", gw.id, gw.name);
+    let event_payload = serde_json::json!({
+        "gatewayId": gw.id,
+        "gatewayName": gw.name,
+    });
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("gateway-switched", &event_payload);
+    } else {
+        let _ = app.emit("gateway-switched", &event_payload);
+    }
 }
 
 /// Refresh the tray menu with current state.

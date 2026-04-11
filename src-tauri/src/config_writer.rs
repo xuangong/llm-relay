@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -341,18 +342,21 @@ pub fn clear_gemini_config() -> Result<(), AppError> {
     atomic_write(&env_path, content.as_bytes())
 }
 
-/// Write all three CLI configs at once.
+/// Write all three CLI configs pointing to the local proxy.
+/// base_url and api_key are ignored — the proxy handles routing and key injection.
 pub fn apply_all_configs(
-    base_url: &str,
-    api_key: &str,
+    _base_url: &str,
+    _api_key: &str,
     claude_model: Option<&str>,
     claude_small_model: Option<&str>,
     codex_model: Option<&str>,
     _gemini_model: Option<&str>,
 ) -> Result<(), AppError> {
-    write_claude_config(base_url, api_key, claude_model, claude_small_model)?;
-    write_codex_config(base_url, api_key, codex_model)?;
-    write_gemini_config(base_url, api_key)?;
+    let proxy_url = crate::proxy_server::proxy_base_url();
+    let key = crate::proxy_server::PLACEHOLDER_KEY;
+    write_claude_config(&proxy_url, key, claude_model, claude_small_model)?;
+    write_codex_config(&proxy_url, key, codex_model)?;
+    write_gemini_config(&proxy_url, key)?;
     Ok(())
 }
 
@@ -368,8 +372,8 @@ pub fn clear_all_configs() -> Result<(), AppError> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentCliConfig {
-    pub claude: Option<Value>,
-    pub codex_auth: Option<Value>,
+    pub claude: Option<serde_json::Value>,
+    pub codex_auth: Option<serde_json::Value>,
     pub codex_config: Option<String>,
     pub gemini: Option<HashMap<String, String>>,
 }

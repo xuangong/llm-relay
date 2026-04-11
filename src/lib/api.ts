@@ -83,6 +83,32 @@ export interface CurrentCliConfig {
   gemini: Record<string, string> | null;
 }
 
+export interface HealthLogEntry {
+  isHealthy: boolean;
+  latencyMs: number | null;
+  checkedAt: string;
+}
+
+export interface TrafficLogEntry {
+  id: number;
+  gatewayId: string;
+  gatewayName: string | null;
+  path: string;
+  status: number;
+  latencyMs: number;
+  errorDetail: string | null;
+  loggedAt: string;
+}
+
+export interface UsageSummary {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  requests: number;
+}
+
 // ─── Gateway CRUD ───
 
 export const addGateway = (name: string, url: string, authKey: string) =>
@@ -108,13 +134,24 @@ export const loginGateway = (url: string, key: string) =>
 export const fetchKeys = (gatewayId: string) =>
   invoke<ApiKey[]>("fetch_keys", { gatewayId });
 
-export const fetchModels = (gatewayId: string) =>
-  invoke<ModelList>("fetch_models", { gatewayId });
+export const fetchModels = (gatewayId: string, keyValue?: string) =>
+  invoke<ModelList>("fetch_models", { gatewayId, keyValue });
 
 // ─── Health ───
 
 export const checkAllHealth = () =>
   invoke<GatewayWithHealth[]>("check_all_health");
+
+export const getHealthLog = (gatewayId: string) =>
+  invoke<HealthLogEntry[]>("get_health_log", { gatewayId });
+
+export const getTrafficLogs = (gatewayId?: string, limit?: number) =>
+  invoke<TrafficLogEntry[]>("get_traffic_logs", { gatewayId, limit });
+
+export type UsagePeriod = "today" | "week" | "7d" | "30d";
+
+export const getUsageStats = (period: UsagePeriod, gatewayId?: string) =>
+  invoke<UsageSummary[]>("get_usage_stats", { period, gatewayId });
 
 // ─── Config ───
 
@@ -148,6 +185,20 @@ export const getSettings = () =>
 
 export const updateSettings = (autoSwitch: boolean) =>
   invoke<void>("update_settings", { autoSwitch });
+
+// ─── Client Identity ───
+
+export const getClientName = () =>
+  invoke<string>("get_client_name");
+
+export const setClientName = (name: string) =>
+  invoke<void>("set_client_name", { name });
+
+export const getAutostart = () =>
+  invoke<boolean>("get_autostart");
+
+export const setAutostart = (enabled: boolean) =>
+  invoke<void>("set_autostart", { enabled });
 
 // ─── Tray ───
 

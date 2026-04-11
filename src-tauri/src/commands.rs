@@ -1,7 +1,7 @@
 use tauri::State;
 
 use crate::config_writer;
-use crate::database::{ActiveConfig, Gateway, GatewayWithHealth};
+use crate::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthLogEntry, TrafficLogEntry, UsageSummary};
 use crate::gateway::{self, ApiKey, LoginResult, ModelList};
 use crate::AppState;
 
@@ -10,6 +10,7 @@ use crate::AppState;
 #[tauri::command]
 pub async fn add_gateway(
     state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
     name: String,
     url: String,
     auth_key: String,
@@ -25,6 +26,36 @@ pub async fn add_gateway(
         created_at: chrono::Utc::now().to_rfc3339(),
     };
     state.db.add_gateway(&gw).map_err(|e| e.to_string())?;
+
+    // Immediately check health for the new gateway
+    let gw_clone = gw.clone();
+    let db_clone = state.db.clone();
+    let app_handle_clone = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let (is_healthy, latency_ms, model_count) =
+            gateway::health_check(&gw_clone.url, &gw_clone.auth_key).await;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let health = crate::database::HealthCache {
+            gateway_id: gw_clone.id.clone(),
+            is_healthy,
+            latency_ms,
+            model_count,
+            last_checked: Some(now),
+        };
+
+        let _ = db_clone.update_health(&health);
+
+        // Emit health update event
+        if let Ok(gateways_with_health) = db_clone.list_gateways_with_health() {
+            use tauri::Emitter;
+            let _ = app_handle_clone.emit("health-updated", &gateways_with_health);
+        }
+
+        // Refresh tray menu
+        crate::tray::refresh_tray_menu(&app_handle_clone);
+    });
+
     Ok(gw)
 }
 
@@ -53,19 +84,34 @@ pub async fn update_gateway(
 }
 
 #[tauri::command]
-pub async fn delete_gateway(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.db.delete_gateway(&id).map_err(|e| e.to_string())
+pub async fn delete_gateway(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
+    state.db.delete_gateway(&id).map_err(|e| e.to_string())?;
+
+    // Refresh tray menu after deletion
+    crate::tray::refresh_tray_menu(&app_handle);
+
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn reorder_gateways(
     state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
     ids: Vec<String>,
 ) -> Result<(), String> {
     state
         .db
         .reorder_gateways(&ids)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Refresh tray menu after reordering
+    crate::tray::refresh_tray_menu(&app_handle);
+
+    Ok(())
 }
 
 // ─── Gateway API ───
@@ -103,6 +149,7 @@ pub async fn fetch_keys(
 pub async fn fetch_models(
     state: State<'_, AppState>,
     gateway_id: String,
+    key_value: Option<String>,
 ) -> Result<ModelList, String> {
     let gw = state
         .db
@@ -110,7 +157,9 @@ pub async fn fetch_models(
         .map_err(|e| e.to_string())?
         .ok_or("Gateway not found")?;
 
-    let auth = gw.session_token.as_deref().unwrap_or(&gw.auth_key);
+    let auth = key_value.as_deref()
+        .or(gw.session_token.as_deref())
+        .unwrap_or(&gw.auth_key);
     gateway::fetch_models(&gw.url, auth)
         .await
         .map_err(|e| e.to_string())
@@ -180,7 +229,8 @@ pub async fn apply_config(
             .get_active_config()
             .map(|c| c.auto_switch)
             .unwrap_or(true),
-        applied_at: Some(now),
+        applied_at: Some(now.clone()),
+        last_switched_at: Some(now),
     };
     state
         .db
@@ -194,7 +244,7 @@ pub async fn apply_config(
 }
 
 #[tauri::command]
-pub async fn read_current_config() -> Result<config_writer::CurrentCliConfig, String> {
+pub fn read_current_config() -> Result<config_writer::CurrentCliConfig, String> {
     config_writer::read_all_configs().map_err(|e| e.to_string())
 }
 
@@ -221,6 +271,7 @@ pub async fn clear_config(
             .map(|c| c.auto_switch)
             .unwrap_or(true),
         applied_at: None,
+        last_switched_at: None,
     };
     state
         .db
@@ -279,4 +330,80 @@ pub async fn update_settings(
 pub async fn update_tray_menu(app_handle: tauri::AppHandle) -> Result<(), String> {
     crate::tray::refresh_tray_menu(&app_handle);
     Ok(())
+}
+
+// ─── Health Log ───
+
+#[tauri::command]
+pub async fn get_health_log(
+    state: State<'_, AppState>,
+    gateway_id: String,
+) -> Result<Vec<HealthLogEntry>, String> {
+    state.db.get_health_log(&gateway_id, 1440).map_err(|e| e.to_string())
+}
+
+// ─── Client Name ───
+
+#[tauri::command]
+pub async fn get_client_name(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state
+        .db
+        .get_setting("client_name")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn set_client_name(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<(), String> {
+    state.db.set_setting("client_name", &name).map_err(|e| e.to_string())
+}
+
+// ─── Autostart ───
+
+#[tauri::command]
+pub async fn get_autostart(app_handle: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app_handle.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_autostart(app_handle: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app_handle.autolaunch();
+    if enabled {
+        mgr.enable().map_err(|e| e.to_string())
+    } else {
+        mgr.disable().map_err(|e| e.to_string())
+    }
+}
+
+// ─── Traffic Log ───
+
+#[tauri::command]
+pub async fn get_traffic_logs(
+    state: State<'_, AppState>,
+    gateway_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<TrafficLogEntry>, String> {
+    state
+        .db
+        .get_traffic_log(gateway_id.as_deref(), limit.unwrap_or(200))
+        .map_err(|e| e.to_string())
+}
+
+// ─── Usage Stats ───
+
+#[tauri::command]
+pub async fn get_usage_stats(
+    state: State<'_, AppState>,
+    period: String,
+    gateway_id: Option<String>,
+) -> Result<Vec<UsageSummary>, String> {
+    state
+        .db
+        .get_usage_stats(gateway_id.as_deref(), &period)
+        .map_err(|e| e.to_string())
 }

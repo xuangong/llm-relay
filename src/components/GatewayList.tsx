@@ -19,7 +19,9 @@ import { CSS } from "@dnd-kit/utilities";
 import { GatewayCard } from "./GatewayCard";
 import type { GatewayWithHealth } from "@/lib/api";
 import * as api from "@/lib/api";
-import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { toast } from "sonner";
+import { extractErrorMessage } from "@/lib/error";
 
 interface GatewayListProps {
   gateways: GatewayWithHealth[];
@@ -102,19 +104,15 @@ export function GatewayList({
   }, [initialGateways]);
 
   useEffect(() => {
-    const unlisten1 = listen<GatewayWithHealth[]>("health-updated", (event) => {
+    const appWindow = getCurrentWebviewWindow();
+    const unlisten1 = appWindow.listen<GatewayWithHealth[]>("health-updated", (event) => {
       setGateways(event.payload);
-    });
-
-    const unlisten2 = listen("gateway-switched", () => {
-      onRefresh();
     });
 
     return () => {
       unlisten1.then((fn) => fn());
-      unlisten2.then((fn) => fn());
     };
-  }, [onRefresh]);
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -139,6 +137,7 @@ export function GatewayList({
         await api.reorderGateways(newOrder.map((g) => g.id));
       } catch (err) {
         console.error("Failed to reorder:", err);
+        toast.error(`Failed to reorder: ${extractErrorMessage(err)}`);
         setGateways(gateways);
       }
     },
@@ -151,6 +150,7 @@ export function GatewayList({
       onRefresh();
     } catch (err) {
       console.error("Failed to delete gateway:", err);
+      toast.error(`Failed to delete: ${extractErrorMessage(err)}`);
     }
   };
 
@@ -164,7 +164,7 @@ export function GatewayList({
         items={gateways.map((g) => g.id)}
         strategy={verticalListSortingStrategy}
       >
-        <div className="space-y-3">
+        <div className="space-y-2">
           {gateways.map((gw) => (
             <SortableGatewayCard
               key={gw.id}

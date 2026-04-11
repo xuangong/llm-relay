@@ -1,10 +1,13 @@
 use tauri::Emitter;
+use tauri::Manager;
 
-use crate::config_writer;
 use crate::database::{ActiveConfig, HealthCache};
 use crate::gateway;
 use crate::tray;
 use crate::AppState;
+
+/// Minimum seconds between auto-switches to prevent flip-flopping.
+const SWITCH_HYSTERESIS_SECS: i64 = 60;
 
 /// Background health check loop.
 /// Runs every 30 seconds, checks all gateways concurrently.
@@ -12,11 +15,12 @@ use crate::AppState;
 /// - Gateways are ordered by sort_order (drag-and-drop priority)
 /// - Always use the first healthy gateway in the list
 /// - If current gateway goes down, switch to next healthy one
-/// - If a higher-priority gateway recovers, switch back
+/// - If a higher-priority gateway recovers, switch back (with hysteresis)
 pub async fn health_check_loop(state: &AppState, app_handle: &tauri::AppHandle) {
     loop {
         check_and_switch(state, app_handle).await;
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        send_heartbeat(state).await;
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
 }
 
@@ -55,6 +59,7 @@ pub async fn check_and_switch(state: &AppState, app_handle: &tauri::AppHandle) {
             };
 
             let _ = db_ref.update_health(&health);
+            let _ = db_ref.add_health_log(&gw_id, is_healthy, latency_ms);
             (gw_id, is_healthy)
         }));
     }
@@ -69,7 +74,9 @@ pub async fn check_and_switch(state: &AppState, app_handle: &tauri::AppHandle) {
 
     // Emit health-updated event
     if let Ok(gateways_with_health) = state.db.list_gateways_with_health() {
-        let _ = app_handle.emit("health-updated", &gateways_with_health);
+        if let Some(window) = app_handle.get_webview_window("main") {
+            let _ = window.emit("health-updated", &gateways_with_health);
+        }
     }
 
     // Auto-switch logic
@@ -93,7 +100,21 @@ pub async fn check_and_switch(state: &AppState, app_handle: &tauri::AppHandle) {
 
     match (best_healthy, current_gw_id) {
         (Some(best), Some(current_id)) if best.id != current_id => {
-            // Switch to higher-priority healthy gateway
+            let current_is_healthy = results
+                .iter()
+                .any(|(id, healthy)| id == current_id && *healthy);
+
+            if current_is_healthy {
+                // Switching to higher-priority gateway — apply hysteresis
+                if !should_switch_now(&config) {
+                    log::info!(
+                        "Hysteresis: skipping switch to {} (switched too recently)",
+                        best.name
+                    );
+                    return;
+                }
+            }
+
             log::info!(
                 "Auto-switch: {} -> {} (priority-based)",
                 current_id,
@@ -102,47 +123,44 @@ pub async fn check_and_switch(state: &AppState, app_handle: &tauri::AppHandle) {
             do_switch(state, app_handle, &best.id, &config).await;
         }
         (Some(best), None) => {
-            // No current gateway set, use best available
             log::info!("Auto-switch: none -> {} (first healthy)", best.name);
             do_switch(state, app_handle, &best.id, &config).await;
         }
         (None, Some(_)) => {
-            // All gateways down, nothing to do
             log::warn!("All gateways are offline");
         }
-        _ => {
-            // Current gateway is already the best, do nothing
-        }
+        _ => {}
     }
 }
 
-async fn do_switch(
+/// Returns true if enough time has passed since the last switch.
+fn should_switch_now(config: &ActiveConfig) -> bool {
+    let Some(last) = config.last_switched_at.as_deref() else {
+        return true;
+    };
+    let Ok(last_time) = chrono::DateTime::parse_from_rfc3339(last) else {
+        return true;
+    };
+    let elapsed = chrono::Utc::now() - last_time.with_timezone(&chrono::Utc);
+    elapsed.num_seconds() >= SWITCH_HYSTERESIS_SECS
+}
+
+pub async fn do_switch(
     state: &AppState,
     app_handle: &tauri::AppHandle,
     new_gw_id: &str,
     current_config: &ActiveConfig,
 ) {
+    // Hold the switch lock to prevent concurrent switches
+    let _guard = state.switch_lock.lock().await;
+
     let gw = match state.db.get_gateway(new_gw_id) {
         Ok(Some(gw)) => gw,
         _ => return,
     };
 
-    // Rewrite CLI configs with the new gateway
-    let api_key = current_config
-        .key_value
-        .as_deref()
-        .unwrap_or(&gw.auth_key);
-
-    let _ = config_writer::apply_all_configs(
-        &gw.url,
-        api_key,
-        current_config.claude_model.as_deref(),
-        current_config.claude_small_model.as_deref(),
-        current_config.codex_model.as_deref(),
-        current_config.gemini_model.as_deref(),
-    );
-
-    // Update active config in DB
+    // With local proxy mode, no config file rewrite needed —
+    // the proxy reads active_config from DB on each request.
     let now = chrono::Utc::now().to_rfc3339();
     let new_config = ActiveConfig {
         gateway_id: Some(gw.id.clone()),
@@ -154,16 +172,103 @@ async fn do_switch(
         codex_model: current_config.codex_model.clone(),
         gemini_model: current_config.gemini_model.clone(),
         auto_switch: current_config.auto_switch,
-        applied_at: Some(now),
+        applied_at: Some(now.clone()),
+        last_switched_at: Some(now),
     };
     let _ = state.db.set_active_config(&new_config);
 
-    // Update tray menu
     tray::refresh_tray_menu(app_handle);
 
-    // Emit gateway-switched event
-    let _ = app_handle.emit("gateway-switched", &serde_json::json!({
+    let event_payload = serde_json::json!({
         "gatewayId": gw.id,
         "gatewayName": gw.name,
-    }));
+    });
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let _ = window.emit("gateway-switched", &event_payload);
+    } else {
+        let _ = app_handle.emit("gateway-switched", &event_payload);
+    }
+}
+
+/// Send a heartbeat to the active gateway so the server knows this client is online.
+/// Fire-and-forget: errors are logged but don't affect health check behavior.
+pub async fn send_heartbeat(state: &AppState) {
+    let config = match state.db.get_active_config() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let gateway_id = match config.gateway_id.as_deref() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+
+    // Only send if there's an API key set (needed for auth)
+    let api_key = match config.key_value.as_deref() {
+        Some(k) => k.to_string(),
+        None => {
+            // Fall back to gateway's auth_key
+            match state.db.get_gateway(&gateway_id) {
+                Ok(Some(gw)) => gw.auth_key.clone(),
+                _ => return,
+            }
+        }
+    };
+
+    let gw = match state.db.get_gateway(&gateway_id) {
+        Ok(Some(gw)) => gw,
+        _ => return,
+    };
+
+    // Get user-set client name (empty if not customized)
+    let client_name = state
+        .db
+        .get_setting("client_name")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    // Always send hostname separately; server will format the display name
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Generate a stable client_id from settings or derive from hostname
+    let client_id = state
+        .db
+        .get_setting("client_id")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            let id = uuid::Uuid::new_v4().to_string();
+            let _ = state.db.set_setting("client_id", &id);
+            id
+        });
+
+    let payload = serde_json::json!({
+        "clientId": client_id,
+        "clientName": client_name,
+        "hostname": hostname,
+        "gatewayUrl": gw.url,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+
+    let url = format!("{}/api/heartbeat", gw.url.trim_end_matches('/'));
+    if let Err(e) = client
+        .post(&url)
+        .header("x-api-key", &api_key)
+        .header("content-type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+    {
+        log::debug!("Heartbeat failed ({}): {}", url, e);
+    } else {
+        log::debug!("Heartbeat sent to {}", gw.name);
+    }
 }
