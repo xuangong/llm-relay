@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { RefreshCw, AlertTriangle } from "lucide-react";
+import { RefreshCw, AlertTriangle, ChevronDown } from "lucide-react";
 import { TrafficLogEntry } from "@/lib/api";
 import * as api from "@/lib/api";
 
@@ -13,6 +13,7 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
   const [logs, setLogs] = useState<TrafficLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [gateways, setGateways] = useState<{ id: string; name: string }[]>([]);
+  const [expandedRow, setExpandedRow] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -138,6 +139,9 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
                 const dateLabel = formatDate(entry.loggedAt);
                 const showDate = dateLabel !== lastDate;
                 lastDate = dateLabel;
+                const isExpanded = expandedRow === entry.id;
+                const hasDetail = entry.errorDetail && entry.errorDetail.length > 0;
+
                 return (
                   <>
                     {showDate && (
@@ -150,7 +154,8 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
                     )}
                     <tr
                       key={entry.id}
-                      className={`border-b border-border/20 hover:bg-secondary/20 ${statusBg(entry.status)}`}
+                      className={`border-b border-border/20 hover:bg-secondary/20 transition-colors ${statusBg(entry.status)} ${hasDetail ? 'cursor-pointer' : ''}`}
+                      onClick={() => hasDetail && setExpandedRow(isExpanded ? null : entry.id)}
                     >
                       <td className="px-4 py-1.5 font-mono text-muted-foreground whitespace-nowrap">
                         {formatTime(entry.loggedAt)}
@@ -169,10 +174,31 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
                       <td className="px-2 py-1.5 font-mono text-foreground/70 truncate max-w-[12rem]">
                         {entry.path}
                       </td>
-                      <td className="px-2 py-1.5 text-muted-foreground/60 truncate max-w-[16rem]">
-                        {entry.errorDetail ?? "—"}
+                      <td className="px-2 py-1.5 text-muted-foreground/60 flex items-center gap-1">
+                        {hasDetail ? (
+                          <>
+                            <span className={`flex-1 ${isExpanded ? '' : 'truncate max-w-[14rem]'}`}>
+                              {entry.errorDetail}
+                            </span>
+                            <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                          </>
+                        ) : (
+                          <span>—</span>
+                        )}
                       </td>
                     </tr>
+                    {isExpanded && hasDetail && (
+                      <tr key={`detail-${entry.id}`} className={statusBg(entry.status)}>
+                        <td colSpan={filterGateway === "all" ? 6 : 5} className="px-4 py-2 bg-secondary/5">
+                          <div className="text-xs space-y-1">
+                            <div className="font-semibold text-foreground/80">Error Detail:</div>
+                            <div className="font-mono text-muted-foreground whitespace-pre-wrap break-all bg-background/50 p-2 rounded border border-border/40">
+                              {entry.errorDetail}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
                   </>
                 );
               })}

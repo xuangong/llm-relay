@@ -126,6 +126,9 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
     // Extract model name from request JSON body (best-effort)
     let model = extract_model(&body_bytes).unwrap_or_else(|| "unknown".to_string());
 
+    // Inject stream_options for OpenAI-compatible APIs to get usage data in streaming responses
+    let body_bytes = inject_stream_options(&body_bytes);
+
     // Build outbound request
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))  // 10 minutes total timeout (same as cc-switch)
@@ -172,13 +175,11 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             let is_server_error = status_code >= 500 || status_code == 429;
             let is_any_error = status_code >= 400;
 
-            // Log ALL requests to traffic_log for monitoring, not just errors
-            let detail = if is_any_error {
-                Some(format!("HTTP {status_code}"))
-            } else {
-                None
-            };
-            let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, detail.as_deref());
+            // Only log errors to traffic_log (4xx, 5xx)
+            if is_any_error {
+                let detail = format!("HTTP {status_code}");
+                let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, Some(&detail));
+            }
 
             if is_server_error {
                 let count = state.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
@@ -206,34 +207,76 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             let axum_status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK);
             let resp_headers = resp.headers().clone();
 
-            // Tap the response stream to record token usage in the background
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            // Tap the response stream to record token usage in real-time and capture stream errors
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>, String>>();
             let db_usage = state.db.clone();
             let gw_usage = gateway_id.clone();
             let model_usage = model.clone();
+            let db_error = state.db.clone();
+            let gw_error = gateway_id.clone();
+            let path_error = path.clone();
+            let start_error = start;
 
             tokio::spawn(async move {
-                let mut all = Vec::new();
-                while let Some(chunk) = rx.recv().await {
-                    all.extend_from_slice(&chunk);
+                let mut buffer = Vec::new();
+                let mut usage_recorded = false;
+                let mut stream_error: Option<String> = None;
+
+                while let Some(result) = rx.recv().await {
+                    match result {
+                        Ok(chunk) => {
+                            buffer.extend_from_slice(&chunk);
+
+                            // Try to parse incrementally for SSE streams
+                            if is_sse && !usage_recorded {
+                                // Check if we have enough data to parse usage
+                                if let Ok(text) = std::str::from_utf8(&buffer) {
+                                    let (inp, out, cr, cc) = parse_sse_tokens_incremental(text);
+                                    if inp > 0 || out > 0 {
+                                        let _ = db_usage.record_usage(&gw_usage, &model_usage, inp, out, cr, cc);
+                                        log::debug!("Usage recorded (streaming): {} in={} out={} model={}", gw_usage, inp, out, model_usage);
+                                        usage_recorded = true;
+                                    }
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            stream_error = Some(err);
+                            break;
+                        }
+                    }
                 }
-                if all.is_empty() {
-                    return;
+
+                // Record stream error if any
+                if let Some(err_msg) = stream_error {
+                    let latency_ms = start_error.elapsed().as_millis() as u64;
+                    let _ = db_error.add_traffic_log(&gw_error, &path_error, 502, latency_ms, Some(&err_msg));
+                    log::warn!("Stream error on {}: {}", path_error, err_msg);
                 }
-                let (inp, out, cr, cc) = if is_sse {
-                    parse_sse_tokens(&all)
-                } else {
-                    parse_json_tokens(&all)
-                };
-                if inp > 0 || out > 0 {
-                    let _ = db_usage.record_usage(&gw_usage, &model_usage, inp, out, cr, cc);
-                    log::debug!("Usage recorded: {} in={} out={} model={}", gw_usage, inp, out, model_usage);
+
+                // Final attempt for non-streaming or if streaming didn't capture usage
+                if !usage_recorded && !buffer.is_empty() {
+                    let (inp, out, cr, cc) = if is_sse {
+                        parse_sse_tokens(&buffer)
+                    } else {
+                        parse_json_tokens(&buffer)
+                    };
+                    if inp > 0 || out > 0 {
+                        let _ = db_usage.record_usage(&gw_usage, &model_usage, inp, out, cr, cc);
+                        log::debug!("Usage recorded (final): {} in={} out={} model={}", gw_usage, inp, out, model_usage);
+                    }
                 }
             });
 
             let stream = resp.bytes_stream().map(move |chunk| {
-                if let Ok(ref b) = chunk {
-                    let _ = tx.send(b.to_vec());
+                match &chunk {
+                    Ok(b) => {
+                        let _ = tx.send(Ok(b.to_vec()));
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Stream error: {}", e);
+                        let _ = tx.send(Err(err_msg));
+                    }
                 }
                 chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
             });
@@ -286,15 +329,51 @@ fn extract_model(body: &[u8]) -> Option<String> {
     v.get("model")?.as_str().map(|s| s.to_string())
 }
 
+/// Inject `stream_options: {include_usage: true}` into OpenAI streaming requests.
+/// This enables token usage reporting in the final SSE chunk.
+/// Only injects if: request has `stream: true` and no existing `stream_options`.
+fn inject_stream_options(body: &[u8]) -> Vec<u8> {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.to_vec();
+    };
+
+    // Only inject if streaming is enabled
+    let is_streaming = v.get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+
+    if !is_streaming {
+        return body.to_vec();
+    }
+
+    // Only inject if stream_options doesn't already exist
+    if v.get("stream_options").is_none() {
+        v["stream_options"] = serde_json::json!({"include_usage": true});
+
+        if let Ok(modified) = serde_json::to_vec(&v) {
+            log::debug!("Injected stream_options for usage tracking");
+            return modified;
+        }
+    }
+
+    body.to_vec()
+}
+
 /// Parse token usage from a streaming SSE response body.
 /// Handles Anthropic Messages format (message_start / message_delta events).
 /// Also handles OpenAI Chat Completions streaming format (final chunk with usage).
+/// Also handles Google Gemini format (usageMetadata).
 fn parse_sse_tokens(data: &[u8]) -> (i64, i64, i64, i64) {
     let text = match std::str::from_utf8(data) {
         Ok(t) => t,
         Err(_) => return (0, 0, 0, 0),
     };
+    parse_sse_tokens_incremental(text)
+}
 
+/// Incremental SSE token parser - works with partial streams.
+/// Returns usage info as soon as it's found, without waiting for stream end.
+fn parse_sse_tokens_incremental(text: &str) -> (i64, i64, i64, i64) {
     let mut input: i64 = 0;
     let mut output: i64 = 0;
     let mut cache_read: i64 = 0;
@@ -322,8 +401,15 @@ fn parse_sse_tokens(data: &[u8]) -> (i64, i64, i64, i64) {
                 }
             }
             _ => {
+                // Gemini: usageMetadata (check first as it's more specific)
+                if let Some(usage_meta) = v.get("usageMetadata") {
+                    let pt = usage_meta.get("promptTokenCount").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let ct = usage_meta.get("candidatesTokenCount").and_then(|x| x.as_i64()).unwrap_or(0);
+                    if pt > 0 { input = pt; }
+                    if ct > 0 { output = ct; }
+                }
                 // OpenAI streaming: last chunk may contain usage object
-                if let Some(usage) = v.get("usage") {
+                else if let Some(usage) = v.get("usage") {
                     let pt = usage.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
                     let ct = usage.get("completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
                     if pt > 0 { input = pt; }
@@ -337,11 +423,20 @@ fn parse_sse_tokens(data: &[u8]) -> (i64, i64, i64, i64) {
 }
 
 /// Parse token usage from a non-streaming JSON response body.
-/// Handles both Anthropic and OpenAI formats.
+/// Handles Anthropic, OpenAI, and Google Gemini formats.
 fn parse_json_tokens(data: &[u8]) -> (i64, i64, i64, i64) {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(data) else {
         return (0, 0, 0, 0);
     };
+
+    // Try Gemini format first (usageMetadata)
+    if let Some(usage_meta) = v.get("usageMetadata") {
+        let input = usage_meta.get("promptTokenCount").and_then(|x| x.as_i64()).unwrap_or(0);
+        let output = usage_meta.get("candidatesTokenCount").and_then(|x| x.as_i64()).unwrap_or(0);
+        return (input, output, 0, 0);
+    }
+
+    // Try OpenAI/Anthropic format (usage)
     let Some(usage) = v.get("usage") else {
         return (0, 0, 0, 0);
     };
