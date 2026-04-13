@@ -4,10 +4,14 @@ import { RefreshCw, AlertTriangle } from "lucide-react";
 import { TrafficLogEntry } from "@/lib/api";
 import * as api from "@/lib/api";
 
-export function TrafficLogPanel() {
+interface TrafficLogPanelProps {
+  filterGateway: string;
+  onFilterChange: (value: string) => void;
+}
+
+export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPanelProps) {
   const [logs, setLogs] = useState<TrafficLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
-  const [filterGateway, setFilterGateway] = useState<string>("all");
   const [gateways, setGateways] = useState<{ id: string; name: string }[]>([]);
 
   const load = useCallback(async () => {
@@ -85,7 +89,7 @@ export function TrafficLogPanel() {
         {gateways.length > 1 && (
           <select
             value={filterGateway}
-            onChange={(e) => setFilterGateway(e.target.value)}
+            onChange={(e) => onFilterChange(e.target.value)}
             className="ml-2 text-xs bg-background border border-border/60 rounded px-2 py-0.5 text-foreground"
           >
             <option value="all">All gateways</option>

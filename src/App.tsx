@@ -24,6 +24,7 @@ function App() {
   const [showLogs, setShowLogs] = useState(false);
   const [logErrorCount, setLogErrorCount] = useState(0);
   const [bottomTab, setBottomTab] = useState<"usage" | "logs">("usage");
+  const [logFilterGateway, setLogFilterGateway] = useState<string>("all");
   const [clientName, setClientName] = useState("");
   const [editingClientName, setEditingClientName] = useState(false);
   const [clientNameDraft, setClientNameDraft] = useState("");
@@ -341,7 +342,14 @@ function App() {
 
         {showLogs && (
           <div className="flex-1 overflow-hidden">
-            {bottomTab === "usage" ? <UsagePanel /> : <TrafficLogPanel />}
+            {bottomTab === "usage" ? (
+              <UsagePanel />
+            ) : (
+              <TrafficLogPanel
+                filterGateway={logFilterGateway}
+                onFilterChange={setLogFilterGateway}
+              />
+            )}
           </div>
         )}
       </div>

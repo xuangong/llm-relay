@@ -128,7 +128,9 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
 
     // Build outbound request
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(600))  // 10 minutes total timeout (same as cc-switch)
+        .connect_timeout(std::time::Duration::from_secs(30))  // 30s connection timeout
+        .pool_idle_timeout(std::time::Duration::from_secs(90))  // Keep connections alive
         .build()
         .unwrap_or_default();
 
@@ -170,10 +172,13 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             let is_server_error = status_code >= 500 || status_code == 429;
             let is_any_error = status_code >= 400;
 
-            if is_any_error {
-                let detail = format!("HTTP {status_code}");
-                let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, Some(&detail));
-            }
+            // Log ALL requests to traffic_log for monitoring, not just errors
+            let detail = if is_any_error {
+                Some(format!("HTTP {status_code}"))
+            } else {
+                None
+            };
+            let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, detail.as_deref());
 
             if is_server_error {
                 let count = state.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
@@ -206,12 +211,31 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             let db_usage = state.db.clone();
             let gw_usage = gateway_id.clone();
             let model_usage = model.clone();
+            let db_error_log = state.db.clone();
+            let gw_error_log = gateway_id.clone();
+            let path_error_log = path.clone();
+            let start_time = start;
 
             tokio::spawn(async move {
                 let mut all = Vec::new();
+                let mut stream_error = None;
                 while let Some(chunk) = rx.recv().await {
-                    all.extend_from_slice(&chunk);
+                    match chunk {
+                        Ok(b) => all.extend_from_slice(&b),
+                        Err(e) => {
+                            stream_error = Some(e);
+                            break;
+                        }
+                    }
                 }
+
+                // Record stream error if any
+                if let Some(err_msg) = stream_error {
+                    let latency_ms = start_time.elapsed().as_millis() as u64;
+                    let _ = db_error_log.add_traffic_log(&gw_error_log, &path_error_log, 502, latency_ms, Some(&err_msg));
+                    log::warn!("Stream error: {} → {}", path_error_log, err_msg);
+                }
+
                 if all.is_empty() {
                     return;
                 }
@@ -227,8 +251,14 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             });
 
             let stream = resp.bytes_stream().map(move |chunk| {
-                if let Ok(ref b) = chunk {
-                    let _ = tx.send(b.to_vec());
+                match &chunk {
+                    Ok(b) => {
+                        let _ = tx.send(Ok(b.to_vec()));
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        let _ = tx.send(Err(err_msg));
+                    }
                 }
                 chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
             });
