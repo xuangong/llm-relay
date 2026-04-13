@@ -17,7 +17,8 @@ pub const PROXY_PORT: u16 = 18080;
 pub const PLACEHOLDER_KEY: &str = "llm-relay-local";
 
 /// Consecutive error threshold before triggering auto-failover.
-const ERROR_FAILOVER_THRESHOLD: u32 = 3;
+/// Set to 10 to allow more tolerance for transient errors.
+const ERROR_FAILOVER_THRESHOLD: u32 = 10;
 
 pub fn proxy_base_url() -> String {
     format!("http://127.0.0.1:{}", PROXY_PORT)
@@ -166,16 +167,20 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
         Ok(resp) => {
             let status_code = resp.status().as_u16();
             let latency_ms = start.elapsed().as_millis() as u64;
-            let is_error = status_code >= 500 || status_code == 429;
+            let is_server_error = status_code >= 500 || status_code == 429;
+            let is_any_error = status_code >= 400;
 
-            if is_error {
+            if is_any_error {
+                let detail = format!("HTTP {status_code}");
+                let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, Some(&detail));
+            }
+
+            if is_server_error {
                 let count = state.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
                 log::warn!(
                     "Proxy: {} {} → {}ms (consecutive errors: {})",
                     target_url, status_code, latency_ms, count
                 );
-                let detail = format!("HTTP {status_code}");
-                let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, Some(&detail));
                 if count >= ERROR_FAILOVER_THRESHOLD {
                     state.consecutive_errors.store(0, Ordering::SeqCst);
                     try_proxy_failover(&state, &gateway_id, status_code).await;

@@ -12,11 +12,50 @@ fn home_dir() -> PathBuf {
 
 /// Atomic write: write to a temp file then rename.
 fn atomic_write(path: &PathBuf, content: &[u8]) -> Result<(), AppError> {
+    use std::io::Write;
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, content)?;
+
+    // Use nanosecond timestamp to avoid temp file name conflicts
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let file_name = path.file_name()
+        .ok_or_else(|| AppError::Config("Invalid file name".to_string()))?
+        .to_string_lossy();
+    let mut tmp = path.parent()
+        .ok_or_else(|| AppError::Config("Invalid path".to_string()))?
+        .to_path_buf();
+    tmp.push(format!("{}.tmp.{}", file_name, ts));
+
+    // Write to temp file with explicit flush
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(content)?;
+        f.flush()?;
+    }
+
+    // Preserve file permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            let perm = meta.permissions().mode();
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
+        }
+    }
+
+    // Windows special handling: remove then rename
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            let _ = fs::remove_file(path);
+        }
+    }
+
     fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -50,6 +89,21 @@ pub fn write_claude_config(
         .unwrap()
         .entry("env")
         .or_insert_with(|| serde_json::json!({}));
+
+    // Check if the current config already matches
+    let needs_update = if let Some(env_obj) = env.as_object() {
+        env_obj.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) != Some(api_key)
+            || env_obj.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) != Some(base_url)
+            || (model.is_some() && env_obj.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()) != model)
+            || (small_model.is_some() && env_obj.get("ANTHROPIC_SMALL_FAST_MODEL").and_then(|v| v.as_str()) != small_model)
+    } else {
+        true
+    };
+
+    if !needs_update {
+        // Config already correct, skip write
+        return Ok(());
+    }
 
     if let Some(env_obj) = env.as_object_mut() {
         env_obj.insert(
@@ -120,13 +174,29 @@ pub fn write_codex_config(
     let dir = codex_dir();
     fs::create_dir_all(&dir)?;
 
-    // Write auth.json
+    // Write auth.json only if needed
     let auth_path = dir.join("auth.json");
-    let auth = serde_json::json!({
-        "OPENAI_API_KEY": api_key
-    });
-    let auth_str = serde_json::to_string_pretty(&auth)?;
-    atomic_write(&auth_path, auth_str.as_bytes())?;
+    let needs_auth_update = if auth_path.exists() {
+        if let Ok(content) = fs::read_to_string(&auth_path) {
+            if let Ok(existing) = serde_json::from_str::<Value>(&content) {
+                existing.get("OPENAI_API_KEY").and_then(|v| v.as_str()) != Some(api_key)
+            } else {
+                true
+            }
+        } else {
+            true
+        }
+    } else {
+        true
+    };
+
+    if needs_auth_update {
+        let auth = serde_json::json!({
+            "OPENAI_API_KEY": api_key
+        });
+        let auth_str = serde_json::to_string_pretty(&auth)?;
+        atomic_write(&auth_path, auth_str.as_bytes())?;
+    }
 
     // Read or create config.toml, update model + model_provider + base_url
     let config_path = dir.join("config.toml");
@@ -138,6 +208,25 @@ pub fn write_codex_config(
     } else {
         "".parse::<DocumentMut>().unwrap()
     };
+
+    // Check if config needs update
+    let url_with_slash = if base_url.ends_with('/') {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/")
+    };
+
+    let needs_config_update = doc.get("model_provider").and_then(|v| v.as_str()) != Some("copilot_gateway")
+        || (model.is_some() && doc.get("model").and_then(|v| v.as_str()) != model)
+        || doc.get("model_providers")
+            .and_then(|mp| mp.get("copilot_gateway"))
+            .and_then(|gw| gw.get("base_url"))
+            .and_then(|u| u.as_str()) != Some(&url_with_slash);
+
+    if !needs_config_update {
+        // Config already correct, skip write
+        return Ok(());
+    }
 
     if let Some(m) = model {
         doc["model"] = toml_edit::value(m);
@@ -154,13 +243,7 @@ pub fn write_codex_config(
         }
         if let Some(gw) = providers["copilot_gateway"].as_table_mut() {
             gw["name"] = toml_edit::value("Copilot Gateway");
-            // Ensure base_url ends with /
-            let url = if base_url.ends_with('/') {
-                base_url.to_string()
-            } else {
-                format!("{base_url}/")
-            };
-            gw["base_url"] = toml_edit::value(&url);
+            gw["base_url"] = toml_edit::value(&url_with_slash);
             gw["env_key"] = toml_edit::value("OPENAI_API_KEY");
             gw["wire_api"] = toml_edit::value("responses");
         }
@@ -282,6 +365,15 @@ pub fn write_gemini_config(base_url: &str, api_key: &str) -> Result<(), AppError
     } else {
         HashMap::new()
     };
+
+    // Check if update needed
+    let needs_update = env_map.get("GEMINI_API_KEY") != Some(&api_key.to_string())
+        || env_map.get("GOOGLE_GEMINI_BASE_URL") != Some(&base_url.to_string());
+
+    if !needs_update {
+        // Config already correct, skip write
+        return Ok(());
+    }
 
     env_map.insert("GEMINI_API_KEY".to_string(), api_key.to_string());
     env_map.insert("GOOGLE_GEMINI_BASE_URL".to_string(), base_url.to_string());
