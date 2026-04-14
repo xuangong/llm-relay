@@ -39,14 +39,14 @@ LLM Relay 在本地启动一个 HTTP 代理（`127.0.0.1:18080`），CLI 工具�
 ### ⚙️ 其他
 
 - **系统托盘** — 快速切换 Gateway、查看状态
-- **开机启动（Launch at Login）** — macOS LaunchAgent 注册
+- **开机启动（Launch at Login）** — 跨平台支持（macOS LaunchAgent / Windows Startup / Linux Systemd）
 - 崩溃日志自动写入 `~/.llm-relay/crash.log`
 
 ## 安装
 
 ### 前置要求
 
-- macOS（主要测试平台）/ Linux / Windows
+- **macOS** / **Windows** / **Linux**（跨平台支持）
 - Node.js 18+
 - Rust 工具链
 

@@ -41,6 +41,20 @@
     ],
     "macOS": {
       "minimumSystemVersion": "12.0"
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "wix": {
+        "language": "en-US"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "languages": ["en-US"],
+        "displayLanguageSelector": false
+      }
     }
   }
 }

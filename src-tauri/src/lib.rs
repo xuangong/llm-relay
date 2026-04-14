@@ -25,11 +25,18 @@ pub fn run() {
     let config_dir = get_app_config_dir();
     setup_panic_hook(&config_dir);
 
+    // Platform-specific autostart configuration
+    #[cfg(target_os = "macos")]
+    let autostart_launcher = tauri_plugin_autostart::MacosLauncher::LaunchAgent;
+
+    #[cfg(target_os = "windows")]
+    let autostart_launcher = tauri_plugin_autostart::WindowsLauncher::Startup;
+
+    #[cfg(target_os = "linux")]
+    let autostart_launcher = tauri_plugin_autostart::LinuxLauncher::Systemd;
+
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
+        .plugin(tauri_plugin_autostart::init(autostart_launcher, None))
         .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_log::Builder::new()
