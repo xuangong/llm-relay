@@ -369,14 +369,18 @@ fn extract_model(body: &[u8], path: &str) -> Option<String> {
         }
     }
 
-    // Fallback: try to infer from path (e.g., /v1/models/gpt-4/...)
+    // Fallback: try to infer from path
+    // Gemini format: /v1beta/models/gemini-1.5-pro:generateContent
     if path.contains("/models/") {
         if let Some(model_part) = path.split("/models/").nth(1) {
-            if let Some(model_name) = model_part.split('/').next() {
-                if !model_name.is_empty() {
-                    log::debug!("Inferred model from path: {}", model_name);
-                    return Some(model_name.to_string());
-                }
+            // Extract model name (stop at ':' for Gemini, or '/' for others)
+            let model_name = model_part
+                .split(&[':', '/'][..])
+                .next()
+                .unwrap_or("");
+            if !model_name.is_empty() {
+                log::debug!("Inferred model from path: {}", model_name);
+                return Some(model_name.to_string());
             }
         }
     }
