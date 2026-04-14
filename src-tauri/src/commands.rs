@@ -179,6 +179,14 @@ pub async fn check_all_health(
         .map_err(|e| e.to_string())
 }
 
+/// Test heartbeat manually - returns debug info
+#[tauri::command]
+pub async fn test_heartbeat(state: State<'_, AppState>) -> Result<String, String> {
+    log::info!("Manual heartbeat test triggered");
+    crate::health::send_heartbeat(state.inner()).await;
+    Ok("Heartbeat sent - check gateway's Clients panel or logs".to_string())
+}
+
 // ─── Config ───
 
 #[tauri::command]

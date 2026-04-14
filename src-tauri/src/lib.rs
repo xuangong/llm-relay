@@ -98,6 +98,7 @@ pub fn run() {
             commands::fetch_keys,
             commands::fetch_models,
             commands::check_all_health,
+            commands::test_heartbeat,
             commands::apply_config,
             commands::read_current_config,
             commands::clear_config,

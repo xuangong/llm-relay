@@ -204,3 +204,7 @@ export const setAutostart = (enabled: boolean) =>
 
 export const updateTrayMenu = () =>
   invoke<void>("update_tray_menu");
+
+export async function testHeartbeat(): Promise<string> {
+  return invoke("test_heartbeat");
+}

@@ -127,7 +127,8 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
     let model = extract_model(&body_bytes).unwrap_or_else(|| "unknown".to_string());
 
     // Inject stream_options for OpenAI-compatible APIs to get usage data in streaming responses
-    let body_bytes = inject_stream_options(&body_bytes);
+    // Only inject for OpenAI/compatible APIs, NOT for Anthropic (which doesn't support stream_options)
+    let body_bytes = inject_stream_options(&body_bytes, &path);
 
     // Build outbound request
     let client = reqwest::Client::builder()
@@ -175,26 +176,41 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             let is_server_error = status_code >= 500 || status_code == 429;
             let is_any_error = status_code >= 400;
 
-            // Only log errors to traffic_log (4xx, 5xx)
+            // For errors, read the response body to get detailed error message
             if is_any_error {
-                let detail = format!("HTTP {status_code}");
-                let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, Some(&detail));
-            }
+                let error_body = resp.text().await.unwrap_or_else(|_| format!("HTTP {}", status_code));
+                let error_detail = if error_body.len() > 500 {
+                    // Truncate very long error messages but keep useful info
+                    format!("{}...", &error_body[..500])
+                } else {
+                    error_body.clone()
+                };
 
-            if is_server_error {
-                let count = state.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
-                log::warn!(
-                    "Proxy: {} {} → {}ms (consecutive errors: {})",
-                    target_url, status_code, latency_ms, count
-                );
-                if count >= ERROR_FAILOVER_THRESHOLD {
+                let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, Some(&error_detail));
+                log::warn!("Proxy error {} → {}: {}", target_url, status_code, error_detail);
+
+                if is_server_error {
+                    let count = state.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
+                    if count >= ERROR_FAILOVER_THRESHOLD {
+                        state.consecutive_errors.store(0, Ordering::SeqCst);
+                        try_proxy_failover(&state, &gateway_id, status_code).await;
+                    }
+                } else {
                     state.consecutive_errors.store(0, Ordering::SeqCst);
-                    try_proxy_failover(&state, &gateway_id, status_code).await;
                 }
-            } else {
-                state.consecutive_errors.store(0, Ordering::SeqCst);
+
+                emit_traffic(&state, &path, status_code, latency_ms, &gateway_id);
+
+                // Return error response to client
+                return (
+                    StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
+                    error_body,
+                )
+                    .into_response();
             }
 
+            // Success path: stream the response
+            state.consecutive_errors.store(0, Ordering::SeqCst);
             emit_traffic(&state, &path, status_code, latency_ms, &gateway_id);
 
             let is_sse = resp
@@ -332,7 +348,13 @@ fn extract_model(body: &[u8]) -> Option<String> {
 /// Inject `stream_options: {include_usage: true}` into OpenAI streaming requests.
 /// This enables token usage reporting in the final SSE chunk.
 /// Only injects if: request has `stream: true` and no existing `stream_options`.
-fn inject_stream_options(body: &[u8]) -> Vec<u8> {
+/// IMPORTANT: Do NOT inject for Anthropic Messages API (path contains /messages).
+fn inject_stream_options(body: &[u8], path: &str) -> Vec<u8> {
+    // Anthropic Messages API doesn't support stream_options
+    if path.contains("/messages") {
+        return body.to_vec();
+    }
+
     let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(body) else {
         return body.to_vec();
     };

@@ -17,6 +17,7 @@ const SWITCH_HYSTERESIS_SECS: i64 = 60;
 /// - If current gateway goes down, switch to next healthy one
 /// - If a higher-priority gateway recovers, switch back (with hysteresis)
 pub async fn health_check_loop(state: &AppState, app_handle: &tauri::AppHandle) {
+    log::info!("Health check loop started");
     loop {
         check_and_switch(state, app_handle).await;
         send_heartbeat(state).await;
@@ -193,14 +194,22 @@ pub async fn do_switch(
 /// Send a heartbeat to the active gateway so the server knows this client is online.
 /// Fire-and-forget: errors are logged but don't affect health check behavior.
 pub async fn send_heartbeat(state: &AppState) {
+    log::info!("send_heartbeat called");
+
     let config = match state.db.get_active_config() {
         Ok(c) => c,
-        Err(_) => return,
+        Err(e) => {
+            log::warn!("Heartbeat skipped: no active config ({})", e);
+            return;
+        }
     };
 
     let gateway_id = match config.gateway_id.as_deref() {
         Some(id) => id.to_string(),
-        None => return,
+        None => {
+            log::warn!("Heartbeat skipped: no gateway_id in config");
+            return;
+        }
     };
 
     // Only send if there's an API key set (needed for auth)
@@ -259,7 +268,10 @@ pub async fn send_heartbeat(state: &AppState) {
         .unwrap_or_default();
 
     let url = format!("{}/api/heartbeat", gw.url.trim_end_matches('/'));
-    if let Err(e) = client
+    log::info!("Sending heartbeat to {} (client_id: {}, client_name: '{}', hostname: '{}')",
+        url, client_id, client_name, hostname);
+
+    match client
         .post(&url)
         .header("x-api-key", &api_key)
         .header("content-type", "application/json")
@@ -267,8 +279,17 @@ pub async fn send_heartbeat(state: &AppState) {
         .send()
         .await
     {
-        log::debug!("Heartbeat failed ({}): {}", url, e);
-    } else {
-        log::debug!("Heartbeat sent to {}", gw.name);
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                log::info!("Heartbeat successful to {} (status: {})", gw.name, status);
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                log::warn!("Heartbeat failed to {} (status: {}, body: {})", gw.name, status, body);
+            }
+        }
+        Err(e) => {
+            log::warn!("Heartbeat network error to {} ({}): {}", gw.name, url, e);
+        }
     }
 }
