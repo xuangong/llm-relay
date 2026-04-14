@@ -80,6 +80,8 @@ export function GatewayCard({
   const [editName, setEditName] = useState(gateway.name);
   const [editUrl, setEditUrl] = useState(gateway.url);
   const [editAuthKey, setEditAuthKey] = useState(gateway.authKey);
+  const [useDirectToken, setUseDirectToken] = useState(false);
+  const [directToken, setDirectToken] = useState("");
   const [healthLog, setHealthLog] = useState<HealthLogEntry[]>([]);
   const [trafficLog, setTrafficLog] = useState<ProxyTrafficEntry[]>([]);
   const trafficLogRef = useRef<ProxyTrafficEntry[]>([]);
@@ -123,7 +125,7 @@ export function GatewayCard({
   useEffect(() => {
     if (!expanded) return;
     loadHealthLog();
-    if (keys.length === 0 && gateway.isHealthy) {
+    if (keys.length === 0 && gateway.isHealthy && !useDirectToken) {
       loadKeysAndModels();
     }
   }, [expanded]);
@@ -135,12 +137,18 @@ export function GatewayCard({
       setKeys(keysResult);
 
       // Determine which key to use for model fetching
-      const keyToUse = keysResult.find((k) => k.id === selectedKeyId) ?? keysResult[0];
-      if (!selectedKeyId && keysResult.length > 0) {
-        setSelectedKeyId(keysResult[0].id);
+      let keyToUse: string | undefined;
+      if (useDirectToken && directToken) {
+        keyToUse = directToken;
+      } else {
+        const selectedKey = keysResult.find((k) => k.id === selectedKeyId) ?? keysResult[0];
+        keyToUse = selectedKey?.key;
+        if (!selectedKeyId && keysResult.length > 0) {
+          setSelectedKeyId(keysResult[0].id);
+        }
       }
 
-      const modelsResult = await api.fetchModels(gateway.id, keyToUse?.key);
+      const modelsResult = await api.fetchModels(gateway.id, keyToUse);
       setModels(modelsResult);
 
       // Auto-suggest models — pick the "newest" by sorting desc and taking first match
@@ -225,9 +233,9 @@ export function GatewayCard({
       const selectedKey = keys.find((k) => k.id === selectedKeyId);
       const params: ApplyConfigParams = {
         gatewayId: gateway.id,
-        keyId: selectedKey?.id,
-        keyName: selectedKey?.name,
-        keyValue: selectedKey?.key,
+        keyId: useDirectToken ? undefined : selectedKey?.id,
+        keyName: useDirectToken ? "Direct Token" : selectedKey?.name,
+        keyValue: useDirectToken ? directToken : selectedKey?.key,
         claudeModel: claudeModels.length > 0 ? (claudeModel || undefined) : undefined,
         claudeSmallModel: claudeSmallModels.length > 0 ? (claudeSmallModel || undefined) : undefined,
         codexModel: codexModels.length > 0 ? (codexModel || undefined) : undefined,
@@ -397,42 +405,88 @@ export function GatewayCard({
                     )}
 
                     {/* API Keys */}
-                    {keys.length > 0 && (
+                    {/* API Key Section - show always in edit mode, or when keys exist */}
+                    {(editMode || keys.length > 0) && (
                       <div className="space-y-1.5">
-                        <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                          API Key
-                        </label>
-                        <div className="space-y-1">
-                          {keys.map((key) => {
-                            const isSelected = selectedKeyId === key.id;
-                            return (
-                              <button
-                                key={key.id}
-                                onClick={() => setSelectedKeyId(key.id)}
-                                className={`w-full text-left px-3 py-2 rounded-lg border transition-elegant-fast ${
-                                  isSelected
-                                    ? "border-primary/50 bg-primary/8 text-primary"
-                                    : "border-border/50 hover:border-primary/20 hover:bg-secondary/40"
-                                }`}
-                              >
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="flex items-center gap-2 min-w-0">
-                                    <span className={`text-xs font-medium truncate ${isSelected ? 'text-primary' : ''}`}>
-                                      {key.name}
-                                    </span>
-                                    {key.ownerName && (
-                                      <span className="text-[10px] text-muted-foreground shrink-0">@{key.ownerName}</span>
-                                    )}
-                                    <span className="text-[10px] text-muted-foreground font-mono shrink-0">
-                                      {key.key.slice(0, 6)}…{key.key.slice(-3)}
-                                    </span>
-                                  </div>
-                                  {isSelected && <Check className="h-3 w-3 text-primary shrink-0" />}
-                                </div>
-                              </button>
-                            );
-                          })}
+                        <div className="flex items-center justify-between">
+                          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                            API Key
+                          </label>
+                          {editMode && (
+                            <button
+                              onClick={() => setUseDirectToken(!useDirectToken)}
+                              className="text-[10px] text-primary hover:text-primary/80 transition-colors"
+                            >
+                              {useDirectToken ? "Use synced keys" : "Use direct token"}
+                            </button>
+                          )}
                         </div>
+
+                        {useDirectToken ? (
+                          <div className="space-y-1">
+                            <div className="flex gap-2">
+                              <Input
+                                value={directToken}
+                                onChange={(e) => setDirectToken(e.target.value)}
+                                placeholder="Paste gateway token directly..."
+                                className="h-9 text-xs font-mono flex-1"
+                                type="password"
+                                disabled={!editMode}
+                              />
+                              {editMode && directToken && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={loadKeysAndModels}
+                                  disabled={loading}
+                                  className="h-9 px-3 text-xs shrink-0"
+                                >
+                                  {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : "Load Models"}
+                                </Button>
+                              )}
+                            </div>
+                            <p className="text-[10px] text-muted-foreground">
+                              Enter a token from the gateway's Keys panel
+                            </p>
+                          </div>
+                        ) : keys.length > 0 ? (
+                          <div className="space-y-1">
+                            {keys.map((key) => {
+                              const isSelected = selectedKeyId === key.id;
+                              return (
+                                <button
+                                  key={key.id}
+                                  onClick={() => setSelectedKeyId(key.id)}
+                                  className={`w-full text-left px-3 py-2 rounded-lg border transition-elegant-fast ${
+                                    isSelected
+                                      ? "border-primary/50 bg-primary/8 text-primary"
+                                      : "border-border/50 hover:border-primary/20 hover:bg-secondary/40"
+                                  }`}
+                                  disabled={!editMode}
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <span className={`text-xs font-medium truncate ${isSelected ? 'text-primary' : ''}`}>
+                                        {key.name}
+                                      </span>
+                                      {key.ownerName && (
+                                        <span className="text-[10px] text-muted-foreground shrink-0">@{key.ownerName}</span>
+                                      )}
+                                      <span className="text-[10px] text-muted-foreground font-mono shrink-0">
+                                        {key.key.slice(0, 6)}…{key.key.slice(-3)}
+                                      </span>
+                                    </div>
+                                    {isSelected && <Check className="h-3 w-3 text-primary shrink-0" />}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <p className="text-[10px] text-muted-foreground">
+                            No keys available. Use direct token mode instead.
+                          </p>
+                        )}
                       </div>
                     )}
 
@@ -478,7 +532,7 @@ export function GatewayCard({
                           <Button
                             size="sm"
                             onClick={handleDone}
-                            disabled={applying || !editName || !editUrl || !editAuthKey}
+                            disabled={applying || !editName || !editUrl || !editAuthKey || (useDirectToken && !directToken)}
                             className="h-7 px-3 text-xs"
                           >
                             {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
