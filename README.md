@@ -44,13 +44,22 @@ LLM Relay 在本地启动一个 HTTP 代理（`127.0.0.1:18080`），CLI 工具�
 
 ## 安装
 
-### 前置要求
+### 下载预编译包
 
-- **macOS** / **Windows** / **Linux**（跨平台支持）
-- Node.js 18+
-- Rust 工具链
+从 [Releases](https://github.com/xuangong/llm-relay/releases) 页面下载适合你平台的安装包：
 
-### 快速开始
+- **macOS**: `LLM Relay_x.x.x_aarch64.dmg`（Apple Silicon）或 `_x64.dmg`（Intel）
+- **Windows**: `LLM Relay_x.x.x_x64-setup.exe`（NSIS 安装器）
+- **Linux**: `.deb`（Debian/Ubuntu）、`.rpm`（Fedora/RHEL）或 `.AppImage`（通用）
+
+### 从源码构建
+
+详细的构建说明请查看 **[BUILD.md](./BUILD.md)**，包括：
+- 各平台构建步骤
+- 交叉编译指南
+- 常见问题排查
+
+#### 快速开始（开发模式）
 
 ```bash
 git clone <your-repo-url>
@@ -59,13 +68,17 @@ cd llm-relay
 ./dev.sh     # 启动开发服务器（热重载）
 ```
 
-构建生产版本：
+#### 构建生产版本
 
 ```bash
+# 构建当前平台的安装包
+pnpm run tauri build
+
+# 或使用
 pnpm build
 ```
 
-生成物在 `src-tauri/target/release/bundle/`。
+生成物在 `src-tauri/target/release/bundle/`。更多构建选项请查看 [BUILD.md](./BUILD.md)。
 
 ## 使用方法
 
