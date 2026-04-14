@@ -43,7 +43,8 @@ export function UsagePanel() {
         api.getUsageStats(period, gid),
         api.listGateways(),
       ]);
-      setRows(data);
+      // Filter out "unknown" model entries
+      setRows(data.filter((r) => r.model !== "unknown"));
       setGateways(gws.map((g) => ({ id: g.id, name: g.name })));
     } catch (e) {
       console.error(e);

@@ -124,7 +124,10 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
     };
 
     // Extract model name from request JSON body (best-effort)
-    let model = extract_model(&body_bytes).unwrap_or_else(|| "unknown".to_string());
+    let model = extract_model(&body_bytes, &path).unwrap_or_else(|| "unknown".to_string());
+
+    // Skip usage tracking for requests without a body (e.g., GET /models)
+    let should_track_usage = !body_bytes.is_empty();
 
     // Inject stream_options for OpenAI-compatible APIs to get usage data in streaming responses
     // Only inject for OpenAI/compatible APIs, NOT for Anthropic (which doesn't support stream_options)
@@ -228,6 +231,7 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             let db_usage = state.db.clone();
             let gw_usage = gateway_id.clone();
             let model_usage = model.clone();
+            let track_usage = should_track_usage;
             let db_error = state.db.clone();
             let gw_error = gateway_id.clone();
             let path_error = path.clone();
@@ -246,7 +250,7 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                             buffer.extend_from_slice(&chunk);
 
                             // Real-time parse and emit usage updates (for live UI display)
-                            if is_sse {
+                            if is_sse && track_usage {
                                 if let Ok(text) = std::str::from_utf8(&buffer) {
                                     let (inp, out, cr, cc) = parse_sse_tokens_incremental(text);
                                     // Emit event if usage changed (for real-time UI updates)
@@ -282,7 +286,7 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                 }
 
                 // Record usage ONCE at the end (to database, avoiding duplicate counting)
-                if !buffer.is_empty() {
+                if track_usage && !buffer.is_empty() {
                     let (inp, out, cr, cc) = if is_sse {
                         parse_sse_tokens(&buffer)
                     } else {
@@ -351,9 +355,32 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
 }
 
 /// Extract the `model` field from a JSON request body.
-fn extract_model(body: &[u8]) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    v.get("model")?.as_str().map(|s| s.to_string())
+/// Returns None if body is empty, not JSON, or model field doesn't exist.
+fn extract_model(body: &[u8], path: &str) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+
+    // Try to parse JSON and extract model field
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(model_str) = v.get("model").and_then(|m| m.as_str()) {
+            return Some(model_str.to_string());
+        }
+    }
+
+    // Fallback: try to infer from path (e.g., /v1/models/gpt-4/...)
+    if path.contains("/models/") {
+        if let Some(model_part) = path.split("/models/").nth(1) {
+            if let Some(model_name) = model_part.split('/').next() {
+                if !model_name.is_empty() {
+                    log::debug!("Inferred model from path: {}", model_name);
+                    return Some(model_name.to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Inject `stream_options: {include_usage: true}` into OpenAI streaming requests.
