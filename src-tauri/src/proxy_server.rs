@@ -232,26 +232,37 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             let gw_error = gateway_id.clone();
             let path_error = path.clone();
             let start_error = start;
+            let app_handle_usage = state.app_handle.clone();
+            let gw_id_event = gateway_id.clone();
 
             tokio::spawn(async move {
                 let mut buffer = Vec::new();
-                let mut usage_recorded = false;
                 let mut stream_error: Option<String> = None;
+                let mut last_emitted_usage = (0i64, 0i64, 0i64, 0i64);
 
                 while let Some(result) = rx.recv().await {
                     match result {
                         Ok(chunk) => {
                             buffer.extend_from_slice(&chunk);
 
-                            // Try to parse incrementally for SSE streams
-                            if is_sse && !usage_recorded {
-                                // Check if we have enough data to parse usage
+                            // Real-time parse and emit usage updates (for live UI display)
+                            if is_sse {
                                 if let Ok(text) = std::str::from_utf8(&buffer) {
                                     let (inp, out, cr, cc) = parse_sse_tokens_incremental(text);
-                                    if inp > 0 || out > 0 {
-                                        let _ = db_usage.record_usage(&gw_usage, &model_usage, inp, out, cr, cc);
-                                        log::debug!("Usage recorded (streaming): {} in={} out={} model={}", gw_usage, inp, out, model_usage);
-                                        usage_recorded = true;
+                                    // Emit event if usage changed (for real-time UI updates)
+                                    if (inp, out, cr, cc) != last_emitted_usage && (inp > 0 || out > 0) {
+                                        if let Some(window) = app_handle_usage.get_webview_window("main") {
+                                            let payload = serde_json::json!({
+                                                "gatewayId": gw_id_event,
+                                                "model": model_usage,
+                                                "inputTokens": inp,
+                                                "outputTokens": out,
+                                                "cacheReadTokens": cr,
+                                                "cacheCreationTokens": cc,
+                                            });
+                                            let _ = window.emit::<serde_json::Value>("usage-update", payload);
+                                        }
+                                        last_emitted_usage = (inp, out, cr, cc);
                                     }
                                 }
                             }
@@ -270,8 +281,8 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                     log::warn!("Stream error on {}: {}", path_error, err_msg);
                 }
 
-                // Final attempt for non-streaming or if streaming didn't capture usage
-                if !usage_recorded && !buffer.is_empty() {
+                // Record usage ONCE at the end (to database, avoiding duplicate counting)
+                if !buffer.is_empty() {
                     let (inp, out, cr, cc) = if is_sse {
                         parse_sse_tokens(&buffer)
                     } else {
@@ -279,7 +290,7 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                     };
                     if inp > 0 || out > 0 {
                         let _ = db_usage.record_usage(&gw_usage, &model_usage, inp, out, cr, cc);
-                        log::debug!("Usage recorded (final): {} in={} out={} model={}", gw_usage, inp, out, model_usage);
+                        log::debug!("Usage recorded to DB: {} in={} out={} cr={} cc={} model={}", gw_usage, inp, out, cr, cc, model_usage);
                     }
                 }
             });

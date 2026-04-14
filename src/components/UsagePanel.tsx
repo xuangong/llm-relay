@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { BarChart3, RefreshCw } from "lucide-react";
+import { BarChart3, RefreshCw, Activity } from "lucide-react";
 import { UsageSummary, UsagePeriod } from "@/lib/api";
 import * as api from "@/lib/api";
 
@@ -17,12 +17,23 @@ function fmt(n: number): string {
   return n.toString();
 }
 
+interface LiveUsage {
+  gatewayId: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  timestamp: number;
+}
+
 export function UsagePanel() {
   const [period, setPeriod] = useState<UsagePeriod>("today");
   const [rows, setRows] = useState<UsageSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [filterGateway, setFilterGateway] = useState<string>("all");
   const [gateways, setGateways] = useState<{ id: string; name: string }[]>([]);
+  const [liveUsage, setLiveUsage] = useState<LiveUsage | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,6 +62,27 @@ export function UsagePanel() {
     });
     return () => { unlisten.then((fn) => fn()); };
   }, [load]);
+
+  // Listen for real-time usage updates during streaming
+  useEffect(() => {
+    const appWindow = getCurrentWebviewWindow();
+    const unlisten = appWindow.listen<LiveUsage>("usage-update", (event) => {
+      setLiveUsage({
+        ...event.payload,
+        timestamp: Date.now()
+      });
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  // Clear live usage after 10 seconds of inactivity
+  useEffect(() => {
+    if (!liveUsage) return;
+    const timer = setTimeout(() => {
+      setLiveUsage(null);
+    }, 10000);
+    return () => clearTimeout(timer);
+  }, [liveUsage]);
 
   const totals = rows.reduce(
     (acc, r) => ({
@@ -103,6 +135,18 @@ export function UsagePanel() {
         )}
 
         <div className="flex-1" />
+
+        {/* Real-time token usage indicator */}
+        {liveUsage && (
+          <div className="flex items-center gap-2 px-2 py-0.5 rounded bg-primary/10 border border-primary/20">
+            <Activity className="h-3 w-3 text-primary animate-pulse" />
+            <span className="text-xs text-foreground/80 font-mono">
+              <span className="text-blue-400">↑</span> {fmt(liveUsage.inputTokens)} in{" "}
+              <span className="text-green-400">↓</span> {fmt(liveUsage.outputTokens)} out
+            </span>
+          </div>
+        )}
+
         {rows.length > 0 && (
           <span className="text-xs text-muted-foreground">
             {totals.requests} req · {fmt(totals.inputTokens + totals.outputTokens)} tokens
