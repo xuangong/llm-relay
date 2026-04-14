@@ -93,7 +93,7 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
               <Input
                 id="authKey"
                 type="password"
-                placeholder="ADMIN_KEY or User Key"
+                placeholder="ADMIN_KEY, Gateway Token, or User Key"
                 value={authKey}
                 onChange={(e) => setAuthKey(e.target.value)}
                 required
