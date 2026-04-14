@@ -182,15 +182,16 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             // For errors, read the response body to get detailed error message
             if is_any_error {
                 let error_body = resp.text().await.unwrap_or_else(|_| format!("HTTP {}", status_code));
+
+                // Include model in error detail for better debugging
                 let error_detail = if error_body.len() > 500 {
-                    // Truncate very long error messages but keep useful info
-                    format!("{}...", &error_body[..500])
+                    format!("[model:{}] {}...", model, &error_body[..500])
                 } else {
-                    error_body.clone()
+                    format!("[model:{}] {}", model, error_body)
                 };
 
                 let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, Some(&error_detail));
-                log::warn!("Proxy error {} → {}: {}", target_url, status_code, error_detail);
+                log::warn!("Proxy error {} → {} (model:{}): {}", target_url, status_code, model, error_body);
 
                 if is_server_error {
                     let count = state.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
