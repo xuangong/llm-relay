@@ -1,6 +1,6 @@
 [package]
 name = "llm-relay"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 
 [lib]
@@ -28,3 +28,4 @@ dirs = "5"
 chrono = "0.4"
 hostname = "0.4"
 tauri-plugin-autostart = "2"
+open = "5"

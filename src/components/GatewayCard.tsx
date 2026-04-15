@@ -80,8 +80,6 @@ export function GatewayCard({
   const [editName, setEditName] = useState(gateway.name);
   const [editUrl, setEditUrl] = useState(gateway.url);
   const [editAuthKey, setEditAuthKey] = useState(gateway.authKey);
-  const [useDirectToken, setUseDirectToken] = useState(false);
-  const [directToken, setDirectToken] = useState("");
   const [healthLog, setHealthLog] = useState<HealthLogEntry[]>([]);
   const [trafficLog, setTrafficLog] = useState<ProxyTrafficEntry[]>([]);
   const trafficLogRef = useRef<ProxyTrafficEntry[]>([]);
@@ -125,7 +123,7 @@ export function GatewayCard({
   useEffect(() => {
     if (!expanded) return;
     loadHealthLog();
-    if (keys.length === 0 && gateway.isHealthy && !useDirectToken) {
+    if (keys.length === 0 && gateway.isHealthy) {
       loadKeysAndModels();
     }
   }, [expanded]);
@@ -138,14 +136,13 @@ export function GatewayCard({
 
       // Determine which key to use for model fetching
       let keyToUse: string | undefined;
-      if (useDirectToken && directToken) {
-        keyToUse = directToken;
-      } else {
-        const selectedKey = keysResult.find((k) => k.id === selectedKeyId) ?? keysResult[0];
-        keyToUse = selectedKey?.key;
-        if (!selectedKeyId && keysResult.length > 0) {
-          setSelectedKeyId(keysResult[0].id);
-        }
+      // Match by activeKeyId first, then by gateway.authKey value, then fallback to first
+      const selectedKey = keysResult.find((k) => k.id === selectedKeyId)
+        ?? keysResult.find((k) => k.key === gateway.authKey)
+        ?? keysResult[0];
+      keyToUse = selectedKey?.key;
+      if (selectedKey && selectedKeyId !== selectedKey.id) {
+        setSelectedKeyId(selectedKey.id);
       }
 
       const modelsResult = await api.fetchModels(gateway.id, keyToUse);
@@ -233,9 +230,9 @@ export function GatewayCard({
       const selectedKey = keys.find((k) => k.id === selectedKeyId);
       const params: ApplyConfigParams = {
         gatewayId: gateway.id,
-        keyId: useDirectToken ? undefined : selectedKey?.id,
-        keyName: useDirectToken ? "Direct Token" : selectedKey?.name,
-        keyValue: useDirectToken ? directToken : selectedKey?.key,
+        keyId: selectedKey?.id,
+        keyName: selectedKey?.name,
+        keyValue: selectedKey?.key,
         claudeModel: claudeModels.length > 0 ? (claudeModel || undefined) : undefined,
         claudeSmallModel: claudeSmallModels.length > 0 ? (claudeSmallModel || undefined) : undefined,
         codexModel: codexModels.length > 0 ? (codexModel || undefined) : undefined,
@@ -336,6 +333,11 @@ export function GatewayCard({
                 </span>
               )}
               <span className="text-[11px] text-muted-foreground font-mono truncate">{gateway.url}</span>
+              {gateway.userName && (
+                <span className="text-[10px] text-muted-foreground/60 truncate">
+                  ({gateway.userName})
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -394,13 +396,20 @@ export function GatewayCard({
                         <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                           Auth Token
                         </label>
-                        <Input
-                          value={editAuthKey}
-                          onChange={(e) => setEditAuthKey(e.target.value)}
-                          className="h-7 font-mono text-xs"
-                          placeholder="Gateway auth token"
-                          type="password"
-                        />
+                        {gateway.userId ? (
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <span>Signed in as <span className="font-medium text-foreground">{gateway.userName}</span></span>
+                            <span className="font-mono text-[10px]">...{gateway.authKey.slice(-4)}</span>
+                          </div>
+                        ) : (
+                          <Input
+                            value={editAuthKey}
+                            onChange={(e) => setEditAuthKey(e.target.value)}
+                            className="h-7 font-mono text-xs"
+                            placeholder="Gateway auth token"
+                            type="password"
+                          />
+                        )}
                       </div>
                     )}
 
@@ -412,44 +421,9 @@ export function GatewayCard({
                           <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                             API Key
                           </label>
-                          {editMode && (
-                            <button
-                              onClick={() => setUseDirectToken(!useDirectToken)}
-                              className="text-[10px] text-primary hover:text-primary/80 transition-colors"
-                            >
-                              {useDirectToken ? "Use synced keys" : "Use direct token"}
-                            </button>
-                          )}
                         </div>
 
-                        {useDirectToken ? (
-                          <div className="space-y-1">
-                            <div className="flex gap-2">
-                              <Input
-                                value={directToken}
-                                onChange={(e) => setDirectToken(e.target.value)}
-                                placeholder="Paste gateway token directly..."
-                                className="h-9 text-xs font-mono flex-1"
-                                type="password"
-                                disabled={!editMode}
-                              />
-                              {editMode && directToken && (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={loadKeysAndModels}
-                                  disabled={loading}
-                                  className="h-9 px-3 text-xs shrink-0"
-                                >
-                                  {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : "Load Models"}
-                                </Button>
-                              )}
-                            </div>
-                            <p className="text-[10px] text-muted-foreground">
-                              Enter a token from the gateway's Keys panel
-                            </p>
-                          </div>
-                        ) : keys.length > 0 ? (
+                        {keys.length > 0 ? (
                           <div className="space-y-1">
                             {keys.map((key) => {
                               const isSelected = selectedKeyId === key.id;
@@ -484,7 +458,7 @@ export function GatewayCard({
                           </div>
                         ) : (
                           <p className="text-[10px] text-muted-foreground">
-                            No keys available. Use direct token mode instead.
+                            No keys available.
                           </p>
                         )}
                       </div>
@@ -532,7 +506,7 @@ export function GatewayCard({
                           <Button
                             size="sm"
                             onClick={handleDone}
-                            disabled={applying || !editName || !editUrl || !editAuthKey || (useDirectToken && !directToken)}
+                            disabled={applying || !editName || !editUrl || !editAuthKey}
                             className="h-7 px-3 text-xs"
                           >
                             {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}

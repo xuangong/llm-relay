@@ -2,7 +2,7 @@ use tauri::State;
 
 use crate::config_writer;
 use crate::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthLogEntry, TrafficLogEntry, UsageSummary};
-use crate::gateway::{self, ApiKey, LoginResult, ModelList};
+use crate::gateway::{self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList};
 use crate::AppState;
 
 // ─── Gateway CRUD ───
@@ -14,6 +14,9 @@ pub async fn add_gateway(
     name: String,
     url: String,
     auth_key: String,
+    session_token: Option<String>,
+    user_id: Option<String>,
+    user_name: Option<String>,
 ) -> Result<Gateway, String> {
     let gw = Gateway {
         id: uuid::Uuid::new_v4().to_string(),
@@ -21,7 +24,9 @@ pub async fn add_gateway(
         url,
         auth_key,
         is_admin: false,
-        session_token: None,
+        session_token,
+        user_id,
+        user_name,
         sort_order: 999,
         created_at: chrono::Utc::now().to_rfc3339(),
     };
@@ -414,4 +419,40 @@ pub async fn get_usage_stats(
         .db
         .get_usage_stats(gateway_id.as_deref(), &period)
         .map_err(|e| e.to_string())
+}
+
+// ─── Device Authorization Flow ───
+
+#[tauri::command]
+pub async fn start_device_login(url: String) -> Result<DeviceCodeResponse, String> {
+    let result = gateway::request_device_code(&url)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn poll_device_login(
+    url: String,
+    device_code: String,
+) -> Result<DevicePollResponse, String> {
+    let result = gateway::poll_device_code(&url, &device_code)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn fetch_keys_with_token(
+    url: String,
+    token: String,
+) -> Result<Vec<ApiKey>, String> {
+    gateway::fetch_keys(&url, &token)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_url(url: String) -> Result<(), String> {
+    open::that(&url).map_err(|e| e.to_string())
 }

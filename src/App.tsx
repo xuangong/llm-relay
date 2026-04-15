@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import * as api from "@/lib/api";
 import type { GatewayWithHealth, ActiveConfig } from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
-import { Plus, RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3 } from "lucide-react";
+import { Plus, RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle } from "lucide-react";
 
 function App() {
   const [gateways, setGateways] = useState<GatewayWithHealth[]>([]);
@@ -234,6 +234,16 @@ function App() {
                 className="scale-75"
               />
             </div>
+
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => api.openUrl("https://token.xianliao.de5.net/guide")}
+              className="h-7 w-7 transition-elegant hover:bg-secondary"
+              title="How to Use"
+            >
+              <HelpCircle className="h-3.5 w-3.5" />
+            </Button>
 
             <Button
               variant="ghost"

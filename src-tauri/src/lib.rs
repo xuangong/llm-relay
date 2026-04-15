@@ -120,6 +120,10 @@ pub fn run() {
             commands::set_autostart,
             commands::get_traffic_logs,
             commands::get_usage_stats,
+            commands::start_device_login,
+            commands::poll_device_login,
+            commands::fetch_keys_with_token,
+            commands::open_url,
         ]);
 
     let app = builder

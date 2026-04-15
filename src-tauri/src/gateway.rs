@@ -130,3 +130,68 @@ pub async fn health_check(url: &str, auth: &str) -> (bool, Option<i64>, Option<i
     }
     (false, None, None)
 }
+
+// ─── Device Authorization Flow ───
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceCodeResponse {
+    #[serde(alias = "device_code")]
+    pub device_code: String,
+    #[serde(alias = "user_code")]
+    pub user_code: String,
+    #[serde(alias = "expires_in")]
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicePollResponse {
+    pub status: String,
+    #[serde(alias = "session_token")]
+    pub session_token: Option<String>,
+    #[serde(alias = "user_id")]
+    pub user_id: Option<String>,
+    #[serde(alias = "user_name")]
+    pub user_name: Option<String>,
+}
+
+/// Request a device code from the gateway. POST /auth/device/code (no auth required).
+pub async fn request_device_code(url: &str) -> Result<DeviceCodeResponse, AppError> {
+    let client = reqwest::Client::new();
+    let base = url.trim_end_matches('/');
+    let resp = client
+        .post(format!("{base}/auth/device/code"))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Http(format!("Device code request failed ({status}): {body}")));
+    }
+
+    let result: DeviceCodeResponse = resp.json().await?;
+    Ok(result)
+}
+
+/// Poll for device code verification. POST /auth/device/poll (no auth required).
+pub async fn poll_device_code(url: &str, device_code: &str) -> Result<DevicePollResponse, AppError> {
+    let client = reqwest::Client::new();
+    let base = url.trim_end_matches('/');
+    let resp = client
+        .post(format!("{base}/auth/device/poll"))
+        .json(&serde_json::json!({ "device_code": device_code }))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Http(format!("Device poll failed ({status}): {body}")));
+    }
+
+    let result: DevicePollResponse = resp.json().await?;
+    Ok(result)
+}

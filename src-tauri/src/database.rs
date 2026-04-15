@@ -17,6 +17,8 @@ pub struct Gateway {
     pub auth_key: String,
     pub is_admin: bool,
     pub session_token: Option<String>,
+    pub user_id: Option<String>,
+    pub user_name: Option<String>,
     pub sort_order: i32,
     pub created_at: String,
 }
@@ -204,6 +206,15 @@ impl Database {
             conn.execute_batch("PRAGMA user_version = 4")?;
         }
 
+        if version < 5 {
+            conn.execute_batch(
+                "ALTER TABLE gateways ADD COLUMN user_id TEXT;
+                 ALTER TABLE gateways ADD COLUMN user_name TEXT;
+                ",
+            )?;
+            conn.execute_batch("PRAGMA user_version = 5")?;
+        }
+
         Ok(Database {
             conn: Mutex::new(conn),
         })
@@ -214,8 +225,8 @@ impl Database {
     pub fn add_gateway(&self, gw: &Gateway) -> Result<(), AppError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO gateways (id, name, url, auth_key, is_admin, session_token, sort_order, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO gateways (id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 gw.id,
                 gw.name,
@@ -223,6 +234,8 @@ impl Database {
                 gw.auth_key,
                 gw.is_admin as i32,
                 gw.session_token,
+                gw.user_id,
+                gw.user_name,
                 gw.sort_order,
                 gw.created_at,
             ],
@@ -233,7 +246,7 @@ impl Database {
     pub fn list_gateways(&self) -> Result<Vec<Gateway>, AppError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, url, auth_key, is_admin, session_token, sort_order, created_at
+            "SELECT id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at
              FROM gateways ORDER BY sort_order ASC, created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -244,8 +257,10 @@ impl Database {
                 auth_key: row.get(3)?,
                 is_admin: row.get::<_, i32>(4)? != 0,
                 session_token: row.get(5)?,
-                sort_order: row.get(6)?,
-                created_at: row.get(7)?,
+                user_id: row.get(6)?,
+                user_name: row.get(7)?,
+                sort_order: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -254,7 +269,7 @@ impl Database {
     pub fn get_gateway(&self, id: &str) -> Result<Option<Gateway>, AppError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, url, auth_key, is_admin, session_token, sort_order, created_at
+            "SELECT id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at
              FROM gateways WHERE id = ?1",
         )?;
         let result = stmt.query_row(params![id], |row| {
@@ -265,8 +280,10 @@ impl Database {
                 auth_key: row.get(3)?,
                 is_admin: row.get::<_, i32>(4)? != 0,
                 session_token: row.get(5)?,
-                sort_order: row.get(6)?,
-                created_at: row.get(7)?,
+                user_id: row.get(6)?,
+                user_name: row.get(7)?,
+                sort_order: row.get(8)?,
+                created_at: row.get(9)?,
             })
         });
         match result {

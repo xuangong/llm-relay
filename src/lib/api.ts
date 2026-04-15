@@ -9,6 +9,8 @@ export interface Gateway {
   authKey: string;
   isAdmin: boolean;
   sessionToken: string | null;
+  userId: string | null;
+  userName: string | null;
   sortOrder: number;
   createdAt: string;
 }
@@ -20,6 +22,8 @@ export interface GatewayWithHealth {
   authKey: string;
   isAdmin: boolean;
   sessionToken: string | null;
+  userId: string | null;
+  userName: string | null;
   sortOrder: number;
   createdAt: string;
   isHealthy: boolean;
@@ -111,8 +115,17 @@ export interface UsageSummary {
 
 // ─── Gateway CRUD ───
 
-export const addGateway = (name: string, url: string, authKey: string) =>
-  invoke<Gateway>("add_gateway", { name, url, authKey });
+export interface AddGatewayParams {
+  name: string;
+  url: string;
+  authKey: string;
+  sessionToken?: string;
+  userId?: string;
+  userName?: string;
+}
+
+export const addGateway = (params: AddGatewayParams) =>
+  invoke<Gateway>("add_gateway", params as unknown as Record<string, unknown>);
 
 export const listGateways = () =>
   invoke<GatewayWithHealth[]>("list_gateways");
@@ -208,3 +221,31 @@ export const updateTrayMenu = () =>
 export async function testHeartbeat(): Promise<string> {
   return invoke("test_heartbeat");
 }
+
+// ─── Device Authorization Flow ───
+
+export interface DeviceCodeResponse {
+  deviceCode: string;
+  userCode: string;
+  expiresIn: number;
+  interval: number;
+}
+
+export interface DevicePollResponse {
+  status: "pending" | "complete" | "expired";
+  sessionToken?: string;
+  userId?: string;
+  userName?: string;
+}
+
+export const startDeviceLogin = (url: string) =>
+  invoke<DeviceCodeResponse>("start_device_login", { url });
+
+export const pollDeviceLogin = (url: string, deviceCode: string) =>
+  invoke<DevicePollResponse>("poll_device_login", { url, deviceCode });
+
+export const fetchKeysWithToken = (url: string, token: string) =>
+  invoke<ApiKey[]>("fetch_keys_with_token", { url, token });
+
+export const openUrl = (url: string) =>
+  invoke<void>("open_url", { url });
