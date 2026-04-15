@@ -19,6 +19,7 @@ import {
   type ApiKey,
   type DeviceCodeResponse,
 } from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
 import { Loader2, Check, Copy, ExternalLink, KeyRound } from "lucide-react";
 
 interface AddGatewayDialogProps {
@@ -30,6 +31,7 @@ interface AddGatewayDialogProps {
 type Step = "url" | "device" | "keys";
 
 export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDialogProps) {
+  const { t } = useI18n();
   const [step, setStep] = useState<Step>("url");
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -201,11 +203,11 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[425px]" onPointerDownOutside={(e) => e.preventDefault()} onEscapeKeyDown={(e) => e.preventDefault()}>
         <DialogHeader>
-          <DialogTitle>Add Gateway</DialogTitle>
+          <DialogTitle>{t('addDialog.title')}</DialogTitle>
           <DialogDescription>
-            {step === "url" && "Enter the gateway URL to sign in."}
-            {step === "device" && "Enter the code on the gateway website to authorize this app."}
-            {step === "keys" && "Select the API key to use for this gateway."}
+            {step === "url" && t('addDialog.urlStep')}
+            {step === "device" && t('addDialog.deviceStep')}
+            {step === "keys" && t('addDialog.keysStep')}
           </DialogDescription>
         </DialogHeader>
 
@@ -214,10 +216,10 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
           <form onSubmit={handleStartLogin}>
             <div className="grid gap-4 py-4">
               <div className="grid gap-2">
-                <Label htmlFor="url">Gateway URL</Label>
+                <Label htmlFor="url">{t('addDialog.gatewayUrl')}</Label>
                 <Input
                   id="url"
-                  placeholder="https://gateway.example.com"
+                  placeholder={t('addDialog.urlPlaceholder')}
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                   required
@@ -228,11 +230,11 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-                Cancel
+                {t('common.cancel')}
               </Button>
               <Button type="submit" disabled={loading || !url}>
                 {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Sign In
+                {t('common.signIn')}
               </Button>
             </DialogFooter>
           </form>
@@ -251,11 +253,11 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
                 </Button>
               </div>
               <p className="text-sm text-muted-foreground text-center">
-                Code copied to clipboard. Enter it on the gateway website.
+                {t('addDialog.codeCopied')}
               </p>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Waiting for authorization...
+                {t('addDialog.waitingAuth')}
               </div>
               <Button
                 variant="outline"
@@ -267,7 +269,7 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
                 }}
               >
                 <ExternalLink className="mr-2 h-3 w-3" />
-                Open Gateway
+                {t('addDialog.openGateway')}
               </Button>
             </div>
             {error && <p className="text-sm text-destructive mt-4 text-center">{error}</p>}
@@ -283,7 +285,7 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
                   setError("");
                 }}
               >
-                Back
+                {t('common.back')}
               </Button>
             </DialogFooter>
           </div>
@@ -295,14 +297,14 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
             {loadingKeys ? (
               <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Loading keys...
+                {t('addDialog.loadingKeys')}
               </div>
             ) : keys.length === 0 ? (
               <div className="text-center py-8">
                 <KeyRound className="h-8 w-8 mx-auto text-muted-foreground/30 mb-3" />
-                <p className="text-sm text-muted-foreground">No API keys found.</p>
+                <p className="text-sm text-muted-foreground">{t('addDialog.noKeys')}</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Create an API key on the gateway dashboard first.
+                  {t('addDialog.noKeysHint')}
                 </p>
               </div>
             ) : (
@@ -311,13 +313,13 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
                   <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-500/10 border border-green-500/20">
                     <Check className="h-3.5 w-3.5 text-green-500 shrink-0" />
                     <span className="text-xs text-green-700 dark:text-green-400">
-                      Signed in as <span className="font-semibold">{userName}</span>
+                      {t('addDialog.signedInAs')} <span className="font-semibold">{userName}</span>
                     </span>
                   </div>
                 )}
                 <div>
                   <label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2 block">
-                    Select an API Key
+                    {t('addDialog.selectKey')}
                   </label>
                   <div className="grid gap-1.5 max-h-[200px] overflow-y-auto">
                     {keys.map((key) => {
@@ -356,11 +358,11 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
             {error && <p className="text-sm text-destructive mt-2">{error}</p>}
             <DialogFooter className="mt-4">
               <Button variant="outline" onClick={() => onOpenChange(false)}>
-                Cancel
+                {t('common.cancel')}
               </Button>
               <Button onClick={handleSave} disabled={loading || !selectedKeyId}>
                 {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Add Gateway
+                {t('addDialog.addGateway')}
               </Button>
             </DialogFooter>
           </div>

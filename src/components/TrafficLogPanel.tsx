@@ -3,6 +3,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { RefreshCw, AlertTriangle, ChevronDown } from "lucide-react";
 import { TrafficLogEntry } from "@/lib/api";
 import * as api from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
 
 interface TrafficLogPanelProps {
   filterGateway: string;
@@ -10,6 +11,7 @@ interface TrafficLogPanelProps {
 }
 
 export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPanelProps) {
+  const { t } = useI18n();
   const [logs, setLogs] = useState<TrafficLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [gateways, setGateways] = useState<{ id: string; name: string }[]>([]);
@@ -69,10 +71,10 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
   const formatDate = (iso: string) => {
     const d = new Date(iso);
     const now = new Date();
-    if (d.toDateString() === now.toDateString()) return "Today";
+    if (d.toDateString() === now.toDateString()) return t('traffic.today');
     const yesterday = new Date(now);
     yesterday.setDate(yesterday.getDate() - 1);
-    if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
+    if (d.toDateString() === yesterday.toDateString()) return t('traffic.yesterday');
     return d.toLocaleDateString([], { month: "short", day: "numeric" });
   };
 
@@ -84,8 +86,8 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-4 py-2 border-b border-border/40 bg-card/50 shrink-0">
         <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
-        <span className="text-xs font-semibold text-foreground/80">Anomalous Traffic</span>
-        <span className="text-xs text-muted-foreground">(last 24h)</span>
+        <span className="text-xs font-semibold text-foreground/80">{t('traffic.title')}</span>
+        <span className="text-xs text-muted-foreground">{t('traffic.last24h')}</span>
 
         {gateways.length > 1 && (
           <select
@@ -93,7 +95,7 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
             onChange={(e) => onFilterChange(e.target.value)}
             className="ml-2 text-xs bg-background border border-border/60 rounded px-2 py-0.5 text-foreground"
           >
-            <option value="all">All gateways</option>
+            <option value="all">{t('traffic.allGateways')}</option>
             {gateways.map((g) => (
               <option key={g.id} value={g.id}>{g.name}</option>
             ))}
@@ -102,7 +104,7 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
 
         <div className="flex-1" />
         {logs.length > 0 && (
-          <span className="text-xs text-muted-foreground">{logs.length} entries</span>
+          <span className="text-xs text-muted-foreground">{t('traffic.entries', { n: String(logs.length) })}</span>
         )}
         <button
           onClick={load}
@@ -118,20 +120,20 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
         {logs.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground/40">
             <AlertTriangle className="h-8 w-8" />
-            <p className="text-xs">No anomalous traffic in the last 24h</p>
+            <p className="text-xs">{t('traffic.noTraffic')}</p>
           </div>
         ) : (
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-card border-b border-border/40 z-10">
               <tr className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                <th className="text-left px-4 py-1.5 w-24">Time</th>
-                <th className="text-left px-2 py-1.5 w-16">Status</th>
-                <th className="text-left px-2 py-1.5 w-20">Latency</th>
+                <th className="text-left px-4 py-1.5 w-24">{t('traffic.time')}</th>
+                <th className="text-left px-2 py-1.5 w-16">{t('traffic.status')}</th>
+                <th className="text-left px-2 py-1.5 w-20">{t('traffic.latency')}</th>
                 {filterGateway === "all" && (
-                  <th className="text-left px-2 py-1.5 w-28">Gateway</th>
+                  <th className="text-left px-2 py-1.5 w-28">{t('traffic.gateway')}</th>
                 )}
-                <th className="text-left px-2 py-1.5">Path</th>
-                <th className="text-left px-2 py-1.5">Detail</th>
+                <th className="text-left px-2 py-1.5">{t('traffic.path')}</th>
+                <th className="text-left px-2 py-1.5">{t('traffic.detail')}</th>
               </tr>
             </thead>
             <tbody>
@@ -191,7 +193,7 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
                       <tr key={`detail-${entry.id}`} className={statusBg(entry.status)}>
                         <td colSpan={filterGateway === "all" ? 6 : 5} className="px-4 py-2 bg-secondary/5">
                           <div className="text-xs space-y-1">
-                            <div className="font-semibold text-foreground/80">Error Detail:</div>
+                            <div className="font-semibold text-foreground/80">{t('traffic.errorDetail')}</div>
                             <div className="font-mono text-muted-foreground whitespace-pre-wrap break-all bg-background/50 p-2 rounded border border-border/40">
                               {entry.errorDetail}
                             </div>

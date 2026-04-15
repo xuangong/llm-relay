@@ -21,6 +21,7 @@ import {
 } from "@/lib/api";
 import * as api from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
+import { useI18n } from "@/lib/i18n";
 
 interface ProxyTrafficEntry {
   path: string;
@@ -66,6 +67,7 @@ export function GatewayCard({
   onDelete,
   onApplied,
 }: GatewayCardProps) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(isActive);
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [models, setModels] = useState<ModelList | null>(null);
@@ -329,7 +331,7 @@ export function GatewayCard({
               <span className="font-medium text-sm truncate">{gateway.name}</span>
               {isActive && (
                 <span className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-primary text-primary-foreground">
-                  in use
+                  {t('gateway.inUse')}
                 </span>
               )}
               <span className="text-[11px] text-muted-foreground font-mono truncate">{gateway.url}</span>
@@ -351,7 +353,7 @@ export function GatewayCard({
           </div>
         ) : (
           <span className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-destructive/15 text-destructive border border-destructive/25">
-            offline
+            {t('gateway.offline')}
           </span>
         )}
 
@@ -386,7 +388,7 @@ export function GatewayCard({
                 {loading ? (
                   <div className="flex items-center justify-center py-5">
                     <Loader2 className="h-4 w-4 animate-spin text-primary mr-2" />
-                    <span className="text-xs text-muted-foreground">Loading...</span>
+                    <span className="text-xs text-muted-foreground">{t('common.loading')}</span>
                   </div>
                 ) : (
                   <>
@@ -394,11 +396,11 @@ export function GatewayCard({
                     {editMode && (
                       <div className="space-y-1.5 pb-2 border-b border-border/30">
                         <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                          Auth Token
+                          {t('gateway.authToken')}
                         </label>
                         {gateway.userId ? (
                           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                            <span>Signed in as <span className="font-medium text-foreground">{gateway.userName}</span></span>
+                            <span>{t('gateway.signedInAs')} <span className="font-medium text-foreground">{gateway.userName}</span></span>
                             <span className="font-mono text-[10px]">...{gateway.authKey.slice(-4)}</span>
                           </div>
                         ) : (
@@ -406,7 +408,7 @@ export function GatewayCard({
                             value={editAuthKey}
                             onChange={(e) => setEditAuthKey(e.target.value)}
                             className="h-7 font-mono text-xs"
-                            placeholder="Gateway auth token"
+                            placeholder={t('gateway.gatewayAuthToken')}
                             type="password"
                           />
                         )}
@@ -419,7 +421,7 @@ export function GatewayCard({
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between">
                           <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                            API Key
+                            {t('gateway.apiKey')}
                           </label>
                         </div>
 
@@ -458,7 +460,7 @@ export function GatewayCard({
                           </div>
                         ) : (
                           <p className="text-[10px] text-muted-foreground">
-                            No keys available.
+                            {t('gateway.noKeys')}
                           </p>
                         )}
                       </div>
@@ -478,13 +480,13 @@ export function GatewayCard({
                     {allModels.length > 0 && (
                       <div className="space-y-1.5">
                         <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                          Models
+                          {t('gateway.models')}
                         </label>
                         <div className="grid grid-cols-2 gap-2">
-                          <ModelSelect label="Claude" value={claudeModel} onChange={setClaudeModel} models={claudeModels} disabled={!editMode} />
-                          <ModelSelect label="Claude Small" value={claudeSmallModel} onChange={setClaudeSmallModel} models={claudeSmallModels} disabled={!editMode} />
-                          <ModelSelect label="Codex" value={codexModel} onChange={setCodexModel} models={codexModels} disabled={!editMode} />
-                          <ModelSelect label="Gemini" value={geminiModel} onChange={setGeminiModel} models={geminiModels} disabled={!editMode} />
+                          <ModelSelect label={t('models.claude')} value={claudeModel} onChange={setClaudeModel} models={claudeModels} disabled={!editMode} noModelsText={t('gateway.noModels')} />
+                          <ModelSelect label={t('models.claudeSmall')} value={claudeSmallModel} onChange={setClaudeSmallModel} models={claudeSmallModels} disabled={!editMode} noModelsText={t('gateway.noModels')} />
+                          <ModelSelect label={t('models.codex')} value={codexModel} onChange={setCodexModel} models={codexModels} disabled={!editMode} noModelsText={t('gateway.noModels')} />
+                          <ModelSelect label={t('models.gemini')} value={geminiModel} onChange={setGeminiModel} models={geminiModels} disabled={!editMode} noModelsText={t('gateway.noModels')} />
                         </div>
                       </div>
                     )}
@@ -501,7 +503,7 @@ export function GatewayCard({
                             className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
                           >
                             <X className="h-3 w-3 mr-1" />
-                            Cancel
+                            {t('common.cancel')}
                           </Button>
                           <Button
                             size="sm"
@@ -510,7 +512,7 @@ export function GatewayCard({
                             className="h-7 px-3 text-xs"
                           >
                             {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
-                            Done
+                            {t('common.done')}
                           </Button>
                         </>
                       ) : (
@@ -522,7 +524,7 @@ export function GatewayCard({
                             className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
                           >
                             <Trash2 className="h-3 w-3 mr-1" />
-                            Remove
+                            {t('common.remove')}
                           </Button>
                           <Button
                             size="sm"
@@ -531,7 +533,7 @@ export function GatewayCard({
                             className="h-7 px-3 text-xs"
                           >
                             {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
-                            {isActive ? "In Use" : "Use"}
+                            {isActive ? t('gateway.inUse') : t('common.use')}
                           </Button>
                         </>
                       )}
@@ -548,6 +550,7 @@ export function GatewayCard({
 }
 
 function HealthSparkline({ log }: { log: HealthLogEntry[] }) {
+  const { t } = useI18n();
   if (log.length === 0) return null;
 
   // Sort oldest → newest, show all available checks
@@ -574,10 +577,10 @@ function HealthSparkline({ log }: { log: HealthLogEntry[] }) {
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
         <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Health Monitor
+          {t('gateway.healthMonitor')}
         </label>
         <span className="text-[10px] text-muted-foreground">
-          {uptimePct}% uptime · avg {avgLatency}ms · {totalChecks} checks
+          {t('gateway.uptimeStats', { pct: String(uptimePct), ms: String(avgLatency), n: String(totalChecks) })}
         </span>
       </div>
       <div className="flex items-end gap-px h-10 bg-secondary/20 rounded px-1 py-1">
@@ -596,20 +599,21 @@ function HealthSparkline({ log }: { log: HealthLogEntry[] }) {
               key={i}
               className={`flex-1 rounded-sm transition-colors cursor-default ${color}`}
               style={{ height: `${heightPx}px` }}
-              title={check.isHealthy ? `${time} · ${check.latencyMs}ms` : `${time} · DOWN`}
+              title={check.isHealthy ? `${time} · ${check.latencyMs}ms` : `${time} · ${t('gateway.down')}`}
             />
           );
         })}
       </div>
       <div className="flex justify-between text-[9px] text-muted-foreground/60 px-1">
         <span>{oldestLabel}</span>
-        <span>now</span>
+        <span>{t('gateway.now')}</span>
       </div>
     </div>
   );
 }
 
 function TrafficMonitor({ log }: { log: ProxyTrafficEntry[] }) {
+  const { t } = useI18n();
   if (log.length === 0) return null;
 
   const recent = log.slice(0, 30);
@@ -622,12 +626,12 @@ function TrafficMonitor({ log }: { log: ProxyTrafficEntry[] }) {
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
         <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Traffic Monitor
+          {t('gateway.trafficMonitor')}
         </label>
         <span className="text-[10px] text-muted-foreground">
-          {recent.length} reqs · avg {avgLatency}ms
+          {t('gateway.reqs', { n: String(recent.length) })} · avg {avgLatency}ms
           {errorCount > 0 && (
-            <span className="text-destructive ml-1">· {errorCount} errors</span>
+            <span className="text-destructive ml-1">· {t('gateway.errors', { n: String(errorCount) })}</span>
           )}
         </span>
       </div>
@@ -641,10 +645,10 @@ function TrafficMonitor({ log }: { log: ProxyTrafficEntry[] }) {
             ? "bg-destructive/80"
             : "bg-green-500/70";
           const label = is429
-            ? `429 Rate Limited · ${entry.latencyMs}ms`
+            ? `429 ${t('gateway.rateLimited')} · ${entry.latencyMs}ms`
             : isError
-            ? `${entry.status} Error · ${entry.latencyMs}ms`
-            : `${entry.status} OK · ${entry.latencyMs}ms`;
+            ? `${entry.status} ${t('common.error')} · ${entry.latencyMs}ms`
+            : `${entry.status} ${t('gateway.ok')} · ${entry.latencyMs}ms`;
           return (
             <div
               key={i}
@@ -664,19 +668,21 @@ function ModelSelect({
   onChange,
   models,
   disabled,
+  noModelsText,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   models: string[];
   disabled?: boolean;
+  noModelsText?: string;
 }) {
   if (models.length === 0) {
     return (
       <div className="space-y-1">
         <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
         <div className="h-7 flex items-center px-2 text-xs text-muted-foreground/40 italic">
-          无可选模型
+          {noModelsText || "No models available"}
         </div>
       </div>
     );

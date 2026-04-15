@@ -11,9 +11,11 @@ import { Label } from "@/components/ui/label";
 import * as api from "@/lib/api";
 import type { GatewayWithHealth, ActiveConfig } from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
+import { useI18n } from "@/lib/i18n";
 import { Plus, RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle } from "lucide-react";
 
 function App() {
+  const { t, lang, toggleLang } = useI18n();
   const [gateways, setGateways] = useState<GatewayWithHealth[]>([]);
   const [activeConfig, setActiveConfig] = useState<ActiveConfig | null>(null);
   const [autoSwitch, setAutoSwitch] = useState(true);
@@ -174,11 +176,11 @@ function App() {
       <header className="border-b border-border/60 bg-card/50 backdrop-blur-sm">
         <div className="flex items-center justify-between px-5 py-2.5">
           <div className="flex items-center gap-3 animate-fade-in">
-            <h1 className="text-base font-semibold tracking-tight">LLM Relay</h1>
+            <h1 className="text-base font-semibold tracking-tight">{t('header.title')}</h1>
             {totalGateways > 0 && (
               <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
                 <span className={`inline-block w-1.5 h-1.5 rounded-full ${healthySummary > 0 ? 'bg-success' : 'bg-muted-foreground'}`} />
-                {healthySummary}/{totalGateways} online
+                {t('header.online', { healthy: String(healthySummary), total: String(totalGateways) })}
               </span>
             )}
             {/* Client name display/editor */}
@@ -213,7 +215,7 @@ function App() {
           <div className="flex items-center gap-2 animate-fade-in" style={{ animationDelay: '0.1s' }}>
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary/60 transition-elegant hover:bg-secondary">
               <Label htmlFor="auto-switch" className="text-xs font-medium cursor-pointer">
-                Auto Failover
+                {t('header.autoFailover')}
               </Label>
               <Switch
                 id="auto-switch"
@@ -225,7 +227,7 @@ function App() {
 
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary/60 transition-elegant hover:bg-secondary">
               <Label htmlFor="autostart" className="text-xs font-medium cursor-pointer">
-                Launch at Login
+                {t('header.launchAtLogin')}
               </Label>
               <Switch
                 id="autostart"
@@ -240,9 +242,19 @@ function App() {
               size="icon"
               onClick={() => api.openUrl("https://token.xianliao.de5.net/guide")}
               className="h-7 w-7 transition-elegant hover:bg-secondary"
-              title="How to Use"
+              title={t('header.howToUse')}
             >
               <HelpCircle className="h-3.5 w-3.5" />
+            </Button>
+
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggleLang}
+              className="h-7 w-7 transition-elegant hover:bg-secondary"
+              title={lang === 'zh' ? 'Switch to English' : '切换到中文'}
+            >
+              <span className="text-xs font-medium">{lang === 'zh' ? 'EN' : '中'}</span>
             </Button>
 
             <Button
@@ -268,7 +280,7 @@ function App() {
           <div className="flex items-center justify-center py-16">
             <div className="flex flex-col items-center gap-2">
               <Loader2 className="h-5 w-5 animate-spin text-primary" />
-              <p className="text-xs text-muted-foreground">Loading...</p>
+              <p className="text-xs text-muted-foreground">{t('common.loading')}</p>
             </div>
           </div>
         ) : (
@@ -292,7 +304,7 @@ function App() {
               onClick={() => setShowAddDialog(true)}
             >
               <Plus className="h-3.5 w-3.5 mr-1.5" />
-              <span className="text-sm font-medium">Add Gateway</span>
+              <span className="text-sm font-medium">{t('addDialog.title')}</span>
             </Button>
           </div>
         )}
@@ -316,7 +328,7 @@ function App() {
             }}
           >
             <BarChart3 className="h-3.5 w-3.5" />
-            Usage
+            {t('usage.title')}
           </button>
 
           {/* Logs tab */}
@@ -333,7 +345,7 @@ function App() {
             }}
           >
             <AlertTriangle className="h-3.5 w-3.5" />
-            Errors
+            {t('common.errors')}
             {logErrorCount > 0 && (bottomTab !== "logs" || !showLogs) && (
               <span className="inline-flex items-center justify-center h-4 min-w-4 px-1 rounded-full bg-destructive text-[9px] font-bold text-destructive-foreground">
                 {logErrorCount > 99 ? "99+" : logErrorCount}
