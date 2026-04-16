@@ -27,6 +27,7 @@ interface GatewayListProps {
   gateways: GatewayWithHealth[];
   activeGatewayId: string | null;
   activeKeyId: string | null;
+  activeKeyName: string | null;
   activeModels: {
     claude: string | null;
     claudeSmall: string | null;
@@ -40,6 +41,7 @@ function SortableGatewayCard({
   gateway,
   isActive,
   activeKeyId,
+  activeKeyName,
   activeModels,
   onSelect,
   onDelete,
@@ -48,6 +50,7 @@ function SortableGatewayCard({
   gateway: GatewayWithHealth;
   isActive: boolean;
   activeKeyId: string | null;
+  activeKeyName: string | null;
   activeModels: {
     claude: string | null;
     claudeSmall: string | null;
@@ -80,6 +83,7 @@ function SortableGatewayCard({
         gateway={gateway}
         isActive={isActive}
         activeKeyId={activeKeyId}
+        activeKeyName={activeKeyName}
         activeModels={activeModels}
         dragHandleProps={listeners}
         onSelect={onSelect}
@@ -94,6 +98,7 @@ export function GatewayList({
   gateways: initialGateways,
   activeGatewayId,
   activeKeyId,
+  activeKeyName,
   activeModels,
   onRefresh,
 }: GatewayListProps) {
@@ -172,6 +177,7 @@ export function GatewayList({
               gateway={gw}
               isActive={activeGatewayId === gw.id}
               activeKeyId={activeKeyId}
+              activeKeyName={activeKeyName}
               activeModels={activeModels}
               onSelect={() => {}}
               onDelete={() => handleDelete(gw.id)}

@@ -4,24 +4,15 @@ import { toast } from "sonner";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   GatewayWithHealth,
-  ApiKey,
-  ModelList,
   ApplyConfigParams,
   HealthLogEntry,
 } from "@/lib/api";
 import * as api from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n } from "@/lib/i18n";
+import { EditGatewayDialog } from "./EditGatewayDialog";
 
 interface ProxyTrafficEntry {
   path: string;
@@ -37,14 +28,15 @@ import {
   Loader2,
   ChevronDown,
   ChevronRight,
-  Edit3,
-  X,
+  LogIn,
+  KeyRound,
 } from "lucide-react";
 
 interface GatewayCardProps {
   gateway: GatewayWithHealth;
   isActive: boolean;
   activeKeyId: string | null;
+  activeKeyName: string | null;
   activeModels: {
     claude: string | null;
     claudeSmall: string | null;
@@ -61,6 +53,7 @@ export function GatewayCard({
   gateway,
   isActive,
   activeKeyId,
+  activeKeyName,
   activeModels,
   dragHandleProps,
   onSelect,
@@ -69,22 +62,15 @@ export function GatewayCard({
 }: GatewayCardProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(isActive);
-  const [keys, setKeys] = useState<ApiKey[]>([]);
-  const [models, setModels] = useState<ModelList | null>(null);
-  const [selectedKeyId, setSelectedKeyId] = useState<string | null>(activeKeyId);
-  const [claudeModel, setClaudeModel] = useState(activeModels.claude || "");
-  const [claudeSmallModel, setClaudeSmallModel] = useState(activeModels.claudeSmall || "");
-  const [codexModel, setCodexModel] = useState(activeModels.codex || "");
-  const [geminiModel, setGeminiModel] = useState(activeModels.gemini || "");
-  const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [editMode, setEditMode] = useState(false);
-  const [editName, setEditName] = useState(gateway.name);
-  const [editUrl, setEditUrl] = useState(gateway.url);
-  const [editAuthKey, setEditAuthKey] = useState(gateway.authKey);
   const [healthLog, setHealthLog] = useState<HealthLogEntry[]>([]);
   const [trafficLog, setTrafficLog] = useState<ProxyTrafficEntry[]>([]);
   const trafficLogRef = useRef<ProxyTrafficEntry[]>([]);
+  const [showEditDialog, setShowEditDialog] = useState(false);
+
+  // Tri-state: null = never checked, true = healthy, false = confirmed offline
+  const neverChecked = gateway.lastChecked === null;
+  const isHealthy = gateway.isHealthy;
 
   useEffect(() => {
     setExpanded(isActive);
@@ -125,128 +111,19 @@ export function GatewayCard({
   useEffect(() => {
     if (!expanded) return;
     loadHealthLog();
-    if (keys.length === 0 && gateway.isHealthy) {
-      loadKeysAndModels();
-    }
   }, [expanded]);
 
-  const loadKeysAndModels = async () => {
-    setLoading(true);
-    try {
-      const keysResult = await api.fetchKeys(gateway.id);
-      setKeys(keysResult);
-
-      // Determine which key to use for model fetching
-      let keyToUse: string | undefined;
-      // Match by activeKeyId first, then by gateway.authKey value, then fallback to first
-      const selectedKey = keysResult.find((k) => k.id === selectedKeyId)
-        ?? keysResult.find((k) => k.key === gateway.authKey)
-        ?? keysResult[0];
-      keyToUse = selectedKey?.key;
-      if (selectedKey && selectedKeyId !== selectedKey.id) {
-        setSelectedKeyId(selectedKey.id);
-      }
-
-      const modelsResult = await api.fetchModels(gateway.id, keyToUse);
-      setModels(modelsResult);
-
-      // Auto-suggest models — pick the "newest" by sorting desc and taking first match
-      if (modelsResult.data.length > 0) {
-        const modelIds = modelsResult.data.map((m) => m.id).sort((a, b) => b.localeCompare(a));
-        if (!claudeModel) {
-          const claude = modelIds.find((id) => id.toLowerCase().includes("opus")) ||
-            modelIds.find((id) => id.toLowerCase().includes("claude")) || "";
-          setClaudeModel(claude);
-        }
-        if (!claudeSmallModel) {
-          const small = modelIds.find((id) => id.toLowerCase().includes("haiku")) ||
-            modelIds.find((id) => id.toLowerCase().includes("claude")) || "";
-          setClaudeSmallModel(small);
-        }
-        if (!codexModel) {
-          const codex = modelIds.find((id) => /gpt-[5-9]/i.test(id)) ||
-            modelIds.find((id) => /\bo[1-9]/i.test(id)) || "";
-          setCodexModel(codex);
-        }
-        if (!geminiModel) {
-          const gemini = modelIds.find((id) => id.toLowerCase().includes("gemini")) || "";
-          setGeminiModel(gemini);
-        }
-      }
-    } catch (err) {
-      console.error("Failed to load keys/models:", err);
-      // Don't toast — health monitor already shows the gateway is down
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleApply = async () => {
-    const selectedKey = keys.find((k) => k.id === selectedKeyId);
     setApplying(true);
     try {
       const params: ApplyConfigParams = {
         gatewayId: gateway.id,
-        keyId: selectedKey?.id,
-        keyName: selectedKey?.name,
-        keyValue: selectedKey?.key,
-        claudeModel: claudeModels.length > 0 ? (claudeModel || undefined) : undefined,
-        claudeSmallModel: claudeSmallModels.length > 0 ? (claudeSmallModel || undefined) : undefined,
-        codexModel: codexModels.length > 0 ? (codexModel || undefined) : undefined,
-        geminiModel: geminiModels.length > 0 ? (geminiModel || undefined) : undefined,
       };
       await api.applyConfig(params);
       onApplied();
     } catch (err) {
       console.error("Failed to apply config:", err);
       toast.error(`Failed to apply: ${extractErrorMessage(err)}`);
-    } finally {
-      setApplying(false);
-    }
-  };
-
-  const handleEdit = () => {
-    setEditMode(true);
-    setEditName(gateway.name);
-    setEditUrl(gateway.url);
-    setEditAuthKey(gateway.authKey);
-    if (!expanded) {
-      setExpanded(true);
-    }
-  };
-
-  const handleCancelEdit = () => {
-    setEditMode(false);
-    setEditName(gateway.name);
-    setEditUrl(gateway.url);
-    setEditAuthKey(gateway.authKey);
-  };
-
-  const handleDone = async () => {
-    setApplying(true);
-    try {
-      // Update gateway info
-      await api.updateGateway(gateway.id, editName, editUrl, editAuthKey);
-
-      // Apply configuration
-      const selectedKey = keys.find((k) => k.id === selectedKeyId);
-      const params: ApplyConfigParams = {
-        gatewayId: gateway.id,
-        keyId: selectedKey?.id,
-        keyName: selectedKey?.name,
-        keyValue: selectedKey?.key,
-        claudeModel: claudeModels.length > 0 ? (claudeModel || undefined) : undefined,
-        claudeSmallModel: claudeSmallModels.length > 0 ? (claudeSmallModel || undefined) : undefined,
-        codexModel: codexModels.length > 0 ? (codexModel || undefined) : undefined,
-        geminiModel: geminiModels.length > 0 ? (geminiModel || undefined) : undefined,
-      };
-      await api.applyConfig(params);
-
-      setEditMode(false);
-      onApplied();
-    } catch (err) {
-      console.error("Failed to save and apply:", err);
-      toast.error(`Failed to save: ${extractErrorMessage(err)}`);
     } finally {
       setApplying(false);
     }
@@ -259,74 +136,43 @@ export function GatewayCard({
     setExpanded(!expanded);
   };
 
-  // Get all model IDs and filter by type
-  const allModels = models?.data.map((m) => m.id) || [];
-
-  const claudeModels = allModels.filter((m) =>
-    m.toLowerCase().includes("claude") && !m.toLowerCase().includes("haiku")
-  );
-  const claudeSmallModels = allModels.filter((m) =>
-    m.toLowerCase().includes("claude")
-  );
-  const codexModels = allModels.filter((m) => {
-    const lower = m.toLowerCase();
-    return /gpt-[5-9]/.test(lower) || /\bo[1-9]/.test(lower);
-  });
-  const geminiModels = allModels.filter((m) =>
-    m.toLowerCase().includes("gemini")
-  );
+  // Card border style: tri-state
+  const cardClass = isActive
+    ? "border-primary/60 shadow-[0_0_0_1px_hsl(var(--primary)/0.15)] bg-gradient-to-br from-card to-primary/5"
+    : neverChecked
+    ? "hover:border-border hover:shadow-elegant bg-card"
+    : !isHealthy
+    ? "border-destructive/30 bg-destructive/[0.02] hover:border-destructive/40"
+    : "hover:border-border hover:shadow-elegant bg-card";
 
   return (
-    <Card
-      className={`transition-elegant overflow-hidden ${
-        isActive
-          ? "border-primary/60 shadow-[0_0_0_1px_hsl(var(--primary)/0.15)] bg-gradient-to-br from-card to-primary/5"
-          : !gateway.isHealthy
-          ? "border-destructive/30 bg-destructive/[0.02] hover:border-destructive/40"
-          : "hover:border-border hover:shadow-elegant bg-card"
-      }`}
-    >
-      {/* Header */}
-      <div
-        className="flex items-center gap-3 px-3 py-2.5 cursor-pointer select-none group"
-        onClick={handleToggle}
-      >
+    <>
+      <Card className={`transition-elegant overflow-hidden ${cardClass}`}>
+        {/* Header */}
         <div
-          {...dragHandleProps}
-          className="cursor-grab active:cursor-grabbing text-muted-foreground/30 hover:text-muted-foreground transition-elegant-fast"
-          onClick={(e) => e.stopPropagation()}
+          className="flex items-center gap-3 px-3 py-2.5 cursor-pointer select-none group"
+          onClick={handleToggle}
         >
-          <GripVertical className="h-4 w-4" />
-        </div>
+          <div
+            {...dragHandleProps}
+            className="cursor-grab active:cursor-grabbing text-muted-foreground/30 hover:text-muted-foreground transition-elegant-fast"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <GripVertical className="h-4 w-4" />
+          </div>
 
-        {/* Status dot */}
-        <div className="flex-shrink-0 relative w-2.5 h-2.5">
-          <div className={`w-2.5 h-2.5 rounded-full ${
-            gateway.isHealthy ? 'bg-green-500' : 'bg-destructive'
-          }`} />
-          {gateway.isHealthy && (
-            <span className="absolute inset-0 rounded-full bg-green-500 animate-ping opacity-40" />
-          )}
-        </div>
+          {/* Status dot — tri-state */}
+          <div className="flex-shrink-0 relative w-2.5 h-2.5">
+            <div className={`w-2.5 h-2.5 rounded-full ${
+              neverChecked ? 'bg-muted-foreground/30' : isHealthy ? 'bg-green-500' : 'bg-destructive'
+            }`} />
+            {!neverChecked && isHealthy && (
+              <span className="absolute inset-0 rounded-full bg-green-500 animate-ping opacity-40" />
+            )}
+          </div>
 
-        {/* Gateway info */}
-        <div className="flex-1 min-w-0">
-          {editMode ? (
-            <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
-              <Input
-                value={editName}
-                onChange={(e) => setEditName(e.target.value)}
-                className="h-6 text-xs font-semibold px-2"
-                placeholder="Name"
-              />
-              <Input
-                value={editUrl}
-                onChange={(e) => setEditUrl(e.target.value)}
-                className="h-6 text-xs font-mono px-2"
-                placeholder="URL"
-              />
-            </div>
-          ) : (
+          {/* Gateway info */}
+          <div className="flex-1 min-w-0">
             <div className="flex items-center gap-1.5 min-w-0">
               <span className="font-medium text-sm truncate">{gateway.name}</span>
               {isActive && (
@@ -341,211 +187,148 @@ export function GatewayCard({
                 </span>
               )}
             </div>
-          )}
-        </div>
-
-        {/* Metrics */}
-        {gateway.isHealthy ? (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
-            <span className="font-medium text-foreground/80">{gateway.latencyMs}ms</span>
-            <span className="text-border">·</span>
-            <span>{gateway.modelCount}m</span>
           </div>
-        ) : (
-          <span className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-destructive/15 text-destructive border border-destructive/25">
-            {t('gateway.offline')}
-          </span>
-        )}
 
-        {/* Edit button */}
-        {!editMode && (
-          <button
-            onClick={(e) => { e.stopPropagation(); handleEdit(); }}
-            className="text-muted-foreground/40 hover:text-primary transition-elegant-fast"
-          >
-            <Edit3 className="h-3.5 w-3.5" />
-          </button>
-        )}
-
-        {/* Expand */}
-        <div className="text-muted-foreground/40 group-hover:text-muted-foreground/70 transition-elegant-fast">
-          {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        </div>
-      </div>
-
-      {/* Refined expanded content */}
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
-            style={{ overflow: "hidden" }}
-          >
-            <div className="border-t border-border/40 bg-card/50">
-              <CardContent className="px-4 pt-3 pb-3 space-y-3">
-                {loading ? (
-                  <div className="flex items-center justify-center py-5">
-                    <Loader2 className="h-4 w-4 animate-spin text-primary mr-2" />
-                    <span className="text-xs text-muted-foreground">{t('common.loading')}</span>
-                  </div>
-                ) : (
-                  <>
-                    {/* Auth Token in edit mode */}
-                    {editMode && (
-                      <div className="space-y-1.5 pb-2 border-b border-border/30">
-                        <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                          {t('gateway.authToken')}
-                        </label>
-                        {gateway.userId ? (
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                            <span>{t('gateway.signedInAs')} <span className="font-medium text-foreground">{gateway.userName}</span></span>
-                            <span className="font-mono text-[10px]">...{gateway.authKey.slice(-4)}</span>
-                          </div>
-                        ) : (
-                          <Input
-                            value={editAuthKey}
-                            onChange={(e) => setEditAuthKey(e.target.value)}
-                            className="h-7 font-mono text-xs"
-                            placeholder={t('gateway.gatewayAuthToken')}
-                            type="password"
-                          />
-                        )}
-                      </div>
-                    )}
-
-                    {/* API Keys */}
-                    {/* API Key Section - show always in edit mode, or when keys exist */}
-                    {(editMode || keys.length > 0) && (
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                            {t('gateway.apiKey')}
-                          </label>
-                        </div>
-
-                        {keys.length > 0 ? (
-                          <div className="space-y-1">
-                            {keys.map((key) => {
-                              const isSelected = selectedKeyId === key.id;
-                              return (
-                                <button
-                                  key={key.id}
-                                  onClick={() => setSelectedKeyId(key.id)}
-                                  className={`w-full text-left px-3 py-2 rounded-lg border transition-elegant-fast ${
-                                    isSelected
-                                      ? "border-primary/50 bg-primary/8 text-primary"
-                                      : "border-border/50 hover:border-primary/20 hover:bg-secondary/40"
-                                  }`}
-                                  disabled={!editMode}
-                                >
-                                  <div className="flex items-center justify-between gap-2">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <span className={`text-xs font-medium truncate ${isSelected ? 'text-primary' : ''}`}>
-                                        {key.name}
-                                      </span>
-                                      {key.ownerName && (
-                                        <span className="text-[10px] text-muted-foreground shrink-0">@{key.ownerName}</span>
-                                      )}
-                                      <span className="text-[10px] text-muted-foreground font-mono shrink-0">
-                                        {key.key.slice(0, 6)}…{key.key.slice(-3)}
-                                      </span>
-                                    </div>
-                                    {isSelected && <Check className="h-3 w-3 text-primary shrink-0" />}
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <p className="text-[10px] text-muted-foreground">
-                            {t('gateway.noKeys')}
-                          </p>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Health history sparkline */}
-                    {healthLog.length > 0 && (
-                      <HealthSparkline log={healthLog} />
-                    )}
-
-                    {/* Proxy traffic monitor (active gateway only) */}
-                    {isActive && trafficLog.length > 0 && (
-                      <TrafficMonitor log={trafficLog} />
-                    )}
-
-                    {/* Model selectors */}
-                    {allModels.length > 0 && (
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                          {t('gateway.models')}
-                        </label>
-                        <div className="grid grid-cols-2 gap-2">
-                          <ModelSelect label={t('models.claude')} value={claudeModel} onChange={setClaudeModel} models={claudeModels} disabled={!editMode} noModelsText={t('gateway.noModels')} />
-                          <ModelSelect label={t('models.claudeSmall')} value={claudeSmallModel} onChange={setClaudeSmallModel} models={claudeSmallModels} disabled={!editMode} noModelsText={t('gateway.noModels')} />
-                          <ModelSelect label={t('models.codex')} value={codexModel} onChange={setCodexModel} models={codexModels} disabled={!editMode} noModelsText={t('gateway.noModels')} />
-                          <ModelSelect label={t('models.gemini')} value={geminiModel} onChange={setGeminiModel} models={geminiModels} disabled={!editMode} noModelsText={t('gateway.noModels')} />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Action buttons */}
-                    <div className="flex items-center justify-between pt-2 border-t border-border/30">
-                      {editMode ? (
-                        <>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={(e) => { e.stopPropagation(); handleCancelEdit(); }}
-                            disabled={applying}
-                            className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
-                          >
-                            <X className="h-3 w-3 mr-1" />
-                            {t('common.cancel')}
-                          </Button>
-                          <Button
-                            size="sm"
-                            onClick={handleDone}
-                            disabled={applying || !editName || !editUrl || !editAuthKey}
-                            className="h-7 px-3 text-xs"
-                          >
-                            {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
-                            {t('common.done')}
-                          </Button>
-                        </>
-                      ) : (
-                        <>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-                            className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
-                          >
-                            <Trash2 className="h-3 w-3 mr-1" />
-                            {t('common.remove')}
-                          </Button>
-                          <Button
-                            size="sm"
-                            onClick={handleApply}
-                            disabled={applying || !selectedKeyId}
-                            className="h-7 px-3 text-xs"
-                          >
-                            {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
-                            {t('common.use')}
-                          </Button>
-                        </>
-                      )}
-                    </div>
-                  </>
-                )}
-              </CardContent>
+          {/* Metrics — tri-state */}
+          {neverChecked ? (
+            <span className="text-xs text-muted-foreground/40 shrink-0">—</span>
+          ) : isHealthy ? (
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
+              <span className="font-medium text-foreground/80">{gateway.latencyMs}ms</span>
+              <span className="text-border">·</span>
+              <span>{gateway.modelCount}m</span>
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </Card>
+          ) : (
+            <span className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-destructive/15 text-destructive border border-destructive/25">
+              {t('gateway.offline')}
+            </span>
+          )}
+
+          {/* Sign in to edit button */}
+          <button
+            onClick={(e) => { e.stopPropagation(); setShowEditDialog(true); }}
+            className="text-muted-foreground/40 hover:text-primary transition-elegant-fast flex items-center gap-1"
+            title={t('gateway.signInToEdit')}
+          >
+            <LogIn className="h-3.5 w-3.5" />
+          </button>
+
+          {/* Expand */}
+          <div className="text-muted-foreground/40 group-hover:text-muted-foreground/70 transition-elegant-fast">
+            {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          </div>
+        </div>
+
+        {/* Expanded content */}
+        <AnimatePresence>
+          {expanded && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
+              style={{ overflow: "hidden" }}
+            >
+              <div className="border-t border-border/40 bg-card/50">
+                <CardContent className="px-4 pt-3 pb-3 space-y-3">
+                  {/* Current key display (read-only) */}
+                  {isActive && activeKeyId && (
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {t('gateway.currentKey')}
+                      </label>
+                      <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border/50 bg-secondary/20">
+                        <KeyRound className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
+                        <span className="text-xs font-medium truncate">{activeKeyName || activeKeyId}</span>
+                        <span className="text-[10px] text-muted-foreground font-mono shrink-0">
+                          ...{gateway.authKey.slice(-4)}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Health history sparkline */}
+                  {healthLog.length > 0 && (
+                    <HealthSparkline log={healthLog} />
+                  )}
+
+                  {/* Proxy traffic monitor (active gateway only) */}
+                  {isActive && trafficLog.length > 0 && (
+                    <TrafficMonitor log={trafficLog} />
+                  )}
+
+                  {/* Model selectors (read-only display of active models) */}
+                  {isActive && (activeModels.claude || activeModels.claudeSmall || activeModels.codex || activeModels.gemini) && (
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {t('gateway.models')}
+                      </label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {activeModels.claude && (
+                          <div className="text-[10px] text-muted-foreground">
+                            <span className="font-medium">{t('models.claude')}:</span>{" "}
+                            <span className="font-mono">{activeModels.claude}</span>
+                          </div>
+                        )}
+                        {activeModels.claudeSmall && (
+                          <div className="text-[10px] text-muted-foreground">
+                            <span className="font-medium">{t('models.claudeSmall')}:</span>{" "}
+                            <span className="font-mono">{activeModels.claudeSmall}</span>
+                          </div>
+                        )}
+                        {activeModels.codex && (
+                          <div className="text-[10px] text-muted-foreground">
+                            <span className="font-medium">{t('models.codex')}:</span>{" "}
+                            <span className="font-mono">{activeModels.codex}</span>
+                          </div>
+                        )}
+                        {activeModels.gemini && (
+                          <div className="text-[10px] text-muted-foreground">
+                            <span className="font-medium">{t('models.gemini')}:</span>{" "}
+                            <span className="font-mono">{activeModels.gemini}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action buttons */}
+                  <div className="flex items-center justify-between pt-2 border-t border-border/30">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                      className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                    >
+                      <Trash2 className="h-3 w-3 mr-1" />
+                      {t('common.remove')}
+                    </Button>
+                    {!isActive && (
+                      <Button
+                        size="sm"
+                        onClick={handleApply}
+                        disabled={applying}
+                        className="h-7 px-3 text-xs"
+                      >
+                        {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
+                        {t('common.use')}
+                      </Button>
+                    )}
+                  </div>
+                </CardContent>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </Card>
+
+      <EditGatewayDialog
+        open={showEditDialog}
+        onOpenChange={setShowEditDialog}
+        gateway={gateway}
+        onUpdated={onApplied}
+      />
+    </>
   );
 }
 
@@ -658,54 +441,6 @@ function TrafficMonitor({ log }: { log: ProxyTrafficEntry[] }) {
           );
         })}
       </div>
-    </div>
-  );
-}
-
-function ModelSelect({
-  label,
-  value,
-  onChange,
-  models,
-  disabled,
-  noModelsText,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  models: string[];
-  disabled?: boolean;
-  noModelsText?: string;
-}) {
-  if (models.length === 0) {
-    return (
-      <div className="space-y-1">
-        <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
-        <div className="h-7 flex items-center px-2 text-xs text-muted-foreground/40 italic">
-          {noModelsText || "No models available"}
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="space-y-1">
-      <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
-      <Select value={value} onValueChange={onChange} disabled={disabled}>
-        <SelectTrigger className="h-7 text-xs border-border/60 transition-elegant-fast bg-background/50 disabled:opacity-50 disabled:cursor-default">
-          <SelectValue placeholder="—" />
-        </SelectTrigger>
-        <SelectContent className="border-border/60">
-          {models.map((m) => (
-            <SelectItem
-              key={m}
-              value={m}
-              className="text-xs font-mono cursor-pointer"
-            >
-              {m}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
     </div>
   );
 }

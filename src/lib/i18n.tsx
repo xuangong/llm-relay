@@ -45,6 +45,12 @@ const en: Translations = {
     signedInAs: "Signed in as",
     addGateway: "Add Gateway",
   },
+  editDialog: {
+    title: "Edit Gateway",
+    description: "Sign in to change your API key or gateway settings.",
+    selectKey: "Select API Key",
+    updateGateway: "Update Gateway",
+  },
   gateway: {
     inUse: "in use",
     offline: "offline",
@@ -64,6 +70,9 @@ const en: Translations = {
     noModels: "No models available",
     signedInAs: "Signed in as",
     gatewayAuthToken: "Gateway auth token",
+    signInToEdit: "Sign in to edit",
+    checking: "checking...",
+    currentKey: "Current Key",
   },
   usage: {
     title: "Token Usage",
@@ -144,6 +153,12 @@ const zh: Translations = {
     signedInAs: "已登录为",
     addGateway: "添加网关",
   },
+  editDialog: {
+    title: "编辑网关",
+    description: "登录以更改 API 密钥或网关设置。",
+    selectKey: "选择 API 密钥",
+    updateGateway: "更新网关",
+  },
   gateway: {
     inUse: "使用中",
     offline: "离线",
@@ -163,6 +178,9 @@ const zh: Translations = {
     noModels: "无可选模型",
     signedInAs: "已登录为",
     gatewayAuthToken: "网关授权令牌",
+    signInToEdit: "登录以编辑",
+    checking: "检查中...",
+    currentKey: "当前密钥",
   },
   usage: {
     title: "用量统计",

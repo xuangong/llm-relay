@@ -293,6 +293,7 @@ function App() {
               gateways={gateways}
               activeGatewayId={activeConfig?.gatewayId ?? null}
               activeKeyId={activeConfig?.keyId ?? null}
+              activeKeyName={activeConfig?.keyName ?? null}
               activeModels={{
                 claude: activeConfig?.claudeModel ?? null,
                 claudeSmall: activeConfig?.claudeSmallModel ?? null,
