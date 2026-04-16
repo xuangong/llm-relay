@@ -21,7 +21,7 @@ interface SignInDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   gatewayUrl: string;
-  onComplete: () => void;
+  onComplete: (sessionToken: string) => void;
 }
 
 export function SignInDialog({ open, onOpenChange, gatewayUrl, onComplete }: SignInDialogProps) {
@@ -91,7 +91,7 @@ export function SignInDialog({ open, onOpenChange, gatewayUrl, onComplete }: Sig
               clearInterval(pollRef.current);
               pollRef.current = null;
             }
-            onComplete();
+            onComplete(result.sessionToken || "");
           } else if (result.status === "expired") {
             if (pollRef.current) {
               clearInterval(pollRef.current);

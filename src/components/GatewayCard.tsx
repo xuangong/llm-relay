@@ -132,17 +132,20 @@ export function GatewayCard({
     loadHealthLog();
   }, [expanded]);
 
-  const loadKeysAndModels = async (keyValue?: string) => {
+  const loadKeysAndModels = async (sessionToken?: string) => {
     setLoading(true);
     try {
-      const keysResult = await api.fetchKeys(gateway.id);
+      // Use fetchKeysWithToken if we have a fresh session token, otherwise fall back to fetchKeys
+      const keysResult = sessionToken
+        ? await api.fetchKeysWithToken(gateway.url, sessionToken)
+        : await api.fetchKeys(gateway.id);
       setKeys(keysResult);
 
       // Match by activeKeyId first, then by gateway.authKey value, then fallback to first
       const selectedKey = keysResult.find((k) => k.id === selectedKeyId)
         ?? keysResult.find((k) => k.key === gateway.authKey)
         ?? keysResult[0];
-      const keyToUse = keyValue || selectedKey?.key;
+      const keyToUse = selectedKey?.key;
       if (selectedKey && selectedKeyId !== selectedKey.id) {
         setSelectedKeyId(selectedKey.id);
       }
@@ -181,11 +184,11 @@ export function GatewayCard({
   };
 
   // Called after sign-in dialog completes successfully
-  const handleSignInComplete = () => {
+  const handleSignInComplete = (sessionToken: string) => {
     setShowSignIn(false);
     setEditMode(true);
     if (!expanded) setExpanded(true);
-    loadKeysAndModels();
+    loadKeysAndModels(sessionToken);
   };
 
   const handleCancelEdit = () => {
