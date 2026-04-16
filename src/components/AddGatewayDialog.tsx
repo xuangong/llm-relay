@@ -11,15 +11,25 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   addGateway,
+  applyConfig,
   startDeviceLogin,
   pollDeviceLogin,
   fetchKeysWithToken,
   openUrl,
   type ApiKey,
   type DeviceCodeResponse,
+  type ModelList,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+import { extractErrorMessage } from "@/lib/error";
 import { Loader2, Check, Copy, ExternalLink, KeyRound } from "lucide-react";
 
 interface AddGatewayDialogProps {
@@ -28,7 +38,7 @@ interface AddGatewayDialogProps {
   onAdded: () => void;
 }
 
-type Step = "url" | "device" | "keys";
+type Step = "url" | "device" | "config";
 
 export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDialogProps) {
   const { t } = useI18n();
@@ -47,10 +57,15 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
   const [userId, setUserId] = useState("");
   const [userName, setUserName] = useState("");
 
-  // Key selection step
+  // Key + model selection (config step)
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [selectedKeyId, setSelectedKeyId] = useState<string | null>(null);
-  const [loadingKeys, setLoadingKeys] = useState(false);
+  const [loadingConfig, setLoadingConfig] = useState(false);
+  const [models, setModels] = useState<ModelList | null>(null);
+  const [claudeModel, setClaudeModel] = useState("");
+  const [claudeSmallModel, setClaudeSmallModel] = useState("");
+  const [codexModel, setCodexModel] = useState("");
+  const [geminiModel, setGeminiModel] = useState("");
 
   // Reset state when dialog closes
   useEffect(() => {
@@ -66,6 +81,11 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
       setUserName("");
       setKeys([]);
       setSelectedKeyId(null);
+      setModels(null);
+      setClaudeModel("");
+      setClaudeSmallModel("");
+      setCodexModel("");
+      setGeminiModel("");
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;
@@ -73,12 +93,9 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
     }
   }, [open]);
 
-  // Cleanup polling on unmount
   useEffect(() => {
     return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-      }
+      if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
 
@@ -95,19 +112,16 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
       setDeviceCode(result);
       setStep("device");
 
-      // Copy code to clipboard
       try {
         await navigator.clipboard.writeText(result.userCode);
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       } catch {}
 
-      // Open browser to gateway's device login page
       try {
         await openUrl(`${trimmedUrl}/device/login`);
       } catch {}
 
-      // Start polling
       startPolling(trimmedUrl, result.deviceCode);
     } catch (err) {
       setError(String(err));
@@ -132,20 +146,22 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
             setUserId(result.userId || "");
             setUserName(result.userName || "");
 
-            // Fetch keys using the session token
-            setStep("keys");
-            setLoadingKeys(true);
+            // Move to config step: fetch keys + models
+            setStep("config");
+            setLoadingConfig(true);
             try {
-              // Use the session token to fetch keys directly
               const fetchedKeys = await fetchKeysWithToken(gatewayUrl, result.sessionToken || "");
               setKeys(fetchedKeys);
-              if (fetchedKeys.length === 1) {
-                setSelectedKeyId(fetchedKeys[0].id);
+              if (fetchedKeys.length > 0) {
+                const firstKey = fetchedKeys[0];
+                setSelectedKeyId(firstKey.id);
+                // Fetch models using first key
+                await loadModelsForKey(gatewayUrl, firstKey.key);
               }
             } catch (err) {
               setError(`Failed to fetch keys: ${String(err)}`);
             } finally {
-              setLoadingKeys(false);
+              setLoadingConfig(false);
             }
           } else if (result.status === "expired") {
             if (pollRef.current) {
@@ -165,6 +181,50 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
     []
   );
 
+  const loadModelsForKey = async (gatewayUrl: string, keyValue: string) => {
+    try {
+      // Fetch models directly via HTTP since gateway isn't added yet
+      const resp = await fetch(`${gatewayUrl}/v1/models`, {
+        headers: { "x-api-key": keyValue },
+      });
+      if (resp.ok) {
+        const modelsResult: ModelList = await resp.json();
+        setModels(modelsResult);
+
+        // Auto-suggest models
+        if (modelsResult.data.length > 0) {
+          const modelIds = modelsResult.data.map((m) => m.id).sort((a, b) => b.localeCompare(a));
+          setClaudeModel(
+            modelIds.find((id) => id.toLowerCase().includes("opus")) ||
+            modelIds.find((id) => id.toLowerCase().includes("claude")) || ""
+          );
+          setClaudeSmallModel(
+            modelIds.find((id) => id.toLowerCase().includes("haiku")) ||
+            modelIds.find((id) => id.toLowerCase().includes("claude")) || ""
+          );
+          setCodexModel(
+            modelIds.find((id) => /gpt-[5-9]/i.test(id)) ||
+            modelIds.find((id) => /\bo[1-9]/i.test(id)) || ""
+          );
+          setGeminiModel(
+            modelIds.find((id) => id.toLowerCase().includes("gemini")) || ""
+          );
+        }
+      }
+    } catch {
+      // Models fetch failed — not critical
+    }
+  };
+
+  const handleKeyChange = async (keyId: string) => {
+    setSelectedKeyId(keyId);
+    const key = keys.find((k) => k.id === keyId);
+    if (key) {
+      const trimmedUrl = url.replace(/\/+$/, "");
+      await loadModelsForKey(trimmedUrl, key.key);
+    }
+  };
+
   const handleSave = async () => {
     const selected = keys.find((k) => k.id === selectedKeyId);
     if (!selected) return;
@@ -173,7 +233,7 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
     setError("");
     try {
       const trimmedUrl = url.replace(/\/+$/, "");
-      await addGateway({
+      const gw = await addGateway({
         name: userName || trimmedUrl,
         url: trimmedUrl,
         authKey: selected.key,
@@ -181,10 +241,29 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
         userId,
         userName,
       });
+
+      // Apply config with key + models
+      const allModelIds = models?.data.map((m) => m.id) || [];
+      const cModels = allModelIds.filter((m) => m.toLowerCase().includes("claude") && !m.toLowerCase().includes("haiku"));
+      const csModels = allModelIds.filter((m) => m.toLowerCase().includes("claude"));
+      const xModels = allModelIds.filter((m) => { const l = m.toLowerCase(); return /gpt-[5-9]/.test(l) || /\bo[1-9]/.test(l); });
+      const gModels = allModelIds.filter((m) => m.toLowerCase().includes("gemini"));
+
+      await applyConfig({
+        gatewayId: gw.id,
+        keyId: selected.id,
+        keyName: selected.name,
+        keyValue: selected.key,
+        claudeModel: cModels.length > 0 ? (claudeModel || undefined) : undefined,
+        claudeSmallModel: csModels.length > 0 ? (claudeSmallModel || undefined) : undefined,
+        codexModel: xModels.length > 0 ? (codexModel || undefined) : undefined,
+        geminiModel: gModels.length > 0 ? (geminiModel || undefined) : undefined,
+      });
+
       onOpenChange(false);
       onAdded();
     } catch (err) {
-      setError(String(err));
+      setError(`Failed to add: ${extractErrorMessage(err)}`);
     } finally {
       setLoading(false);
     }
@@ -199,6 +278,22 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
     } catch {}
   };
 
+  // Model filtering
+  const allModelIds = models?.data.map((m) => m.id) || [];
+  const claudeModels = allModelIds.filter((m) =>
+    m.toLowerCase().includes("claude") && !m.toLowerCase().includes("haiku")
+  );
+  const claudeSmallModels = allModelIds.filter((m) =>
+    m.toLowerCase().includes("claude")
+  );
+  const codexModels = allModelIds.filter((m) => {
+    const lower = m.toLowerCase();
+    return /gpt-[5-9]/.test(lower) || /\bo[1-9]/.test(lower);
+  });
+  const geminiModels = allModelIds.filter((m) =>
+    m.toLowerCase().includes("gemini")
+  );
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[425px]" onPointerDownOutside={(e) => e.preventDefault()} onEscapeKeyDown={(e) => e.preventDefault()}>
@@ -207,7 +302,7 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
           <DialogDescription>
             {step === "url" && t('addDialog.urlStep')}
             {step === "device" && t('addDialog.deviceStep')}
-            {step === "keys" && t('addDialog.keysStep')}
+            {step === "config" && t('addDialog.keysStep')}
           </DialogDescription>
         </DialogHeader>
 
@@ -263,9 +358,7 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
                 variant="outline"
                 size="sm"
                 onClick={async () => {
-                  try {
-                    await openUrl(`${url}/device/login`);
-                  } catch {}
+                  try { await openUrl(`${url}/device/login`); } catch {}
                 }}
               >
                 <ExternalLink className="mr-2 h-3 w-3" />
@@ -291,10 +384,10 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
           </div>
         )}
 
-        {/* Step 3: Key Selection */}
-        {step === "keys" && (
+        {/* Step 3: Key + Model Selection */}
+        {step === "config" && (
           <div className="py-4">
-            {loadingKeys ? (
+            {loadingConfig ? (
               <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 {t('addDialog.loadingKeys')}
@@ -303,9 +396,7 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
               <div className="text-center py-8">
                 <KeyRound className="h-8 w-8 mx-auto text-muted-foreground/30 mb-3" />
                 <p className="text-sm text-muted-foreground">{t('addDialog.noKeys')}</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {t('addDialog.noKeysHint')}
-                </p>
+                <p className="text-xs text-muted-foreground mt-1">{t('addDialog.noKeysHint')}</p>
               </div>
             ) : (
               <div className="space-y-4">
@@ -317,42 +408,44 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
                     </span>
                   </div>
                 )}
-                <div>
-                  <label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2 block">
-                    {t('addDialog.selectKey')}
+
+                {/* Key selector (dropdown) */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    {t('gateway.apiKey')}
                   </label>
-                  <div className="grid gap-1.5 max-h-[200px] overflow-y-auto">
-                    {keys.map((key) => {
-                      const isSelected = selectedKeyId === key.id;
-                      return (
-                        <button
-                          key={key.id}
-                          onClick={() => setSelectedKeyId(key.id)}
-                          className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-all ${
-                            isSelected
-                              ? "border-primary bg-primary/5 shadow-sm"
-                              : "border-border/60 hover:border-primary/40 hover:bg-secondary/30"
-                          }`}
-                        >
-                          <div className={`shrink-0 w-8 h-8 rounded-md flex items-center justify-center ${
-                            isSelected ? "bg-primary/10" : "bg-secondary/50"
-                          }`}>
-                            <KeyRound className={`h-4 w-4 ${isSelected ? "text-primary" : "text-muted-foreground/50"}`} />
+                  <Select value={selectedKeyId || ""} onValueChange={handleKeyChange}>
+                    <SelectTrigger className="h-8 text-xs border-border/60 bg-background/50">
+                      <SelectValue placeholder="—" />
+                    </SelectTrigger>
+                    <SelectContent className="border-border/60">
+                      {keys.map((key) => (
+                        <SelectItem key={key.id} value={key.id} className="text-xs cursor-pointer">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium">{key.name}</span>
+                            {key.ownerName && <span className="text-muted-foreground">@{key.ownerName}</span>}
+                            <span className="text-muted-foreground font-mono">{key.key.slice(0, 6)}…{key.key.slice(-3)}</span>
                           </div>
-                          <div className="flex-1 min-w-0">
-                            <div className={`font-medium text-sm ${isSelected ? "text-primary" : ""}`}>{key.name}</div>
-                            <div className="text-[11px] text-muted-foreground font-mono">
-                              {key.key.slice(0, 8)}…{key.key.slice(-4)}
-                            </div>
-                          </div>
-                          {isSelected && (
-                            <Check className="h-4 w-4 text-primary shrink-0" />
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
+
+                {/* Model selectors */}
+                {allModelIds.length > 0 && (
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      {t('gateway.models')}
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <ModelSelect label={t('models.claude')} value={claudeModel} onChange={setClaudeModel} models={claudeModels} noModelsText={t('gateway.noModels')} />
+                      <ModelSelect label={t('models.claudeSmall')} value={claudeSmallModel} onChange={setClaudeSmallModel} models={claudeSmallModels} noModelsText={t('gateway.noModels')} />
+                      <ModelSelect label={t('models.codex')} value={codexModel} onChange={setCodexModel} models={codexModels} noModelsText={t('gateway.noModels')} />
+                      <ModelSelect label={t('models.gemini')} value={geminiModel} onChange={setGeminiModel} models={geminiModels} noModelsText={t('gateway.noModels')} />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             {error && <p className="text-sm text-destructive mt-2">{error}</p>}
@@ -369,5 +462,47 @@ export function AddGatewayDialog({ open, onOpenChange, onAdded }: AddGatewayDial
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function ModelSelect({
+  label,
+  value,
+  onChange,
+  models,
+  noModelsText,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  models: string[];
+  noModelsText?: string;
+}) {
+  if (models.length === 0) {
+    return (
+      <div className="space-y-1">
+        <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
+        <div className="h-7 flex items-center px-2 text-xs text-muted-foreground/40 italic">
+          {noModelsText || "No models available"}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1">
+      <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger className="h-7 text-xs border-border/60 transition-elegant-fast bg-background/50">
+          <SelectValue placeholder="—" />
+        </SelectTrigger>
+        <SelectContent className="border-border/60">
+          {models.map((m) => (
+            <SelectItem key={m} value={m} className="text-xs font-mono cursor-pointer">
+              {m}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
