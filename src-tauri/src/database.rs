@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::keystore;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -215,6 +216,52 @@ impl Database {
             conn.execute_batch("PRAGMA user_version = 5")?;
         }
 
+        if version < 6 {
+            // Migrate existing plaintext secrets from DB to OS keychain
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT id, auth_key, session_token FROM gateways WHERE auth_key != '' AND auth_key IS NOT NULL",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?;
+                for row in rows.flatten() {
+                    let (id, auth_key, session_token) = row;
+                    if !auth_key.is_empty() {
+                        keystore::set_secret(&keystore::gw_auth_key(&id), &auth_key);
+                    }
+                    if let Some(ref token) = session_token {
+                        if !token.is_empty() {
+                            keystore::set_secret(&keystore::gw_session_token(&id), token);
+                        }
+                    }
+                }
+            }
+            // Migrate active key_value
+            {
+                let kv: Option<String> = conn
+                    .query_row("SELECT key_value FROM active_config WHERE id = 1", [], |row| row.get(0))
+                    .ok()
+                    .flatten();
+                if let Some(ref v) = kv {
+                    if !v.is_empty() {
+                        keystore::set_secret(&keystore::active_key_value(), v);
+                    }
+                }
+            }
+            // Clear plaintext from DB
+            conn.execute_batch(
+                "UPDATE gateways SET auth_key = '', session_token = NULL;
+                 UPDATE active_config SET key_value = NULL;
+                ",
+            )?;
+            conn.execute_batch("PRAGMA user_version = 6")?;
+        }
+
         Ok(Database {
             conn: Mutex::new(conn),
         })
@@ -223,6 +270,11 @@ impl Database {
     // ─── Gateway CRUD ───
 
     pub fn add_gateway(&self, gw: &Gateway) -> Result<(), AppError> {
+        // Store secrets in OS keychain
+        keystore::set_secret(&keystore::gw_auth_key(&gw.id), &gw.auth_key);
+        if let Some(ref token) = gw.session_token {
+            keystore::set_secret(&keystore::gw_session_token(&gw.id), token);
+        }
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO gateways (id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at)
@@ -231,9 +283,9 @@ impl Database {
                 gw.id,
                 gw.name,
                 gw.url,
-                gw.auth_key,
+                "",  // empty — real value in keychain
                 gw.is_admin as i32,
-                gw.session_token,
+                Option::<String>::None,  // empty — real value in keychain
                 gw.user_id,
                 gw.user_name,
                 gw.sort_order,
@@ -263,7 +315,17 @@ impl Database {
                 created_at: row.get(9)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let mut gateways: Vec<Gateway> = rows.filter_map(|r| r.ok()).collect();
+        // Fill secrets from keychain
+        for gw in &mut gateways {
+            if let Some(key) = keystore::get_secret(&keystore::gw_auth_key(&gw.id)) {
+                gw.auth_key = key;
+            }
+            if let Some(token) = keystore::get_secret(&keystore::gw_session_token(&gw.id)) {
+                gw.session_token = Some(token);
+            }
+        }
+        Ok(gateways)
     }
 
     pub fn get_gateway(&self, id: &str) -> Result<Option<Gateway>, AppError> {
@@ -287,7 +349,15 @@ impl Database {
             })
         });
         match result {
-            Ok(gw) => Ok(Some(gw)),
+            Ok(mut gw) => {
+                if let Some(key) = keystore::get_secret(&keystore::gw_auth_key(&gw.id)) {
+                    gw.auth_key = key;
+                }
+                if let Some(token) = keystore::get_secret(&keystore::gw_session_token(&gw.id)) {
+                    gw.session_token = Some(token);
+                }
+                Ok(Some(gw))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -300,10 +370,11 @@ impl Database {
         url: &str,
         auth_key: &str,
     ) -> Result<(), AppError> {
+        keystore::set_secret(&keystore::gw_auth_key(id), auth_key);
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE gateways SET name = ?1, url = ?2, auth_key = ?3 WHERE id = ?4",
-            params![name, url, auth_key, id],
+            params![name, url, "", id],
         )?;
         Ok(())
     }
@@ -314,15 +385,23 @@ impl Database {
         is_admin: bool,
         session_token: Option<&str>,
     ) -> Result<(), AppError> {
+        if let Some(token) = session_token {
+            keystore::set_secret(&keystore::gw_session_token(id), token);
+        } else {
+            keystore::delete_secret(&keystore::gw_session_token(id));
+        }
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE gateways SET is_admin = ?1, session_token = ?2 WHERE id = ?3",
-            params![is_admin as i32, session_token, id],
+            params![is_admin as i32, Option::<String>::None, id],
         )?;
         Ok(())
     }
 
     pub fn delete_gateway(&self, id: &str) -> Result<(), AppError> {
+        // Remove secrets from keychain
+        keystore::delete_secret(&keystore::gw_auth_key(id));
+        keystore::delete_secret(&keystore::gw_session_token(id));
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM health_cache WHERE gateway_id = ?1", params![id])?;
         conn.execute("DELETE FROM health_check_log WHERE gateway_id = ?1", params![id])?;
@@ -332,6 +411,8 @@ impl Database {
              WHERE gateway_id = ?1",
             params![id],
         )?;
+        // Also clear active key_value from keychain if this gateway was active
+        keystore::delete_secret(&keystore::active_key_value());
         Ok(())
     }
 
@@ -350,7 +431,7 @@ impl Database {
 
     pub fn get_active_config(&self) -> Result<ActiveConfig, AppError> {
         let conn = self.conn.lock().unwrap();
-        let result = conn.query_row(
+        let mut result = conn.query_row(
             "SELECT gateway_id, key_id, key_name, key_value,
                     claude_model, claude_small_model, codex_model, gemini_model,
                     auto_switch, applied_at, last_switched_at
@@ -372,10 +453,20 @@ impl Database {
                 })
             },
         )?;
+        // Fill key_value from keychain
+        if let Some(kv) = keystore::get_secret(&keystore::active_key_value()) {
+            result.key_value = Some(kv);
+        }
         Ok(result)
     }
 
     pub fn set_active_config(&self, config: &ActiveConfig) -> Result<(), AppError> {
+        // Store key_value in keychain
+        if let Some(ref kv) = config.key_value {
+            keystore::set_secret(&keystore::active_key_value(), kv);
+        } else {
+            keystore::delete_secret(&keystore::active_key_value());
+        }
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE active_config SET
@@ -387,7 +478,7 @@ impl Database {
                 config.gateway_id,
                 config.key_id,
                 config.key_name,
-                config.key_value,
+                Option::<String>::None,  // empty — real value in keychain
                 config.claude_model,
                 config.claude_small_model,
                 config.codex_model,

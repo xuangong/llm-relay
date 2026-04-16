@@ -4,6 +4,7 @@ mod database;
 mod error;
 mod gateway;
 mod health;
+mod keystore;
 mod proxy_server;
 mod tray;
 
