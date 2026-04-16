@@ -116,7 +116,6 @@ pub fn run() {
             commands::test_heartbeat,
             commands::apply_config,
             commands::read_current_config,
-            commands::check_config_valid,
             commands::clear_config,
             commands::get_active_config_cmd,
             commands::get_settings,

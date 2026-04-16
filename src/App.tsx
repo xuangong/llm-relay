@@ -28,7 +28,6 @@ function App() {
   const [logErrorCount, setLogErrorCount] = useState(0);
   const [bottomTab, setBottomTab] = useState<"usage" | "logs">("usage");
   const [appVersion, setAppVersion] = useState("");
-  const [configDrifted, setConfigDrifted] = useState(false);
   const [logFilterGateway, setLogFilterGateway] = useState<string>("all");
   const [clientName, setClientName] = useState("");
   const [editingClientName, setEditingClientName] = useState(false);
@@ -115,16 +114,6 @@ function App() {
       unlisten3.then((fn) => fn());
     };
   }, [loadAll]);
-
-  // Poll config drift detection every 30s
-  useEffect(() => {
-    const check = () => {
-      api.checkConfigValid().then((valid) => setConfigDrifted(!valid)).catch(() => {});
-    };
-    check();
-    const timer = setInterval(check, 30_000);
-    return () => clearInterval(timer);
-  }, [activeConfig?.appliedAt]);
 
   const handleAutoSwitchChange = async (checked: boolean) => {
     setAutoSwitch(checked);
@@ -303,7 +292,6 @@ function App() {
             <GatewayList
               gateways={gateways}
               activeGatewayId={activeConfig?.gatewayId ?? null}
-              configDrifted={configDrifted}
               activeKeyId={activeConfig?.keyId ?? null}
               activeModels={{
                 claude: activeConfig?.claudeModel ?? null,

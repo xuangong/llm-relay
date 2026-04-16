@@ -26,7 +26,6 @@ import { extractErrorMessage } from "@/lib/error";
 interface GatewayListProps {
   gateways: GatewayWithHealth[];
   activeGatewayId: string | null;
-  configDrifted: boolean;
   activeKeyId: string | null;
   activeModels: {
     claude: string | null;
@@ -40,7 +39,6 @@ interface GatewayListProps {
 function SortableGatewayCard({
   gateway,
   isActive,
-  configDrifted,
   activeKeyId,
   activeModels,
   onSelect,
@@ -49,7 +47,6 @@ function SortableGatewayCard({
 }: {
   gateway: GatewayWithHealth;
   isActive: boolean;
-  configDrifted: boolean;
   activeKeyId: string | null;
   activeModels: {
     claude: string | null;
@@ -82,7 +79,6 @@ function SortableGatewayCard({
       <GatewayCard
         gateway={gateway}
         isActive={isActive}
-        configDrifted={configDrifted}
         activeKeyId={activeKeyId}
         activeModels={activeModels}
         dragHandleProps={listeners}
@@ -97,7 +93,6 @@ function SortableGatewayCard({
 export function GatewayList({
   gateways: initialGateways,
   activeGatewayId,
-  configDrifted,
   activeKeyId,
   activeModels,
   onRefresh,
@@ -141,23 +136,24 @@ export function GatewayList({
       try {
         await api.reorderGateways(newOrder.map((g) => g.id));
       } catch (err) {
-        console.error("Failed to reorder:", err);
-        toast.error(`Failed to reorder: ${extractErrorMessage(err)}`);
+        toast.error(`Reorder failed: ${extractErrorMessage(err)}`);
         setGateways(gateways);
       }
     },
     [gateways]
   );
 
-  const handleDelete = async (id: string) => {
-    try {
-      await api.deleteGateway(id);
-      onRefresh();
-    } catch (err) {
-      console.error("Failed to delete gateway:", err);
-      toast.error(`Failed to delete: ${extractErrorMessage(err)}`);
-    }
-  };
+  const handleDelete = useCallback(
+    async (id: string) => {
+      try {
+        await api.deleteGateway(id);
+        onRefresh();
+      } catch (err) {
+        toast.error(`Delete failed: ${extractErrorMessage(err)}`);
+      }
+    },
+    [onRefresh]
+  );
 
   return (
     <DndContext
@@ -175,7 +171,6 @@ export function GatewayList({
               key={gw.id}
               gateway={gw}
               isActive={activeGatewayId === gw.id}
-              configDrifted={activeGatewayId === gw.id && configDrifted}
               activeKeyId={activeKeyId}
               activeModels={activeModels}
               onSelect={() => {}}

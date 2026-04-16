@@ -465,15 +465,20 @@ pub fn clear_all_configs() -> Result<(), AppError> {
 /// Codex CLI requires this env var to exist; we set a dummy placeholder
 /// since the local proxy injects the real key.
 fn ensure_openai_api_key_in_shell_rc() -> Result<(), AppError> {
-    // Skip if already set in current process environment
-    if std::env::var("OPENAI_API_KEY").is_ok() {
-        return Ok(());
+    // Set in current process so child processes inherit immediately
+    if std::env::var("OPENAI_API_KEY").is_err() {
+        std::env::set_var("OPENAI_API_KEY", "dummy");
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     {
+        // launchctl setenv makes it available to GUI apps (Finder, Spotlight launches)
+        let _ = std::process::Command::new("launchctl")
+            .args(["setenv", "OPENAI_API_KEY", "dummy"])
+            .output();
+
+        // Also write to shell rc for terminal sessions
         let home = home_dir();
-        // Determine which rc file to use
         let rc_path = if home.join(".zshrc").exists() {
             home.join(".zshrc")
         } else {
@@ -487,23 +492,50 @@ fn ensure_openai_api_key_in_shell_rc() -> Result<(), AppError> {
             String::new()
         };
 
-        // Skip if already present (any value)
-        if content.lines().any(|line| {
+        if !content.lines().any(|line| {
             let trimmed = line.trim();
             trimmed.starts_with(marker) && !trimmed.starts_with('#')
         }) {
-            return Ok(());
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&rc_path)?;
+            writeln!(f)?;
+            writeln!(f, "# Added by LLM Relay for Codex CLI compatibility")?;
+            writeln!(f, "export OPENAI_API_KEY=dummy")?;
         }
+    }
 
-        // Append the export line
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&rc_path)?;
-        writeln!(f)?;
-        writeln!(f, "# Added by LLM Relay for Codex CLI compatibility")?;
-        writeln!(f, "export OPENAI_API_KEY=dummy")?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let home = home_dir();
+        let rc_path = if home.join(".zshrc").exists() {
+            home.join(".zshrc")
+        } else {
+            home.join(".bashrc")
+        };
+
+        let marker = "export OPENAI_API_KEY=";
+        let content = if rc_path.exists() {
+            fs::read_to_string(&rc_path)?
+        } else {
+            String::new()
+        };
+
+        if !content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with(marker) && !trimmed.starts_with('#')
+        }) {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&rc_path)?;
+            writeln!(f)?;
+            writeln!(f, "# Added by LLM Relay for Codex CLI compatibility")?;
+            writeln!(f, "export OPENAI_API_KEY=dummy")?;
+        }
     }
 
     #[cfg(windows)]
@@ -574,46 +606,7 @@ fn broadcast_env_change() {
     }
 }
 
-/// Check if all CLI config files still point to the local proxy.
-/// Returns true if configs are correct, false if they've been modified externally.
-pub fn check_configs_valid() -> bool {
-    let proxy_url = crate::proxy_server::proxy_base_url();
-    let key = crate::proxy_server::PLACEHOLDER_KEY;
 
-    // Check Claude config
-    if let Ok(Some(val)) = read_claude_config() {
-        if let Some(env) = val.get("env").and_then(|v| v.as_object()) {
-            let url_ok = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) == Some(&proxy_url);
-            let key_ok = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) == Some(key);
-            if !url_ok || !key_ok {
-                return false;
-            }
-        }
-    }
-
-    // Check Codex auth
-    let codex_auth_path = codex_dir().join("auth.json");
-    if codex_auth_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&codex_auth_path) {
-            if let Ok(val) = serde_json::from_str::<Value>(&content) {
-                if val.get("OPENAI_API_KEY").and_then(|v| v.as_str()) != Some(key) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    // Check Gemini config
-    if let Ok(Some(env_map)) = read_gemini_config() {
-        let url_ok = env_map.get("GOOGLE_GEMINI_BASE_URL").map(|s| s.as_str()) == Some(&proxy_url);
-        let key_ok = env_map.get("GEMINI_API_KEY").map(|s| s.as_str()) == Some(key);
-        if !url_ok || !key_ok {
-            return false;
-        }
-    }
-
-    true
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentCliConfig {
