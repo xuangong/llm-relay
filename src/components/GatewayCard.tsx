@@ -5,14 +5,23 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   GatewayWithHealth,
+  ApiKey,
+  ModelList,
   ApplyConfigParams,
   HealthLogEntry,
 } from "@/lib/api";
 import * as api from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n } from "@/lib/i18n";
-import { EditGatewayDialog } from "./EditGatewayDialog";
+import { SignInDialog } from "./SignInDialog";
 
 interface ProxyTrafficEntry {
   path: string;
@@ -30,6 +39,7 @@ import {
   ChevronRight,
   LogIn,
   KeyRound,
+  X,
 } from "lucide-react";
 
 interface GatewayCardProps {
@@ -62,11 +72,20 @@ export function GatewayCard({
 }: GatewayCardProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(isActive);
+  const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [models, setModels] = useState<ModelList | null>(null);
+  const [selectedKeyId, setSelectedKeyId] = useState<string | null>(activeKeyId);
+  const [claudeModel, setClaudeModel] = useState(activeModels.claude || "");
+  const [claudeSmallModel, setClaudeSmallModel] = useState(activeModels.claudeSmall || "");
+  const [codexModel, setCodexModel] = useState(activeModels.codex || "");
+  const [geminiModel, setGeminiModel] = useState(activeModels.gemini || "");
+  const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [editMode, setEditMode] = useState(false);
   const [healthLog, setHealthLog] = useState<HealthLogEntry[]>([]);
   const [trafficLog, setTrafficLog] = useState<ProxyTrafficEntry[]>([]);
   const trafficLogRef = useRef<ProxyTrafficEntry[]>([]);
-  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [showSignIn, setShowSignIn] = useState(false);
 
   // Tri-state: null = never checked, true = healthy, false = confirmed offline
   const neverChecked = gateway.lastChecked === null;
@@ -113,6 +132,102 @@ export function GatewayCard({
     loadHealthLog();
   }, [expanded]);
 
+  const loadKeysAndModels = async (keyValue?: string) => {
+    setLoading(true);
+    try {
+      const keysResult = await api.fetchKeys(gateway.id);
+      setKeys(keysResult);
+
+      // Match by activeKeyId first, then by gateway.authKey value, then fallback to first
+      const selectedKey = keysResult.find((k) => k.id === selectedKeyId)
+        ?? keysResult.find((k) => k.key === gateway.authKey)
+        ?? keysResult[0];
+      const keyToUse = keyValue || selectedKey?.key;
+      if (selectedKey && selectedKeyId !== selectedKey.id) {
+        setSelectedKeyId(selectedKey.id);
+      }
+
+      const modelsResult = await api.fetchModels(gateway.id, keyToUse);
+      setModels(modelsResult);
+
+      // Auto-suggest models
+      if (modelsResult.data.length > 0) {
+        const modelIds = modelsResult.data.map((m) => m.id).sort((a, b) => b.localeCompare(a));
+        if (!claudeModel) {
+          const claude = modelIds.find((id) => id.toLowerCase().includes("opus")) ||
+            modelIds.find((id) => id.toLowerCase().includes("claude")) || "";
+          setClaudeModel(claude);
+        }
+        if (!claudeSmallModel) {
+          const small = modelIds.find((id) => id.toLowerCase().includes("haiku")) ||
+            modelIds.find((id) => id.toLowerCase().includes("claude")) || "";
+          setClaudeSmallModel(small);
+        }
+        if (!codexModel) {
+          const codex = modelIds.find((id) => /gpt-[5-9]/i.test(id)) ||
+            modelIds.find((id) => /\bo[1-9]/i.test(id)) || "";
+          setCodexModel(codex);
+        }
+        if (!geminiModel) {
+          const gemini = modelIds.find((id) => id.toLowerCase().includes("gemini")) || "";
+          setGeminiModel(gemini);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load keys/models:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Called after sign-in dialog completes successfully
+  const handleSignInComplete = () => {
+    setShowSignIn(false);
+    setEditMode(true);
+    if (!expanded) setExpanded(true);
+    loadKeysAndModels();
+  };
+
+  const handleCancelEdit = () => {
+    setEditMode(false);
+    setSelectedKeyId(activeKeyId);
+    setClaudeModel(activeModels.claude || "");
+    setClaudeSmallModel(activeModels.claudeSmall || "");
+    setCodexModel(activeModels.codex || "");
+    setGeminiModel(activeModels.gemini || "");
+  };
+
+  const handleDone = async () => {
+    const selectedKey = keys.find((k) => k.id === selectedKeyId);
+    setApplying(true);
+    try {
+      // Update gateway auth key if key changed
+      if (selectedKey && selectedKey.key !== gateway.authKey) {
+        await api.updateGateway(gateway.id, gateway.name, gateway.url, selectedKey.key);
+      }
+
+      const params: ApplyConfigParams = {
+        gatewayId: gateway.id,
+        keyId: selectedKey?.id,
+        keyName: selectedKey?.name,
+        keyValue: selectedKey?.key,
+        claudeModel: claudeModels.length > 0 ? (claudeModel || undefined) : undefined,
+        claudeSmallModel: claudeSmallModels.length > 0 ? (claudeSmallModel || undefined) : undefined,
+        codexModel: codexModels.length > 0 ? (codexModel || undefined) : undefined,
+        geminiModel: geminiModels.length > 0 ? (geminiModel || undefined) : undefined,
+      };
+      await api.applyConfig(params);
+
+      setEditMode(false);
+      onApplied();
+    } catch (err) {
+      console.error("Failed to save and apply:", err);
+      toast.error(`Failed to save: ${extractErrorMessage(err)}`);
+    } finally {
+      setApplying(false);
+    }
+  };
+
   const handleApply = async () => {
     setApplying(true);
     try {
@@ -135,6 +250,36 @@ export function GatewayCard({
     }
     setExpanded(!expanded);
   };
+
+  // Reload models when key changes in edit mode
+  const handleKeyChange = async (keyId: string) => {
+    setSelectedKeyId(keyId);
+    const key = keys.find((k) => k.id === keyId);
+    if (key) {
+      try {
+        const modelsResult = await api.fetchModels(gateway.id, key.key);
+        setModels(modelsResult);
+      } catch {
+        // keep existing models
+      }
+    }
+  };
+
+  // Model filtering
+  const allModels = models?.data.map((m) => m.id) || [];
+  const claudeModels = allModels.filter((m) =>
+    m.toLowerCase().includes("claude") && !m.toLowerCase().includes("haiku")
+  );
+  const claudeSmallModels = allModels.filter((m) =>
+    m.toLowerCase().includes("claude")
+  );
+  const codexModels = allModels.filter((m) => {
+    const lower = m.toLowerCase();
+    return /gpt-[5-9]/.test(lower) || /\bo[1-9]/.test(lower);
+  });
+  const geminiModels = allModels.filter((m) =>
+    m.toLowerCase().includes("gemini")
+  );
 
   // Card border style: tri-state
   const cardClass = isActive
@@ -205,13 +350,15 @@ export function GatewayCard({
           )}
 
           {/* Sign in to edit button */}
-          <button
-            onClick={(e) => { e.stopPropagation(); setShowEditDialog(true); }}
-            className="text-muted-foreground/40 hover:text-primary transition-elegant-fast flex items-center gap-1"
-            title={t('gateway.signInToEdit')}
-          >
-            <LogIn className="h-3.5 w-3.5" />
-          </button>
+          {!editMode && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowSignIn(true); }}
+              className="text-muted-foreground/40 hover:text-primary transition-elegant-fast flex items-center gap-1"
+              title={t('gateway.signInToEdit')}
+            >
+              <LogIn className="h-3.5 w-3.5" />
+            </button>
+          )}
 
           {/* Expand */}
           <div className="text-muted-foreground/40 group-hover:text-muted-foreground/70 transition-elegant-fast">
@@ -231,90 +378,166 @@ export function GatewayCard({
             >
               <div className="border-t border-border/40 bg-card/50">
                 <CardContent className="px-4 pt-3 pb-3 space-y-3">
-                  {/* Current key display (read-only) */}
-                  {isActive && activeKeyId && (
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                        {t('gateway.currentKey')}
-                      </label>
-                      <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border/50 bg-secondary/20">
-                        <KeyRound className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
-                        <span className="text-xs font-medium truncate">{activeKeyName || activeKeyId}</span>
-                        <span className="text-[10px] text-muted-foreground font-mono shrink-0">
-                          ...{gateway.authKey.slice(-4)}
-                        </span>
-                      </div>
+                  {loading ? (
+                    <div className="flex items-center justify-center py-5">
+                      <Loader2 className="h-4 w-4 animate-spin text-primary mr-2" />
+                      <span className="text-xs text-muted-foreground">{t('common.loading')}</span>
                     </div>
-                  )}
-
-                  {/* Health history sparkline */}
-                  {healthLog.length > 0 && (
-                    <HealthSparkline log={healthLog} />
-                  )}
-
-                  {/* Proxy traffic monitor (active gateway only) */}
-                  {isActive && trafficLog.length > 0 && (
-                    <TrafficMonitor log={trafficLog} />
-                  )}
-
-                  {/* Model selectors (read-only display of active models) */}
-                  {isActive && (activeModels.claude || activeModels.claudeSmall || activeModels.codex || activeModels.gemini) && (
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                        {t('gateway.models')}
-                      </label>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        {activeModels.claude && (
-                          <div className="text-[10px] text-muted-foreground">
-                            <span className="font-medium">{t('models.claude')}:</span>{" "}
-                            <span className="font-mono">{activeModels.claude}</span>
-                          </div>
-                        )}
-                        {activeModels.claudeSmall && (
-                          <div className="text-[10px] text-muted-foreground">
-                            <span className="font-medium">{t('models.claudeSmall')}:</span>{" "}
-                            <span className="font-mono">{activeModels.claudeSmall}</span>
-                          </div>
-                        )}
-                        {activeModels.codex && (
-                          <div className="text-[10px] text-muted-foreground">
-                            <span className="font-medium">{t('models.codex')}:</span>{" "}
-                            <span className="font-mono">{activeModels.codex}</span>
-                          </div>
-                        )}
-                        {activeModels.gemini && (
-                          <div className="text-[10px] text-muted-foreground">
-                            <span className="font-medium">{t('models.gemini')}:</span>{" "}
-                            <span className="font-mono">{activeModels.gemini}</span>
-                          </div>
+                  ) : editMode ? (
+                    <>
+                      {/* API Key selector (dropdown) */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                          {t('gateway.apiKey')}
+                        </label>
+                        {keys.length > 0 ? (
+                          <Select value={selectedKeyId || ""} onValueChange={handleKeyChange}>
+                            <SelectTrigger className="h-8 text-xs border-border/60 bg-background/50">
+                              <SelectValue placeholder="—" />
+                            </SelectTrigger>
+                            <SelectContent className="border-border/60">
+                              {keys.map((key) => (
+                                <SelectItem key={key.id} value={key.id} className="text-xs cursor-pointer">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-medium">{key.name}</span>
+                                    {key.ownerName && <span className="text-muted-foreground">@{key.ownerName}</span>}
+                                    <span className="text-muted-foreground font-mono">{key.key.slice(0, 6)}…{key.key.slice(-3)}</span>
+                                  </div>
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <p className="text-[10px] text-muted-foreground">{t('gateway.noKeys')}</p>
                         )}
                       </div>
-                    </div>
-                  )}
 
-                  {/* Action buttons */}
-                  <div className="flex items-center justify-between pt-2 border-t border-border/30">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={(e) => { e.stopPropagation(); onDelete(); }}
-                      className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
-                    >
-                      <Trash2 className="h-3 w-3 mr-1" />
-                      {t('common.remove')}
-                    </Button>
-                    {!isActive && (
-                      <Button
-                        size="sm"
-                        onClick={handleApply}
-                        disabled={applying}
-                        className="h-7 px-3 text-xs"
-                      >
-                        {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
-                        {t('common.use')}
-                      </Button>
-                    )}
-                  </div>
+                      {/* Model selectors */}
+                      {allModels.length > 0 && (
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                            {t('gateway.models')}
+                          </label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <ModelSelect label={t('models.claude')} value={claudeModel} onChange={setClaudeModel} models={claudeModels} noModelsText={t('gateway.noModels')} />
+                            <ModelSelect label={t('models.claudeSmall')} value={claudeSmallModel} onChange={setClaudeSmallModel} models={claudeSmallModels} noModelsText={t('gateway.noModels')} />
+                            <ModelSelect label={t('models.codex')} value={codexModel} onChange={setCodexModel} models={codexModels} noModelsText={t('gateway.noModels')} />
+                            <ModelSelect label={t('models.gemini')} value={geminiModel} onChange={setGeminiModel} models={geminiModels} noModelsText={t('gateway.noModels')} />
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Edit action buttons */}
+                      <div className="flex items-center justify-between pt-2 border-t border-border/30">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => { e.stopPropagation(); handleCancelEdit(); }}
+                          disabled={applying}
+                          className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                        >
+                          <X className="h-3 w-3 mr-1" />
+                          {t('common.cancel')}
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={handleDone}
+                          disabled={applying || !selectedKeyId}
+                          className="h-7 px-3 text-xs"
+                        >
+                          {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
+                          {t('common.done')}
+                        </Button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      {/* Current key display (read-only) */}
+                      {isActive && activeKeyId && (
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                            {t('gateway.currentKey')}
+                          </label>
+                          <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border/50 bg-secondary/20">
+                            <KeyRound className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
+                            <span className="text-xs font-medium truncate">{activeKeyName || activeKeyId}</span>
+                            <span className="text-[10px] text-muted-foreground font-mono shrink-0">
+                              ...{gateway.authKey.slice(-4)}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Health history sparkline */}
+                      {healthLog.length > 0 && (
+                        <HealthSparkline log={healthLog} />
+                      )}
+
+                      {/* Proxy traffic monitor (active gateway only) */}
+                      {isActive && trafficLog.length > 0 && (
+                        <TrafficMonitor log={trafficLog} />
+                      )}
+
+                      {/* Models (read-only) */}
+                      {isActive && (activeModels.claude || activeModels.claudeSmall || activeModels.codex || activeModels.gemini) && (
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                            {t('gateway.models')}
+                          </label>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {activeModels.claude && (
+                              <div className="text-[10px] text-muted-foreground">
+                                <span className="font-medium">{t('models.claude')}:</span>{" "}
+                                <span className="font-mono">{activeModels.claude}</span>
+                              </div>
+                            )}
+                            {activeModels.claudeSmall && (
+                              <div className="text-[10px] text-muted-foreground">
+                                <span className="font-medium">{t('models.claudeSmall')}:</span>{" "}
+                                <span className="font-mono">{activeModels.claudeSmall}</span>
+                              </div>
+                            )}
+                            {activeModels.codex && (
+                              <div className="text-[10px] text-muted-foreground">
+                                <span className="font-medium">{t('models.codex')}:</span>{" "}
+                                <span className="font-mono">{activeModels.codex}</span>
+                              </div>
+                            )}
+                            {activeModels.gemini && (
+                              <div className="text-[10px] text-muted-foreground">
+                                <span className="font-medium">{t('models.gemini')}:</span>{" "}
+                                <span className="font-mono">{activeModels.gemini}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Action buttons */}
+                      <div className="flex items-center justify-between pt-2 border-t border-border/30">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                          className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                        >
+                          <Trash2 className="h-3 w-3 mr-1" />
+                          {t('common.remove')}
+                        </Button>
+                        {!isActive && (
+                          <Button
+                            size="sm"
+                            onClick={handleApply}
+                            disabled={applying}
+                            className="h-7 px-3 text-xs"
+                          >
+                            {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
+                            {t('common.use')}
+                          </Button>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </CardContent>
               </div>
             </motion.div>
@@ -322,11 +545,11 @@ export function GatewayCard({
         </AnimatePresence>
       </Card>
 
-      <EditGatewayDialog
-        open={showEditDialog}
-        onOpenChange={setShowEditDialog}
-        gateway={gateway}
-        onUpdated={onApplied}
+      <SignInDialog
+        open={showSignIn}
+        onOpenChange={setShowSignIn}
+        gatewayUrl={gateway.url}
+        onComplete={handleSignInComplete}
       />
     </>
   );
@@ -336,7 +559,6 @@ function HealthSparkline({ log }: { log: HealthLogEntry[] }) {
   const { t } = useI18n();
   if (log.length === 0) return null;
 
-  // Sort oldest → newest, show all available checks
   const sorted = [...log].sort(
     (a, b) => new Date(a.checkedAt).getTime() - new Date(b.checkedAt).getTime()
   );
@@ -352,7 +574,6 @@ function HealthSparkline({ log }: { log: HealthLogEntry[] }) {
   const maxLatency = Math.max(...sorted.map((e) => e.latencyMs ?? 0), 1);
   const BAR_MAX_PX = 28;
 
-  // Oldest entry time for label
   const oldestTime = new Date(sorted[0].checkedAt);
   const oldestLabel = oldestTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
@@ -441,6 +662,48 @@ function TrafficMonitor({ log }: { log: ProxyTrafficEntry[] }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function ModelSelect({
+  label,
+  value,
+  onChange,
+  models,
+  noModelsText,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  models: string[];
+  noModelsText?: string;
+}) {
+  if (models.length === 0) {
+    return (
+      <div className="space-y-1">
+        <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
+        <div className="h-7 flex items-center px-2 text-xs text-muted-foreground/40 italic">
+          {noModelsText || "No models available"}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1">
+      <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger className="h-7 text-xs border-border/60 transition-elegant-fast bg-background/50">
+          <SelectValue placeholder="—" />
+        </SelectTrigger>
+        <SelectContent className="border-border/60">
+          {models.map((m) => (
+            <SelectItem key={m} value={m} className="text-xs font-mono cursor-pointer">
+              {m}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }

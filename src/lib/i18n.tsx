@@ -20,8 +20,9 @@ const en: Translations = {
     error: "Error",
     errors: "Errors",
     use: "Use",
-  },
-  header: {
+    next: "Next",
+    retry: "Retry",
+  },  header: {
     title: "LLM Relay",
     autoFailover: "Auto Failover",
     launchAtLogin: "Launch at Login",
@@ -50,8 +51,8 @@ const en: Translations = {
     description: "Sign in to change your API key or gateway settings.",
     selectKey: "Select API Key",
     updateGateway: "Update Gateway",
-  },
-  gateway: {
+    modelsStep: "Select the models to use with this gateway.",
+  },  gateway: {
     inUse: "in use",
     offline: "offline",
     authToken: "Auth Token",
@@ -128,8 +129,9 @@ const zh: Translations = {
     error: "错误",
     errors: "错误",
     use: "使用",
-  },
-  header: {
+    next: "下一步",
+    retry: "重试",
+  },  header: {
     title: "LLM Relay",
     autoFailover: "自动故障转移",
     launchAtLogin: "开机启动",
@@ -158,8 +160,8 @@ const zh: Translations = {
     description: "登录以更改 API 密钥或网关设置。",
     selectKey: "选择 API 密钥",
     updateGateway: "更新网关",
-  },
-  gateway: {
+    modelsStep: "选择此网关要使用的模型。",
+  },  gateway: {
     inUse: "使用中",
     offline: "离线",
     authToken: "授权令牌",
