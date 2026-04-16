@@ -456,14 +456,14 @@ export function GatewayCard({
                   ) : (
                     <>
                       {/* Current key display (read-only) */}
-                      {isActive && activeKeyId && (
+                      {gateway.authKey && (
                         <div className="space-y-1.5">
                           <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                             {t('gateway.currentKey')}
                           </label>
                           <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border/50 bg-secondary/20">
                             <KeyRound className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
-                            <span className="text-xs font-medium truncate">{activeKeyName || activeKeyId}</span>
+                            <span className="text-xs font-medium truncate">{isActive && activeKeyName ? activeKeyName : t('gateway.apiKey')}</span>
                             <span className="text-[10px] text-muted-foreground font-mono shrink-0">
                               ...{gateway.authKey.slice(-4)}
                             </span>
