@@ -37,6 +37,9 @@ fn save_all(map: &HashMap<String, String>) {
 /// Store a secret in the OS keychain.
 pub fn set_secret(key: &str, value: &str) {
     let mut map = load_all();
+    if map.get(key).map(String::as_str) == Some(value) {
+        return; // unchanged — skip keychain write
+    }
     map.insert(key.to_string(), value.to_string());
     save_all(&map);
 }

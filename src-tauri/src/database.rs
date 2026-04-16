@@ -262,14 +262,16 @@ impl Database {
             conn.execute_batch("PRAGMA user_version = 6")?;
         }
 
-        // Migrate legacy per-key keychain entries into single unified entry
-        {
+        // Migrate legacy per-key keychain entries into single unified entry.
+        // Only run once — guarded by user_version 7.
+        if version < 7 {
             let mut stmt = conn.prepare("SELECT id FROM gateways")?;
             let ids: Vec<String> = stmt
                 .query_map([], |row| row.get(0))?
                 .filter_map(|r| r.ok())
                 .collect();
             keystore::migrate_legacy_entries(&ids);
+            conn.execute_batch("PRAGMA user_version = 7")?;
         }
 
         Ok(Database {
