@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Toaster, toast } from "sonner";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getVersion } from "@tauri-apps/api/app";
 import { GatewayList } from "@/components/GatewayList";
 import { AddGatewayDialog } from "@/components/AddGatewayDialog";
 import { TrafficLogPanel } from "@/components/TrafficLogPanel";
@@ -26,6 +27,8 @@ function App() {
   const [showLogs, setShowLogs] = useState(false);
   const [logErrorCount, setLogErrorCount] = useState(0);
   const [bottomTab, setBottomTab] = useState<"usage" | "logs">("usage");
+  const [appVersion, setAppVersion] = useState("");
+  const [configDrifted, setConfigDrifted] = useState(false);
   const [logFilterGateway, setLogFilterGateway] = useState<string>("all");
   const [clientName, setClientName] = useState("");
   const [editingClientName, setEditingClientName] = useState(false);
@@ -80,6 +83,7 @@ function App() {
       setLoading(false);
     };
     init();
+    getVersion().then(setAppVersion);
   }, [loadAll]);
 
   // Listen for backend events
@@ -111,6 +115,16 @@ function App() {
       unlisten3.then((fn) => fn());
     };
   }, [loadAll]);
+
+  // Poll config drift detection every 30s
+  useEffect(() => {
+    const check = () => {
+      api.checkConfigValid().then((valid) => setConfigDrifted(!valid)).catch(() => {});
+    };
+    check();
+    const timer = setInterval(check, 30_000);
+    return () => clearInterval(timer);
+  }, [activeConfig?.appliedAt]);
 
   const handleAutoSwitchChange = async (checked: boolean) => {
     setAutoSwitch(checked);
@@ -177,6 +191,7 @@ function App() {
         <div className="flex items-center justify-between px-5 py-2.5">
           <div className="flex items-center gap-3 animate-fade-in">
             <h1 className="text-base font-semibold tracking-tight">{t('header.title')}</h1>
+            {appVersion && <span className="text-xs text-muted-foreground font-normal">v{appVersion}</span>}
             {totalGateways > 0 && (
               <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
                 <span className={`inline-block w-1.5 h-1.5 rounded-full ${healthySummary > 0 ? 'bg-success' : 'bg-muted-foreground'}`} />
@@ -288,6 +303,7 @@ function App() {
             <GatewayList
               gateways={gateways}
               activeGatewayId={activeConfig?.gatewayId ?? null}
+              configDrifted={configDrifted}
               activeKeyId={activeConfig?.keyId ?? null}
               activeModels={{
                 claude: activeConfig?.claudeModel ?? null,

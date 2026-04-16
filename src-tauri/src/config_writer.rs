@@ -449,6 +449,7 @@ pub fn apply_all_configs(
     write_claude_config(&proxy_url, key, claude_model, claude_small_model)?;
     write_codex_config(&proxy_url, key, codex_model)?;
     write_gemini_config(&proxy_url, key)?;
+    ensure_openai_api_key_in_shell_rc()?;
     Ok(())
 }
 
@@ -460,7 +461,159 @@ pub fn clear_all_configs() -> Result<(), AppError> {
     Ok(())
 }
 
-/// Read current config from all three CLI tools.
+/// Ensure OPENAI_API_KEY is set in the user's environment.
+/// Codex CLI requires this env var to exist; we set a dummy placeholder
+/// since the local proxy injects the real key.
+fn ensure_openai_api_key_in_shell_rc() -> Result<(), AppError> {
+    // Skip if already set in current process environment
+    if std::env::var("OPENAI_API_KEY").is_ok() {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        let home = home_dir();
+        // Determine which rc file to use
+        let rc_path = if home.join(".zshrc").exists() {
+            home.join(".zshrc")
+        } else {
+            home.join(".bashrc")
+        };
+
+        let marker = "export OPENAI_API_KEY=";
+        let content = if rc_path.exists() {
+            fs::read_to_string(&rc_path)?
+        } else {
+            String::new()
+        };
+
+        // Skip if already present (any value)
+        if content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with(marker) && !trimmed.starts_with('#')
+        }) {
+            return Ok(());
+        }
+
+        // Append the export line
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&rc_path)?;
+        writeln!(f)?;
+        writeln!(f, "# Added by LLM Relay for Codex CLI compatibility")?;
+        writeln!(f, "export OPENAI_API_KEY=dummy")?;
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, set a persistent user environment variable via the registry
+        use std::process::Command;
+        // Check if already set in user env via `reg query`
+        let check = Command::new("reg")
+            .args(["query", "HKCU\\Environment", "/v", "OPENAI_API_KEY"])
+            .output();
+        if let Ok(output) = check {
+            if output.status.success() {
+                // Already set, skip
+                return Ok(());
+            }
+        }
+        // Set via setx (persists across reboots, user-level, writes to HKCU\Environment)
+        let result = Command::new("setx")
+            .args(["OPENAI_API_KEY", "dummy"])
+            .output()
+            .map_err(|e| AppError::Config(format!("Failed to run setx: {e}")))?;
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            log::warn!("setx OPENAI_API_KEY failed: {stderr}");
+        } else {
+            // Also set in current process so child processes inherit it immediately
+            std::env::set_var("OPENAI_API_KEY", "dummy");
+            // Broadcast WM_SETTINGCHANGE so Explorer and other apps pick up the change
+            broadcast_env_change();
+        }
+    }
+
+    Ok(())
+}
+
+/// Broadcast WM_SETTINGCHANGE after modifying environment variables,
+/// so Explorer and other running apps pick up the change without restart.
+#[cfg(windows)]
+fn broadcast_env_change() {
+    use std::ffi::CString;
+    use std::ptr;
+
+    // HWND_BROADCAST = 0xFFFF, WM_SETTINGCHANGE = 0x001A
+    extern "system" {
+        fn SendMessageTimeoutA(
+            hwnd: *mut std::ffi::c_void,
+            msg: u32,
+            wparam: usize,
+            lparam: *const i8,
+            flags: u32,
+            timeout: u32,
+            result: *mut usize,
+        ) -> isize;
+    }
+
+    let env = CString::new("Environment").unwrap();
+    unsafe {
+        // SMTO_ABORTIFHUNG = 0x0002, timeout 5000ms
+        SendMessageTimeoutA(
+            0xFFFF as *mut _,
+            0x001A,
+            0,
+            env.as_ptr(),
+            0x0002,
+            5000,
+            ptr::null_mut(),
+        );
+    }
+}
+
+/// Check if all CLI config files still point to the local proxy.
+/// Returns true if configs are correct, false if they've been modified externally.
+pub fn check_configs_valid() -> bool {
+    let proxy_url = crate::proxy_server::proxy_base_url();
+    let key = crate::proxy_server::PLACEHOLDER_KEY;
+
+    // Check Claude config
+    if let Ok(Some(val)) = read_claude_config() {
+        if let Some(env) = val.get("env").and_then(|v| v.as_object()) {
+            let url_ok = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) == Some(&proxy_url);
+            let key_ok = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) == Some(key);
+            if !url_ok || !key_ok {
+                return false;
+            }
+        }
+    }
+
+    // Check Codex auth
+    let codex_auth_path = codex_dir().join("auth.json");
+    if codex_auth_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&codex_auth_path) {
+            if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                if val.get("OPENAI_API_KEY").and_then(|v| v.as_str()) != Some(key) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Check Gemini config
+    if let Ok(Some(env_map)) = read_gemini_config() {
+        let url_ok = env_map.get("GOOGLE_GEMINI_BASE_URL").map(|s| s.as_str()) == Some(&proxy_url);
+        let key_ok = env_map.get("GEMINI_API_KEY").map(|s| s.as_str()) == Some(key);
+        if !url_ok || !key_ok {
+            return false;
+        }
+    }
+
+    true
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentCliConfig {

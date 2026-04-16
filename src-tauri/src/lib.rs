@@ -36,6 +36,14 @@ pub fn run() {
     let autostart_launcher = tauri_plugin_autostart::LinuxLauncher::Systemd;
 
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Second instance launched — bring existing window to front
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_autostart::init(autostart_launcher, None))
         .plugin(tauri_plugin_process::init())
         .plugin(
@@ -108,6 +116,7 @@ pub fn run() {
             commands::test_heartbeat,
             commands::apply_config,
             commands::read_current_config,
+            commands::check_config_valid,
             commands::clear_config,
             commands::get_active_config_cmd,
             commands::get_settings,

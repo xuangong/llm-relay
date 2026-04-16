@@ -47,6 +47,8 @@ const en: Translations = {
   },
   gateway: {
     inUse: "in use",
+    configDrift: "Config modified externally",
+    reApply: "Re-apply",
     offline: "offline",
     authToken: "Auth Token",
     apiKey: "API Key",
@@ -146,6 +148,8 @@ const zh: Translations = {
   },
   gateway: {
     inUse: "使用中",
+    configDrift: "配置已被外部修改",
+    reApply: "重新应用",
     offline: "离线",
     authToken: "授权令牌",
     apiKey: "API 密钥",

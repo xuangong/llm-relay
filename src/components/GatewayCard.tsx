@@ -44,6 +44,7 @@ import {
 interface GatewayCardProps {
   gateway: GatewayWithHealth;
   isActive: boolean;
+  configDrifted: boolean;
   activeKeyId: string | null;
   activeModels: {
     claude: string | null;
@@ -60,6 +61,7 @@ interface GatewayCardProps {
 export function GatewayCard({
   gateway,
   isActive,
+  configDrifted,
   activeKeyId,
   activeModels,
   dragHandleProps,
@@ -334,6 +336,11 @@ export function GatewayCard({
                   {t('gateway.inUse')}
                 </span>
               )}
+              {isActive && configDrifted && (
+                <span className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider bg-amber-500/15 text-amber-600 border border-amber-500/25">
+                  {t('gateway.configDrift')}
+                </span>
+              )}
               <span className="text-[11px] text-muted-foreground font-mono truncate">{gateway.url}</span>
               {gateway.userName && (
                 <span className="text-[10px] text-muted-foreground/60 truncate">
@@ -529,11 +536,12 @@ export function GatewayCard({
                           <Button
                             size="sm"
                             onClick={handleApply}
-                            disabled={applying || !selectedKeyId || isActive}
+                            disabled={applying || !selectedKeyId || (isActive && !configDrifted)}
+                            variant={isActive && configDrifted ? "destructive" : "default"}
                             className="h-7 px-3 text-xs"
                           >
                             {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
-                            {isActive ? t('gateway.inUse') : t('common.use')}
+                            {isActive && configDrifted ? t('gateway.reApply') : isActive ? t('gateway.inUse') : t('common.use')}
                           </Button>
                         </>
                       )}

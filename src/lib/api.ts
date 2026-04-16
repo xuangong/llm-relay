@@ -185,6 +185,9 @@ export const applyConfig = (params: ApplyConfigParams) =>
 export const readCurrentConfig = () =>
   invoke<CurrentCliConfig>("read_current_config");
 
+export const checkConfigValid = () =>
+  invoke<boolean>("check_config_valid");
+
 export const clearConfig = () =>
   invoke<void>("clear_config");
 

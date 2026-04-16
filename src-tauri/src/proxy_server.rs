@@ -144,9 +144,8 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
     let reqwest_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
 
-    let mut req_builder = client.request(reqwest_method, &target_url);
-
-    // Forward headers, stripping auth and hop-by-hop
+    // Build headers once, reuse for retry
+    let mut forward_headers = reqwest::header::HeaderMap::new();
     const SKIP: &[&str] = &[
         "host",
         "x-api-key",
@@ -161,19 +160,44 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             continue;
         }
         if let Ok(val_str) = value.to_str() {
-            req_builder = req_builder.header(name.as_str(), val_str);
+            if let (Ok(n), Ok(v)) = (
+                reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()),
+                reqwest::header::HeaderValue::from_str(val_str),
+            ) {
+                forward_headers.insert(n, v);
+            }
+        }
+    }
+    forward_headers.insert("x-api-key", reqwest::header::HeaderValue::from_str(&api_key).unwrap());
+
+    // Send with one retry on network error
+    let mut last_err = String::new();
+    let mut resp_result = None;
+    for attempt in 0..2u8 {
+        if attempt > 0 {
+            log::info!("Retry attempt {} for {}", attempt, target_url);
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let mut req_builder = client
+            .request(reqwest_method.clone(), &target_url)
+            .headers(forward_headers.clone());
+        if !body_bytes.is_empty() {
+            req_builder = req_builder.body(body_bytes.clone());
+        }
+        match req_builder.send().await {
+            Ok(resp) => {
+                resp_result = Some(resp);
+                break;
+            }
+            Err(e) => {
+                last_err = e.to_string();
+                log::warn!("Proxy forward error (attempt {}) → {}: {}", attempt + 1, target_url, e);
+            }
         }
     }
 
-    req_builder = req_builder.header("x-api-key", &api_key);
-
-    if !body_bytes.is_empty() {
-        req_builder = req_builder.body(body_bytes);
-    }
-
-    // Send and stream response back
-    match req_builder.send().await {
-        Ok(resp) => {
+    match resp_result {
+        Some(resp) => {
             let status_code = resp.status().as_u16();
             let latency_ms = start.elapsed().as_millis() as u64;
             let is_server_error = status_code >= 500 || status_code == 429;
@@ -331,12 +355,10 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
 
             response
         }
-        Err(e) => {
+        None => {
             let latency_ms = start.elapsed().as_millis() as u64;
-            log::warn!("Proxy forward error → {}: {}", target_url, e);
 
-            let err_str = e.to_string();
-            let _ = state.db.add_traffic_log(&gateway_id, &path, 502, latency_ms, Some(&err_str));
+            let _ = state.db.add_traffic_log(&gateway_id, &path, 502, latency_ms, Some(&last_err));
 
             let count = state.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
             if count >= ERROR_FAILOVER_THRESHOLD {
@@ -348,7 +370,7 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
 
             (
                 StatusCode::BAD_GATEWAY,
-                format!("{{\"error\":\"Gateway unreachable: {}\"}}", e),
+                format!("{{\"error\":\"Gateway unreachable: {}\"}}", last_err),
             )
                 .into_response()
         }

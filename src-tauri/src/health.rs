@@ -80,6 +80,9 @@ pub async fn check_and_switch(state: &AppState, app_handle: &tauri::AppHandle) {
         }
     }
 
+    // Refresh tray menu to reflect latest health status
+    tray::refresh_tray_menu(app_handle);
+
     // Auto-switch logic
     let config = match state.db.get_active_config() {
         Ok(c) => c,

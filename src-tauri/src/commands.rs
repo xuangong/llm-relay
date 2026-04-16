@@ -262,6 +262,11 @@ pub fn read_current_config() -> Result<config_writer::CurrentCliConfig, String> 
 }
 
 #[tauri::command]
+pub fn check_config_valid() -> Result<bool, String> {
+    Ok(config_writer::check_configs_valid())
+}
+
+#[tauri::command]
 pub async fn clear_config(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
