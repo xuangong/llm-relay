@@ -55,6 +55,7 @@ const en: Translations = {
   },  gateway: {
     inUse: "in use",
     offline: "offline",
+    reapply: "Re-apply",
     authToken: "Auth Token",
     apiKey: "API Key",
     noKeys: "No keys available.",
@@ -164,6 +165,7 @@ const zh: Translations = {
   },  gateway: {
     inUse: "使用中",
     offline: "离线",
+    reapply: "重新应用",
     authToken: "授权令牌",
     apiKey: "API 密钥",
     noKeys: "无可用密钥。",

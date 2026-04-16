@@ -527,17 +527,15 @@ export function GatewayCard({
                           <Trash2 className="h-3 w-3 mr-1" />
                           {t('common.remove')}
                         </Button>
-                        {!isActive && (
-                          <Button
-                            size="sm"
-                            onClick={handleApply}
-                            disabled={applying}
-                            className="h-7 px-3 text-xs"
-                          >
-                            {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
-                            {t('common.use')}
-                          </Button>
-                        )}
+                        <Button
+                          size="sm"
+                          onClick={handleApply}
+                          disabled={applying}
+                          className="h-7 px-3 text-xs"
+                        >
+                          {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
+                          {isActive ? t('gateway.reapply') : t('common.use')}
+                        </Button>
                       </div>
                     </>
                   )}
