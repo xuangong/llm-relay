@@ -487,6 +487,15 @@ fn parse_sse_tokens_incremental(text: &str) -> (i64, i64, i64, i64) {
                     output += usage.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
                 }
             }
+            Some("response.completed") => {
+                // OpenAI Responses API (Codex CLI): response.completed.response.usage
+                if let Some(usage) = v.pointer("/response/usage") {
+                    let pt = usage.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let ct = usage.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+                    if pt > 0 { input = pt; }
+                    if ct > 0 { output = ct; }
+                }
+            }
             _ => {
                 // Gemini: usageMetadata (check first as it's more specific)
                 if let Some(usage_meta) = v.get("usageMetadata") {
@@ -495,7 +504,7 @@ fn parse_sse_tokens_incremental(text: &str) -> (i64, i64, i64, i64) {
                     if pt > 0 { input = pt; }
                     if ct > 0 { output = ct; }
                 }
-                // OpenAI streaming: last chunk may contain usage object
+                // OpenAI Chat Completions streaming: last chunk may contain usage object
                 else if let Some(usage) = v.get("usage") {
                     let pt = usage.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
                     let ct = usage.get("completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
