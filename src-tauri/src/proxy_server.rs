@@ -186,6 +186,12 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
         }
         match req_builder.send().await {
             Ok(resp) => {
+                // Retry on 502 Bad Gateway (transient upstream error)
+                if resp.status().as_u16() == 502 && attempt == 0 {
+                    last_err = "502 Bad Gateway".to_string();
+                    log::warn!("Proxy got 502 (attempt {}) → {}, will retry", attempt + 1, target_url);
+                    continue;
+                }
                 resp_result = Some(resp);
                 break;
             }

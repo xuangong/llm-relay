@@ -3,7 +3,7 @@ import { Toaster, toast } from "sonner";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getVersion } from "@tauri-apps/api/app";
 import { GatewayList } from "@/components/GatewayList";
-import { AddGatewayDialog } from "@/components/AddGatewayDialog";
+import { AddGatewayCard } from "@/components/AddGatewayCard";
 import { TrafficLogPanel } from "@/components/TrafficLogPanel";
 import { UsagePanel } from "@/components/UsagePanel";
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,7 @@ import * as api from "@/lib/api";
 import type { GatewayWithHealth, ActiveConfig } from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n } from "@/lib/i18n";
-import { Plus, RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle } from "lucide-react";
+import { RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle } from "lucide-react";
 
 function App() {
   const { t, lang, toggleLang } = useI18n();
@@ -21,7 +21,6 @@ function App() {
   const [activeConfig, setActiveConfig] = useState<ActiveConfig | null>(null);
   const [autoSwitch, setAutoSwitch] = useState(true);
   const [autostart, setAutostart] = useState(false);
-  const [showAddDialog, setShowAddDialog] = useState(false);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
@@ -303,14 +302,7 @@ function App() {
               onRefresh={loadAll}
             />
 
-            <Button
-              variant="outline"
-              className="w-full border-dashed hover:border-primary/50 hover:bg-primary/5 transition-elegant h-9"
-              onClick={() => setShowAddDialog(true)}
-            >
-              <Plus className="h-3.5 w-3.5 mr-1.5" />
-              <span className="text-sm font-medium">{t('addDialog.title')}</span>
-            </Button>
+            <AddGatewayCard onAdded={loadAll} />
           </div>
         )}
       </main>
@@ -381,11 +373,6 @@ function App() {
         )}
       </div>
 
-      <AddGatewayDialog
-        open={showAddDialog}
-        onOpenChange={setShowAddDialog}
-        onAdded={loadAll}
-      />
     </div>
   );
 }
