@@ -213,16 +213,35 @@ pub async fn apply_config(
         .map_err(|e| e.to_string())?
         .ok_or("Gateway not found")?;
 
-    // Use provided key_value, or fall back to gateway's auth_key
-    let api_key = key_value.as_deref().unwrap_or(&gw.auth_key);
+    // Load existing config so omitted fields (e.g. on a plain re-apply) are
+    // preserved instead of being wiped out.
+    let existing = state.db.get_active_config().ok();
+    let same_gateway = existing
+        .as_ref()
+        .and_then(|c| c.gateway_id.as_deref())
+        .map(|id| id == gateway_id)
+        .unwrap_or(false);
+
+    // Merge: prefer the value passed from the UI; if absent and we're re-applying
+    // the same gateway, fall back to what's already stored.
+    let merged_key_id = key_id.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_id.clone()) } else { None });
+    let merged_key_name = key_name.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_name.clone()) } else { None });
+    let merged_key_value = key_value.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_value.clone()) } else { None });
+    let merged_claude = claude_model.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.claude_model.clone()) } else { None });
+    let merged_claude_small = claude_small_model.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.claude_small_model.clone()) } else { None });
+    let merged_codex = codex_model.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.codex_model.clone()) } else { None });
+    let merged_gemini = gemini_model.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.gemini_model.clone()) } else { None });
+
+    // Use merged key_value, or fall back to gateway's auth_key
+    let api_key = merged_key_value.as_deref().unwrap_or(&gw.auth_key);
 
     config_writer::apply_all_configs(
         &gw.url,
         api_key,
-        claude_model.as_deref(),
-        claude_small_model.as_deref(),
-        codex_model.as_deref(),
-        gemini_model.as_deref(),
+        merged_claude.as_deref(),
+        merged_claude_small.as_deref(),
+        merged_codex.as_deref(),
+        merged_gemini.as_deref(),
     )
     .map_err(|e| e.to_string())?;
 
@@ -230,18 +249,14 @@ pub async fn apply_config(
     let now = chrono::Utc::now().to_rfc3339();
     let config = ActiveConfig {
         gateway_id: Some(gateway_id),
-        key_id,
-        key_name,
-        key_value,
-        claude_model,
-        claude_small_model,
-        codex_model,
-        gemini_model,
-        auto_switch: state
-            .db
-            .get_active_config()
-            .map(|c| c.auto_switch)
-            .unwrap_or(true),
+        key_id: merged_key_id,
+        key_name: merged_key_name,
+        key_value: merged_key_value,
+        claude_model: merged_claude,
+        claude_small_model: merged_claude_small,
+        codex_model: merged_codex,
+        gemini_model: merged_gemini,
+        auto_switch: existing.as_ref().map(|c| c.auto_switch).unwrap_or(true),
         applied_at: Some(now.clone()),
         last_switched_at: Some(now),
     };
