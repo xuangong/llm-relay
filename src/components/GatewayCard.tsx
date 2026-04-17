@@ -75,10 +75,10 @@ export function GatewayCard({
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [models, setModels] = useState<ModelList | null>(null);
   const [selectedKeyId, setSelectedKeyId] = useState<string | null>(activeKeyId);
-  const [claudeModel, setClaudeModel] = useState(activeModels.claude || "");
-  const [claudeSmallModel, setClaudeSmallModel] = useState(activeModels.claudeSmall || "");
-  const [codexModel, setCodexModel] = useState(activeModels.codex || "");
-  const [geminiModel, setGeminiModel] = useState(activeModels.gemini || "");
+  const [claudeModel, setClaudeModel] = useState(gateway.claudeModel || (isActive ? activeModels.claude : null) || "");
+  const [claudeSmallModel, setClaudeSmallModel] = useState(gateway.claudeSmallModel || (isActive ? activeModels.claudeSmall : null) || "");
+  const [codexModel, setCodexModel] = useState(gateway.codexModel || (isActive ? activeModels.codex : null) || "");
+  const [geminiModel, setGeminiModel] = useState(gateway.geminiModel || (isActive ? activeModels.gemini : null) || "");
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [editMode, setEditMode] = useState(false);
@@ -194,10 +194,10 @@ export function GatewayCard({
   const handleCancelEdit = () => {
     setEditMode(false);
     setSelectedKeyId(activeKeyId);
-    setClaudeModel(activeModels.claude || "");
-    setClaudeSmallModel(activeModels.claudeSmall || "");
-    setCodexModel(activeModels.codex || "");
-    setGeminiModel(activeModels.gemini || "");
+    setClaudeModel(gateway.claudeModel || (isActive ? activeModels.claude : null) || "");
+    setClaudeSmallModel(gateway.claudeSmallModel || (isActive ? activeModels.claudeSmall : null) || "");
+    setCodexModel(gateway.codexModel || (isActive ? activeModels.codex : null) || "");
+    setGeminiModel(gateway.geminiModel || (isActive ? activeModels.gemini : null) || "");
   };
 
   const handleDone = async () => {
@@ -481,40 +481,52 @@ export function GatewayCard({
                         <TrafficMonitor log={trafficLog} />
                       )}
 
-                      {/* Models (read-only) */}
-                      {isActive && (activeModels.claude || activeModels.claudeSmall || activeModels.codex || activeModels.gemini) && (
+                      {/* Models (read-only). Show the per-gateway saved
+                          models so users can see what each card will apply,
+                          even before it becomes active. Fall back to the
+                          active-config value for the currently-active card
+                          (covers pre-migration state where per-gateway
+                          columns might still be null). */}
+                      {(() => {
+                        const c = gateway.claudeModel ?? (isActive ? activeModels.claude : null);
+                        const cs = gateway.claudeSmallModel ?? (isActive ? activeModels.claudeSmall : null);
+                        const cx = gateway.codexModel ?? (isActive ? activeModels.codex : null);
+                        const g = gateway.geminiModel ?? (isActive ? activeModels.gemini : null);
+                        if (!c && !cs && !cx && !g) return null;
+                        return (
                         <div className="space-y-1.5">
                           <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                             {t('gateway.models')}
                           </label>
                           <div className="grid grid-cols-2 gap-1.5">
-                            {activeModels.claude && (
+                            {c && (
                               <div className="text-[10px] text-muted-foreground">
                                 <span className="font-medium">{t('models.claude')}:</span>{" "}
-                                <span className="font-mono">{activeModels.claude}</span>
+                                <span className="font-mono">{c}</span>
                               </div>
                             )}
-                            {activeModels.claudeSmall && (
+                            {cs && (
                               <div className="text-[10px] text-muted-foreground">
                                 <span className="font-medium">{t('models.claudeSmall')}:</span>{" "}
-                                <span className="font-mono">{activeModels.claudeSmall}</span>
+                                <span className="font-mono">{cs}</span>
                               </div>
                             )}
-                            {activeModels.codex && (
+                            {cx && (
                               <div className="text-[10px] text-muted-foreground">
                                 <span className="font-medium">{t('models.codex')}:</span>{" "}
-                                <span className="font-mono">{activeModels.codex}</span>
+                                <span className="font-mono">{cx}</span>
                               </div>
                             )}
-                            {activeModels.gemini && (
+                            {g && (
                               <div className="text-[10px] text-muted-foreground">
                                 <span className="font-medium">{t('models.gemini')}:</span>{" "}
-                                <span className="font-mono">{activeModels.gemini}</span>
+                                <span className="font-mono">{g}</span>
                               </div>
                             )}
                           </div>
                         </div>
-                      )}
+                        );
+                      })()}
 
                       {/* Action buttons */}
                       <div className="flex items-center justify-between pt-2 border-t border-border/30">

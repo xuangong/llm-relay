@@ -22,6 +22,11 @@ pub struct Gateway {
     pub user_name: Option<String>,
     pub sort_order: i32,
     pub created_at: String,
+    // Per-gateway model preferences (persisted so each gateway remembers its own choices)
+    pub claude_model: Option<String>,
+    pub claude_small_model: Option<String>,
+    pub codex_model: Option<String>,
+    pub gemini_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +279,36 @@ impl Database {
             conn.execute_batch("PRAGMA user_version = 7")?;
         }
 
+        // v8: per-gateway model preferences. Back-fill each gateway from the
+        // (previously global) active_config row so existing users keep their
+        // model selections on whichever gateway was last active.
+        if version < 8 {
+            conn.execute_batch(
+                "ALTER TABLE gateways ADD COLUMN claude_model TEXT;
+                 ALTER TABLE gateways ADD COLUMN claude_small_model TEXT;
+                 ALTER TABLE gateways ADD COLUMN codex_model TEXT;
+                 ALTER TABLE gateways ADD COLUMN gemini_model TEXT;",
+            )?;
+
+            let active: Option<(Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT gateway_id, claude_model, claude_small_model, codex_model, gemini_model
+                     FROM active_config WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .ok();
+            if let Some((Some(gw_id), c, cs, cx, g)) = active {
+                conn.execute(
+                    "UPDATE gateways SET claude_model = ?1, claude_small_model = ?2,
+                                         codex_model = ?3, gemini_model = ?4
+                     WHERE id = ?5",
+                    params![c, cs, cx, g, gw_id],
+                )?;
+            }
+            conn.execute_batch("PRAGMA user_version = 8")?;
+        }
+
         Ok(Database {
             conn: Mutex::new(conn),
         })
@@ -289,8 +324,9 @@ impl Database {
         }
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO gateways (id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO gateways (id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at,
+                                   claude_model, claude_small_model, codex_model, gemini_model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 gw.id,
                 gw.name,
@@ -302,6 +338,10 @@ impl Database {
                 gw.user_name,
                 gw.sort_order,
                 gw.created_at,
+                gw.claude_model,
+                gw.claude_small_model,
+                gw.codex_model,
+                gw.gemini_model,
             ],
         )?;
         Ok(())
@@ -310,7 +350,8 @@ impl Database {
     pub fn list_gateways(&self) -> Result<Vec<Gateway>, AppError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at
+            "SELECT id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at,
+                    claude_model, claude_small_model, codex_model, gemini_model
              FROM gateways ORDER BY sort_order ASC, created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -325,6 +366,10 @@ impl Database {
                 user_name: row.get(7)?,
                 sort_order: row.get(8)?,
                 created_at: row.get(9)?,
+                claude_model: row.get(10)?,
+                claude_small_model: row.get(11)?,
+                codex_model: row.get(12)?,
+                gemini_model: row.get(13)?,
             })
         })?;
         let mut gateways: Vec<Gateway> = rows.filter_map(|r| r.ok()).collect();
@@ -343,7 +388,8 @@ impl Database {
     pub fn get_gateway(&self, id: &str) -> Result<Option<Gateway>, AppError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at
+            "SELECT id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at,
+                    claude_model, claude_small_model, codex_model, gemini_model
              FROM gateways WHERE id = ?1",
         )?;
         let result = stmt.query_row(params![id], |row| {
@@ -358,6 +404,10 @@ impl Database {
                 user_name: row.get(7)?,
                 sort_order: row.get(8)?,
                 created_at: row.get(9)?,
+                claude_model: row.get(10)?,
+                claude_small_model: row.get(11)?,
+                codex_model: row.get(12)?,
+                gemini_model: row.get(13)?,
             })
         });
         match result {
@@ -436,6 +486,29 @@ impl Database {
                 params![i as i32, id],
             )?;
         }
+        Ok(())
+    }
+
+    /// Persist per-gateway model preferences. Only overwrites fields that are
+    /// provided; passing None for a field leaves the stored value untouched.
+    pub fn update_gateway_models(
+        &self,
+        id: &str,
+        claude: Option<&str>,
+        claude_small: Option<&str>,
+        codex: Option<&str>,
+        gemini: Option<&str>,
+    ) -> Result<(), AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE gateways SET
+                claude_model       = COALESCE(?1, claude_model),
+                claude_small_model = COALESCE(?2, claude_small_model),
+                codex_model        = COALESCE(?3, codex_model),
+                gemini_model       = COALESCE(?4, gemini_model)
+             WHERE id = ?5",
+            params![claude, claude_small, codex, gemini, id],
+        )?;
         Ok(())
     }
 

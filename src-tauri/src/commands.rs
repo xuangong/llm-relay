@@ -29,6 +29,10 @@ pub async fn add_gateway(
         user_name,
         sort_order: 999,
         created_at: chrono::Utc::now().to_rfc3339(),
+        claude_model: None,
+        claude_small_model: None,
+        codex_model: None,
+        gemini_model: None,
     };
     state.db.add_gateway(&gw).map_err(|e| e.to_string())?;
 
@@ -222,15 +226,27 @@ pub async fn apply_config(
         .map(|id| id == gateway_id)
         .unwrap_or(false);
 
-    // Merge: prefer the value passed from the UI; if absent and we're re-applying
-    // the same gateway, fall back to what's already stored.
+    // Merge priority for each model field:
+    //   1. Value passed from the UI (user just picked it)
+    //   2. Per-gateway stored model (this gateway's own remembered choice)
+    //   3. Active config value — only if we are re-applying the SAME gateway
+    //      (otherwise those values belong to a different gateway and must not leak)
     let merged_key_id = key_id.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_id.clone()) } else { None });
     let merged_key_name = key_name.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_name.clone()) } else { None });
     let merged_key_value = key_value.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_value.clone()) } else { None });
-    let merged_claude = claude_model.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.claude_model.clone()) } else { None });
-    let merged_claude_small = claude_small_model.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.claude_small_model.clone()) } else { None });
-    let merged_codex = codex_model.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.codex_model.clone()) } else { None });
-    let merged_gemini = gemini_model.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.gemini_model.clone()) } else { None });
+
+    let merged_claude = claude_model.clone()
+        .or_else(|| gw.claude_model.clone())
+        .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.claude_model.clone()) } else { None });
+    let merged_claude_small = claude_small_model.clone()
+        .or_else(|| gw.claude_small_model.clone())
+        .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.claude_small_model.clone()) } else { None });
+    let merged_codex = codex_model.clone()
+        .or_else(|| gw.codex_model.clone())
+        .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.codex_model.clone()) } else { None });
+    let merged_gemini = gemini_model.clone()
+        .or_else(|| gw.gemini_model.clone())
+        .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.gemini_model.clone()) } else { None });
 
     // Use merged key_value, or fall back to gateway's auth_key
     let api_key = merged_key_value.as_deref().unwrap_or(&gw.auth_key);
@@ -263,6 +279,19 @@ pub async fn apply_config(
     state
         .db
         .set_active_config(&config)
+        .map_err(|e| e.to_string())?;
+
+    // Persist the resolved models on the gateway row itself so they survive
+    // switching to another gateway and back.
+    state
+        .db
+        .update_gateway_models(
+            &gateway_id,
+            config.claude_model.as_deref(),
+            config.claude_small_model.as_deref(),
+            config.codex_model.as_deref(),
+            config.gemini_model.as_deref(),
+        )
         .map_err(|e| e.to_string())?;
 
     // Update tray menu

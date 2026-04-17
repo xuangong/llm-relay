@@ -13,6 +13,10 @@ export interface Gateway {
   userName: string | null;
   sortOrder: number;
   createdAt: string;
+  claudeModel: string | null;
+  claudeSmallModel: string | null;
+  codexModel: string | null;
+  geminiModel: string | null;
 }
 
 export interface GatewayWithHealth {
@@ -26,6 +30,10 @@ export interface GatewayWithHealth {
   userName: string | null;
   sortOrder: number;
   createdAt: string;
+  claudeModel: string | null;
+  claudeSmallModel: string | null;
+  codexModel: string | null;
+  geminiModel: string | null;
   isHealthy: boolean;
   latencyMs: number | null;
   modelCount: number | null;
