@@ -264,7 +264,7 @@ pub async fn apply_config(
     // Save active config
     let now = chrono::Utc::now().to_rfc3339();
     let config = ActiveConfig {
-        gateway_id: Some(gateway_id),
+        gateway_id: Some(gateway_id.clone()),
         key_id: merged_key_id,
         key_name: merged_key_name,
         key_value: merged_key_value,
