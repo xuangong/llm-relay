@@ -14,3 +14,4 @@ pub mod ipc;
 pub mod service;
 pub use service::Service;
 pub mod paths;
+pub mod process;
