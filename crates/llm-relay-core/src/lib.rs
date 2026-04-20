@@ -13,3 +13,4 @@ pub mod proxy_server;
 pub mod ipc;
 pub mod service;
 pub use service::Service;
+pub mod paths;
