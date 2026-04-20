@@ -1,0 +1,65 @@
+name: TUI CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "src-tauri/**"
+      - ".github/workflows/tui-ci.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "src-tauri/**"
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build agent + TUI
+        run: cargo build -p llm-relay-agent -p llm-relay-tui --verbose
+
+      - name: Unit tests (core)
+        run: cargo test -p llm-relay-core --verbose
+
+      - name: Unit tests (agent)
+        run: cargo test -p llm-relay-agent --lib --verbose
+
+      - name: Unit tests (tui state)
+        run: |
+          cargo test -p llm-relay-tui --test app_state
+          cargo test -p llm-relay-tui --test gateways_view
+          cargo test -p llm-relay-tui --test usage_state
+          cargo test -p llm-relay-tui --test modal_add_gateway
+          cargo test -p llm-relay-tui --test ipc_client_roundtrip
+          cargo test -p llm-relay-tui --test bootstrap
+
+      - name: Lifecycle integration tests
+        # Tests spawn child processes and use Unix sockets; run serially.
+        # Tests are marked #[ignore] so we must pass --ignored to enable them.
+        run: cargo test -p llm-relay-agent --test lifecycle_integration -- --ignored --test-threads=1
+
+      - name: Mutual exclusion (agent vs another process holding 18080)
+        if: matrix.os != 'windows-latest'
+        # Test is marked #[ignore]; pass --ignored to enable it.
+        run: cargo test -p llm-relay-agent --test mutual_exclusion -- --ignored --test-threads=1
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Relaxed: no -D warnings to avoid blocking on pre-existing lints.
+      - run: cargo clippy --workspace
