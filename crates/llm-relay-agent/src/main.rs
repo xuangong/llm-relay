@@ -11,6 +11,7 @@ async fn main() -> Result<()> {
     log::info!("agent starting (pid {})", std::process::id());
 
     std::fs::create_dir_all(paths::config_dir())?;
+    std::fs::create_dir_all(paths::runtime_dir())?;
     llm_relay_core::keystore::init(&paths::config_dir());
 
     let db = Arc::new(Database::init(&paths::config_dir())?);
