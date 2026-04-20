@@ -1,4 +1,3 @@
-use chrono::Utc;
 use llm_relay_core::ipc::codec::{read_frame, write_frame};
 use llm_relay_core::ipc::protocol::*;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
@@ -52,11 +51,10 @@ async fn server_frame_response_carries_request_id() {
     let frame = ServerFrame::Response {
         request_id: 7,
         payload: Response::LoginInitiated {
-            device_code: "dc".into(),
+            gateway_id: Uuid::new_v4(),
             user_code: "ABCD-1234".into(),
-            verification_url: "https://gw/device/login".into(),
-            expires_at: Utc::now(),
-            interval_secs: 5,
+            verification_uri: "https://gw/device/login".into(),
+            expires_in_secs: 600,
         },
     };
     write_frame(&mut a, &frame).await.unwrap();
