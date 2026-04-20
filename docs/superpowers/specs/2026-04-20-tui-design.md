@@ -64,7 +64,9 @@ GUI 启动:
   - 空闲 → 内嵌运行（保持现有行为）
 ```
 
-**互斥保证**：`flock(~/.llm-relay/agent.lock)` + 端口绑定双重检查。
+**互斥保证**：跨平台文件锁 + 端口绑定双重检查。
+
+文件锁用 [`fs2`](https://crates.io/crates/fs2) crate（封装 Unix `flock` / Windows `LockFileEx`），路径 `~/.llm-relay/agent.lock`。Agent 启动时尝试获取排他锁，失败则说明已有 agent 在跑（即使 PID 文件被意外删除也能检测到）。锁随进程退出自动释放。
 
 ### Daemon fork 实现
 
@@ -90,17 +92,33 @@ Agent 进程职责：
 
 跨平台 local socket 用 [`interprocess`](https://crates.io/crates/interprocess) crate（Unix socket / Windows named pipe 同一 API）。
 
-协议：长度前缀 + JSON，每条消息一行 NDJSON。
+**帧格式**：4-byte 大端序长度前缀 + UTF-8 JSON body。每条消息独立解析，不混用 NDJSON。
+
+**消息封装**：所有消息走统一 envelope，区分 RPC 响应与服务端推送事件，并用 `request_id` 关联请求/响应：
 
 ```rust
 // crates/llm-relay-core/src/ipc.rs
+
+/// 客户端 → 服务端
+struct ClientFrame {
+    request_id: u64,        // 客户端单调递增，事件订阅请求也带 id
+    payload: Request,
+}
+
+/// 服务端 → 客户端：要么是某个请求的响应，要么是无请求的事件推送
+enum ServerFrame {
+    Response { request_id: u64, payload: Response },
+    Event(Event),           // 无 request_id，独立通道
+}
+
 enum Request {
     GetSnapshot,
     Subscribe { topics: Vec<Topic> },
+    Unsubscribe { topics: Vec<Topic> },
     AddGateway(GatewayInput),
     UpdateGateway { id: Uuid, /* ... */ },
     DeleteGateway { id: Uuid },
-    SetActive { gateway_id: Uuid, key: String, models: ModelSelection },
+    SetActive { gateway_id: Uuid, key_id: Uuid, models: ModelSelection },
     SetAutoFailover(bool),
     Reorder(Vec<Uuid>),
     GetUsage { range: TimeRange, gateway_id: Option<Uuid> },
@@ -114,8 +132,13 @@ enum Response {
     Snapshot(Snapshot),
     Ok,
     Error(String),
-    LoginInitiated { url: String, code: String, expires_at: DateTime<Utc> },
-    Event(Event),
+    LoginInitiated {
+        device_code: String,    // 内部 polling 用
+        user_code: String,      // 给用户输入的
+        verification_url: String,
+        expires_at: DateTime<Utc>,
+        interval_secs: u64,     // 来自 gateway 响应
+    },
 }
 
 enum Event {
@@ -123,11 +146,13 @@ enum Event {
     ActiveChanged { gateway_id: Uuid },
     TrafficError { /* ... */ },
     UsageUpdate { /* ... */ },
-    LoginCompleted { gateway_id: Uuid },
+    LoginCompleted { gateway_id: Uuid, user_name: Option<String> },
     LoginFailed { gateway_id: Uuid, reason: String },
     LoginExpired { gateway_id: Uuid },
 }
 ```
+
+客户端用 `request_id → oneshot::Sender<Response>` 的 map 来路由响应；`Event` 走独立的 `broadcast::Sender` 分发到 UI 层。
 
 ## TUI 界面布局
 
@@ -216,7 +241,10 @@ ratatui，四个 tab：Gateways / Usage / Errors / Settings。基础键位 `Tab`
 
 ### 弹窗：Login（OAuth Device Flow）
 
-复用现有 gateway device code 端点（`/device/login`、`startDeviceLogin`、`pollDeviceLogin`）。
+复用现有 gateway device code 端点：
+- `POST <gateway>/auth/device/code` → 获取 `device_code` / `user_code` / `expires_in` / `interval`
+- `POST <gateway>/auth/device/poll` (body `{ "device_code": ... }`) → 状态轮询
+- 用户在浏览器打开 `<gateway>/device/login` 输入 `user_code` 完成验证
 
 ```
 ┌─ Login to my-gateway-1 ────────────────────────────┐
@@ -240,11 +268,11 @@ ratatui，四个 tab：Gateways / Usage / Errors / Settings。基础键位 `Tab`
 流程：
 1. 用户在 TUI 选 gateway → 按 `l`
 2. TUI 发送 `StartLogin { gateway_id }` 给 agent
-3. Agent 调 gateway 拿到 device code，回 `LoginInitiated { url, code, expires_at }`
-4. TUI 弹窗展示 URL + code
-5. Agent 后台每 5s 轮询 gateway 验证状态
+3. Agent 调 `POST /auth/device/code`，回 `LoginInitiated { device_code, user_code, verification_url, expires_at, interval_secs }`
+4. TUI 弹窗展示 `verification_url` + `user_code`
+5. Agent 后台按服务端返回的 `interval_secs` 间隔轮询 `POST /auth/device/poll`（不硬编码 5s）
 6. 用户在手机/另一台电脑打开 URL、输入 code、登录
-7. Agent 收到成功响应 → 保存 session token 到 keystore → 推送 `LoginCompleted`
+7. Agent 收到 `status=complete` → 保存 session token 到 keystore → 推送 `LoginCompleted`
 8. TUI 弹窗自动关闭
 
 ### 状态栏
@@ -253,7 +281,7 @@ ratatui，四个 tab：Gateways / Usage / Errors / Settings。基础键位 `Tab`
 
 ## Keychain / 密钥存储
 
-`llm-relay-core/src/keystore.rs` 改造为按平台 + 环境自动选择：
+`llm-relay-core/src/keystore.rs` 改造为优先尝试系统 keychain，失败时 fallback 到加密文件（不靠环境变量启发式判断）：
 
 ```rust
 enum KeyBackend {
@@ -261,14 +289,14 @@ enum KeyBackend {
     EncryptedFile,    // ~/.llm-relay/secrets.enc，AES-256-GCM
 }
 
-fn detect_backend() -> KeyBackend {
-    if cfg!(target_os = "linux")
-        && std::env::var("DISPLAY").is_err()
-        && std::env::var("DBUS_SESSION_BUS_ADDRESS").is_err()
-    {
-        KeyBackend::EncryptedFile
-    } else {
-        KeyBackend::SystemKeychain
+fn open_backend() -> KeyBackend {
+    // 先尝试系统 keychain（一次实际探测：写读删一个 sentinel 项）
+    match try_init_system_keychain() {
+        Ok(()) => KeyBackend::SystemKeychain,
+        Err(e) => {
+            tracing::warn!("system keychain unavailable, falling back to encrypted file: {e}");
+            KeyBackend::EncryptedFile
+        }
     }
 }
 ```
@@ -294,10 +322,11 @@ fn detect_backend() -> KeyBackend {
 | 层 | 测试 |
 |----|------|
 | `llm-relay-core` | 单元测试（已有的从 src-tauri 迁过来），SQLite 用临时 DB |
-| IPC 协议 | round-trip 测试：encode/decode 所有 Request / Response / Event |
+| IPC 协议 | round-trip 测试：encode/decode 所有 Request / Response / Event；request_id 关联正确性 |
 | `llm-relay-agent` | 集成测试：启动 agent → IPC client 调 AddGateway → 查 SQLite 验证 |
 | `llm-relay-tui` | 渲染测试：mock IPC client，对每个 view snapshot ratatui buffer |
 | 跨平台 spawn | macOS / Linux / Windows CI 各跑一次 spawn → ping → shutdown 冒烟 |
+| 生命周期边界 | (1) stale agent.sock 残留时启动 agent；(2) PID 文件存在但 PID 已被其他无关进程占用；(3) 两个 TUI 同时启动竞争 lock；(4) agent 进程 kill -9 后 lock/pid 残留的恢复路径 |
 
 ## 不做（YAGNI）
 
