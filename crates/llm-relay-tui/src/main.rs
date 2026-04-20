@@ -18,6 +18,6 @@ async fn main() -> anyhow::Result<()> {
         &mut guard.terminal,
         ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))?,
     );
-    loop_::run(term, client).await?;
+    loop_::run(term, client, socket).await?;
     Ok(())
 }

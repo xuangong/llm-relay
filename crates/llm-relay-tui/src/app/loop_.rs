@@ -1,5 +1,9 @@
 //! Main loop: drains crossterm key events and IPC events, applies them to
 //! `AppState`, and re-renders.
+//!
+//! A `client_slot` wraps the current `Arc<IpcClient>` behind an
+//! `Arc<tokio::sync::Mutex<>>` so the reconnect path can swap in a fresh
+//! client while all other code paths borrow through the same slot.
 
 use crate::app::{
     event::AppEvent,
@@ -7,12 +11,14 @@ use crate::app::{
     state::{AppState, GatewayRow, Tab},
     terminal::Tui,
 };
+use crate::bootstrap::{self, AgentHandle, EnsureMode};
 use crate::ipc_client::IpcClient;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind};
 use llm_relay_core::ipc::{GatewaySummary, Request, Response};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 fn into_row(g: GatewaySummary) -> GatewayRow {
     GatewayRow {
@@ -116,8 +122,11 @@ async fn handle_submit(client: &Arc<IpcClient>, state: &mut AppState, submit: Mo
     }
 }
 
-pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
+pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf) -> std::io::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
+
+    // Wrap client in a slot so the reconnect path can swap it.
+    let client_slot: Arc<Mutex<Arc<IpcClient>>> = Arc::new(Mutex::new(initial_client));
 
     // Spawn key reader.
     {
@@ -149,9 +158,10 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
         });
     }
 
-    // Spawn IPC event forwarder.
+    // Spawn IPC event forwarder (re-spawned on reconnect below).
     {
         let tx = tx.clone();
+        let client = client_slot.lock().await.clone();
         let mut sub = client.subscribe();
         tokio::spawn(async move {
             while let Ok(evt) = sub.recv().await {
@@ -166,192 +176,257 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
     let mut prev_tab = state.active_tab;
 
     // Initial gateway load.
-    if let Ok(resp) = client.request(Request::ListGateways).await {
-        if let Some(rows) = gw_rows_from_response(resp) {
-            state.replace_gateways(rows);
+    {
+        let client = client_slot.lock().await.clone();
+        if let Ok(resp) = client.request(Request::ListGateways).await {
+            if let Some(rows) = gw_rows_from_response(resp) {
+                state.replace_gateways(rows);
+            }
         }
     }
 
     // Initial render.
     term.draw(|f| crate::view::render(f, &state))?;
 
-    while let Some(evt) = rx.recv().await {
-        // ── Modal intercept ──────────────────────────────────────────────────
-        if state.modal.is_some() {
-            // Clipboard copy: check before consuming the event.
-            if let AppEvent::Char('c') = &evt {
-                if let Some(Modal::Login(lf)) = &state.modal {
-                    if let crate::app::modal::LoginUiState::WaitingForUser { user_code, .. } =
-                        &lf.state
-                    {
-                        let code = user_code.clone();
-                        let _ = arboard::Clipboard::new()
-                            .and_then(|mut c| c.set_text(code));
-                        state.status_message = Some("Code copied".into());
-                    }
-                }
-            }
+    // Bind initial disconnect watch.
+    let mut disc = client_slot.lock().await.disconnected();
 
-            let outcome = state.modal.as_mut().unwrap().handle(&evt);
-            match outcome {
-                ModalOutcome::Consumed => {}
-                ModalOutcome::Close => {
-                    // If closing a Login modal while still pending, cancel it.
-                    if let Some(Modal::Login(f)) = &state.modal {
-                        use crate::app::modal::LoginUiState;
-                        if matches!(
-                            f.state,
-                            LoginUiState::Initiating | LoginUiState::WaitingForUser { .. }
-                        ) {
-                            let gid = f.gateway_id;
-                            let _ = client
-                                .request(Request::CancelLogin { gateway_id: gid })
-                                .await;
+    loop {
+        tokio::select! {
+            // ── Disconnect / reconnect arm ───────────────────────────────────
+            _ = disc.changed() => {
+                if *disc.borrow() {
+                    state.status_message = Some("Agent disconnected — reconnecting...".into());
+                    term.draw(|f| crate::view::render(f, &state))?;
+
+                    // Retry until we get a new connection.
+                    loop {
+                        match bootstrap::ensure_agent(&socket, EnsureMode::AttachOrSpawn).await {
+                            Ok(AgentHandle::Attached(c)) | Ok(AgentHandle::Spawned { client: c, .. }) => {
+                                // Swap the client.
+                                *client_slot.lock().await = c.clone();
+                                disc = c.disconnected();
+
+                                // Re-spawn IPC event forwarder for the new client.
+                                {
+                                    let tx = tx.clone();
+                                    let mut sub = c.subscribe();
+                                    tokio::spawn(async move {
+                                        while let Ok(evt) = sub.recv().await {
+                                            if tx.send(AppEvent::Ipc(evt)).is_err() {
+                                                break;
+                                            }
+                                        }
+                                    });
+                                }
+
+                                // Refetch state.
+                                if let Ok(resp) = c.request(Request::ListGateways).await {
+                                    if let Some(rows) = gw_rows_from_response(resp) {
+                                        state.replace_gateways(rows);
+                                    }
+                                }
+                                match state.active_tab {
+                                    Tab::Usage => fetch_usage(&c, &mut state).await,
+                                    Tab::Errors => fetch_errors(&c, &mut state).await,
+                                    Tab::Settings => fetch_settings(&c, &mut state).await,
+                                    _ => {}
+                                }
+                                break;
+                            }
+                            Err(_) => tokio::time::sleep(Duration::from_secs(2)).await,
                         }
                     }
-                    state.modal = None;
+
+                    state.status_message = None;
+                    term.draw(|f| crate::view::render(f, &state))?;
                 }
-                ModalOutcome::PassThrough => {
-                    state.handle(evt);
+                // Loop back to select!
+            }
+
+            // ── Normal event arm ─────────────────────────────────────────────
+            evt = rx.recv() => {
+                let Some(evt) = evt else { break; };
+                let client = client_slot.lock().await.clone();
+
+                // ── Modal intercept ──────────────────────────────────────────
+                if state.modal.is_some() {
+                    // Clipboard copy: check before consuming the event.
+                    if let AppEvent::Char('c') = &evt {
+                        if let Some(Modal::Login(lf)) = &state.modal {
+                            if let crate::app::modal::LoginUiState::WaitingForUser { user_code, .. } =
+                                &lf.state
+                            {
+                                let code = user_code.clone();
+                                let _ = arboard::Clipboard::new()
+                                    .and_then(|mut c| c.set_text(code));
+                                state.status_message = Some("Code copied".into());
+                            }
+                        }
+                    }
+
+                    let outcome = state.modal.as_mut().unwrap().handle(&evt);
+                    match outcome {
+                        ModalOutcome::Consumed => {}
+                        ModalOutcome::Close => {
+                            // If closing a Login modal while still pending, cancel it.
+                            if let Some(Modal::Login(f)) = &state.modal {
+                                use crate::app::modal::LoginUiState;
+                                if matches!(
+                                    f.state,
+                                    LoginUiState::Initiating | LoginUiState::WaitingForUser { .. }
+                                ) {
+                                    let gid = f.gateway_id;
+                                    let _ = client
+                                        .request(Request::CancelLogin { gateway_id: gid })
+                                        .await;
+                                }
+                            }
+                            state.modal = None;
+                        }
+                        ModalOutcome::PassThrough => {
+                            state.handle(evt);
+                        }
+                        ModalOutcome::Submit(ms) => {
+                            handle_submit(&client, &mut state, ms).await;
+                        }
+                    }
+                    term.draw(|f| crate::view::render(f, &state))?;
+                    if state.should_quit {
+                        break;
+                    }
+                    continue;
                 }
-                ModalOutcome::Submit(ms) => {
-                    handle_submit(&client, &mut state, ms).await;
+
+                // ── Context-sensitive pre-checks before state.handle ─────────
+                let is_toggle_auto_launch =
+                    matches!(&evt, AppEvent::Char('a')) && state.active_tab == Tab::Settings;
+
+                // Open AddGateway modal on 'a' in Gateways tab.
+                if matches!(&evt, AppEvent::Char('a'))
+                    && state.active_tab == Tab::Gateways
+                    && state.modal.is_none()
+                {
+                    state.modal = Some(Modal::AddGateway(Default::default()));
+                    term.draw(|f| crate::view::render(f, &state))?;
+                    continue;
                 }
-            }
-            term.draw(|f| crate::view::render(f, &state))?;
-            if state.should_quit {
-                break;
-            }
-            continue;
-        }
 
-        // ── Context-sensitive pre-checks before state.handle ─────────────────
-        let is_toggle_auto_launch =
-            matches!(&evt, AppEvent::Char('a')) && state.active_tab == Tab::Settings;
+                // Open EditGateway modal on 'e' in Gateways tab.
+                if matches!(&evt, AppEvent::Char('e'))
+                    && state.active_tab == Tab::Gateways
+                    && state.modal.is_none()
+                {
+                    if let Some(row) = state.gateways.get(state.selected_row) {
+                        state.modal = Some(Modal::EditGateway(EditGatewayForm {
+                            id: row.id,
+                            name: row.name.clone(),
+                            url: row.url.clone(),
+                            focus: crate::app::modal::AddField::Name,
+                            error: None,
+                        }));
+                    }
+                    term.draw(|f| crate::view::render(f, &state))?;
+                    continue;
+                }
 
-        // Open AddGateway modal on 'a' in Gateways tab.
-        if matches!(&evt, AppEvent::Char('a'))
-            && state.active_tab == Tab::Gateways
-            && state.modal.is_none()
-        {
-            state.modal = Some(Modal::AddGateway(Default::default()));
-            term.draw(|f| crate::view::render(f, &state))?;
-            continue;
-        }
-
-        // Open EditGateway modal on 'e' in Gateways tab.
-        if matches!(&evt, AppEvent::Char('e'))
-            && state.active_tab == Tab::Gateways
-            && state.modal.is_none()
-        {
-            if let Some(row) = state.gateways.get(state.selected_row) {
-                state.modal = Some(Modal::EditGateway(EditGatewayForm {
-                    id: row.id,
-                    name: row.name.clone(),
-                    url: row.url.clone(),
-                    focus: crate::app::modal::AddField::Name,
-                    error: None,
-                }));
-            }
-            term.draw(|f| crate::view::render(f, &state))?;
-            continue;
-        }
-
-        // Open Login modal on 'l' in Gateways tab.
-        if matches!(&evt, AppEvent::Char('l'))
-            && state.active_tab == Tab::Gateways
-            && state.modal.is_none()
-        {
-            if let Some(row) = state.gateways.get(state.selected_row) {
-                let gid = row.id;
-                let gname = row.name.clone();
-                use crate::app::modal::{LoginForm, LoginUiState};
-                state.modal = Some(Modal::Login(LoginForm {
-                    gateway_id: gid,
-                    gateway_name: gname,
-                    state: LoginUiState::Initiating,
-                }));
-                term.draw(|f| crate::view::render(f, &state))?;
-                // Fire StartLogin then patch modal state with response.
-                match client.request(Request::StartLogin { gateway_id: gid }).await {
-                    Ok(Response::LoginInitiated {
-                        user_code,
-                        verification_uri,
-                        expires_in_secs,
-                        ..
-                    }) => {
-                        if let Some(Modal::Login(f)) = state.modal.as_mut() {
-                            f.state = LoginUiState::WaitingForUser {
+                // Open Login modal on 'l' in Gateways tab.
+                if matches!(&evt, AppEvent::Char('l'))
+                    && state.active_tab == Tab::Gateways
+                    && state.modal.is_none()
+                {
+                    if let Some(row) = state.gateways.get(state.selected_row) {
+                        let gid = row.id;
+                        let gname = row.name.clone();
+                        use crate::app::modal::{LoginForm, LoginUiState};
+                        state.modal = Some(Modal::Login(LoginForm {
+                            gateway_id: gid,
+                            gateway_name: gname,
+                            state: LoginUiState::Initiating,
+                        }));
+                        term.draw(|f| crate::view::render(f, &state))?;
+                        // Fire StartLogin then patch modal state with response.
+                        match client.request(Request::StartLogin { gateway_id: gid }).await {
+                            Ok(Response::LoginInitiated {
                                 user_code,
                                 verification_uri,
                                 expires_in_secs,
-                            };
+                                ..
+                            }) => {
+                                if let Some(Modal::Login(f)) = state.modal.as_mut() {
+                                    f.state = LoginUiState::WaitingForUser {
+                                        user_code,
+                                        verification_uri,
+                                        expires_in_secs,
+                                    };
+                                }
+                            }
+                            Ok(Response::Error { message }) => {
+                                if let Some(Modal::Login(f)) = state.modal.as_mut() {
+                                    f.state = LoginUiState::Failed(message);
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                if let Some(Modal::Login(f)) = state.modal.as_mut() {
+                                    f.state = LoginUiState::Failed(e.to_string());
+                                }
+                            }
                         }
                     }
-                    Ok(Response::Error { message }) => {
-                        if let Some(Modal::Login(f)) = state.modal.as_mut() {
-                            f.state = LoginUiState::Failed(message);
+                    term.draw(|f| crate::view::render(f, &state))?;
+                    continue;
+                }
+
+                // ── Normal event dispatch ────────────────────────────────────
+                if matches!(evt, AppEvent::Refresh) {
+                    if let Ok(resp) = client.request(Request::ListGateways).await {
+                        if let Some(rows) = gw_rows_from_response(resp) {
+                            state.replace_gateways(rows);
                         }
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        if let Some(Modal::Login(f)) = state.modal.as_mut() {
-                            f.state = LoginUiState::Failed(e.to_string());
-                        }
+                    // Also refresh whichever data tab is active.
+                    match state.active_tab {
+                        Tab::Usage => fetch_usage(&client, &mut state).await,
+                        Tab::Errors => fetch_errors(&client, &mut state).await,
+                        Tab::Settings => fetch_settings(&client, &mut state).await,
+                        _ => {}
                     }
+                } else {
+                    state.handle(evt);
+                }
+
+                // Context-sensitive 'a' on Settings tab: toggle auto-launch.
+                if is_toggle_auto_launch {
+                    let current = state
+                        .settings
+                        .snapshot
+                        .as_ref()
+                        .map(|s| s.auto_launch)
+                        .unwrap_or(false);
+                    let _ = client
+                        .request(Request::SetAutoLaunch { enabled: !current })
+                        .await;
+                    // Re-fetch to reflect the change.
+                    fetch_settings(&client, &mut state).await;
+                }
+
+                // On tab switch, fetch data for the newly activated tab.
+                if state.active_tab != prev_tab {
+                    match state.active_tab {
+                        Tab::Usage => fetch_usage(&client, &mut state).await,
+                        Tab::Errors => fetch_errors(&client, &mut state).await,
+                        Tab::Settings => fetch_settings(&client, &mut state).await,
+                        _ => {}
+                    }
+                    prev_tab = state.active_tab;
+                }
+
+                term.draw(|f| crate::view::render(f, &state))?;
+                if state.should_quit {
+                    break;
                 }
             }
-            term.draw(|f| crate::view::render(f, &state))?;
-            continue;
-        }
-
-        // ── Normal event dispatch ─────────────────────────────────────────────
-        if matches!(evt, AppEvent::Refresh) {
-            if let Ok(resp) = client.request(Request::ListGateways).await {
-                if let Some(rows) = gw_rows_from_response(resp) {
-                    state.replace_gateways(rows);
-                }
-            }
-            // Also refresh whichever data tab is active.
-            match state.active_tab {
-                Tab::Usage => fetch_usage(&client, &mut state).await,
-                Tab::Errors => fetch_errors(&client, &mut state).await,
-                Tab::Settings => fetch_settings(&client, &mut state).await,
-                _ => {}
-            }
-        } else {
-            state.handle(evt);
-        }
-
-        // Context-sensitive 'a' on Settings tab: toggle auto-launch.
-        if is_toggle_auto_launch {
-            let current = state
-                .settings
-                .snapshot
-                .as_ref()
-                .map(|s| s.auto_launch)
-                .unwrap_or(false);
-            let _ = client
-                .request(Request::SetAutoLaunch { enabled: !current })
-                .await;
-            // Re-fetch to reflect the change.
-            fetch_settings(&client, &mut state).await;
-        }
-
-        // On tab switch, fetch data for the newly activated tab.
-        if state.active_tab != prev_tab {
-            match state.active_tab {
-                Tab::Usage => fetch_usage(&client, &mut state).await,
-                Tab::Errors => fetch_errors(&client, &mut state).await,
-                Tab::Settings => fetch_settings(&client, &mut state).await,
-                _ => {}
-            }
-            prev_tab = state.active_tab;
-        }
-
-        term.draw(|f| crate::view::render(f, &state))?;
-        if state.should_quit {
-            break;
         }
     }
     Ok(())

@@ -1,12 +1,3 @@
-//! IPC client used by the TUI. Owns one connection to the agent.
-//!
-//! Architecture:
-//! - A reader task pulls `ServerFrame`s off the socket, routes `Response`s to
-//!   the matching pending oneshot, and broadcasts `Event`s to subscribers.
-//! - A writer mutex serializes `ClientFrame` writes.
-//! - `request(payload)` allocates a `request_id`, registers a oneshot,
-//!   writes the frame, awaits the oneshot. Times out after 30s.
-
 use llm_relay_core::ipc::{ClientFrame, Event, Request, Response, ServerFrame};
 use llm_relay_core::ipc::codec::{read_frame, write_frame};
 use std::collections::HashMap;
@@ -15,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, watch, Mutex};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -46,6 +37,7 @@ pub struct IpcClient {
     writer: Arc<Mutex<tokio::io::WriteHalf<Stream>>>,
     pending: PendingMap,
     events_tx: broadcast::Sender<Event>,
+    disconnected_tx: watch::Sender<bool>,
 }
 
 impl IpcClient {
@@ -63,20 +55,28 @@ impl IpcClient {
         let (read_half, write_half) = tokio::io::split(stream);
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (events_tx, _) = broadcast::channel(256);
+        let (disconnected_tx, _) = watch::channel(false);
 
         let client = Arc::new(Self {
             writer: Arc::new(Mutex::new(write_half)),
             pending: pending.clone(),
             events_tx: events_tx.clone(),
+            disconnected_tx: disconnected_tx.clone(),
         });
 
-        tokio::spawn(reader_loop(read_half, pending, events_tx));
+        tokio::spawn(reader_loop(read_half, pending, events_tx, disconnected_tx));
 
         Ok(client)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events_tx.subscribe()
+    }
+
+    /// Returns a watch receiver that fires (value becomes `true`) when the
+    /// agent disconnects (reader loop exits on EOF or error).
+    pub fn disconnected(&self) -> watch::Receiver<bool> {
+        self.disconnected_tx.subscribe()
     }
 
     pub async fn request(
@@ -111,6 +111,7 @@ async fn reader_loop(
     mut read: tokio::io::ReadHalf<Stream>,
     pending: PendingMap,
     events: broadcast::Sender<Event>,
+    disconnected_tx: watch::Sender<bool>,
 ) {
     loop {
         match read_frame::<_, ServerFrame>(&mut read).await {
@@ -125,6 +126,8 @@ async fn reader_loop(
             Err(_) => {
                 // Drain pending with Closed errors via dropping senders.
                 pending.lock().await.clear();
+                // Signal the TUI that the connection is gone.
+                let _ = disconnected_tx.send(true);
                 break;
             }
         }
