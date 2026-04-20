@@ -8,10 +8,24 @@
 
 use crate::ipc_client::IpcClient;
 use crate::spawn;
-use llm_relay_core::ipc::Request;
+use llm_relay_core::ipc::{Request, Topic};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// The set of event topics the TUI cares about. Used both at initial connect
+/// and after reconnect — the agent filters per-connection by topic, so the TUI
+/// MUST re-Subscribe whenever it gets a fresh `IpcClient`, otherwise no events
+/// (health, traffic errors, login completion, etc.) will reach the UI.
+pub fn default_topics() -> Vec<Topic> {
+    vec![
+        Topic::Health,
+        Topic::Active,
+        Topic::Traffic,
+        Topic::Usage,
+        Topic::Login,
+    ]
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum EnsureMode {

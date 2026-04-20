@@ -178,6 +178,12 @@ pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf)
     // Initial gateway load.
     {
         let client = client_slot.lock().await.clone();
+        // Subscribe to event topics. The agent filters per-connection by topic,
+        // so without this the bus pump would drop every event before it reaches
+        // the writer. (See `bootstrap::default_topics` for the canonical set.)
+        let _ = client
+            .request(Request::Subscribe { topics: bootstrap::default_topics() })
+            .await;
         if let Ok(resp) = client.request(Request::ListGateways).await {
             if let Some(rows) = gw_rows_from_response(resp) {
                 state.replace_gateways(rows);
@@ -206,6 +212,13 @@ pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf)
                                 // Swap the client.
                                 *client_slot.lock().await = c.clone();
                                 disc = c.disconnected();
+
+                                // Re-subscribe: the agent filters events per-connection by
+                                // topic set, and that set lives on the old (now-dead) conn.
+                                // Without this, no events would ever reach the new client.
+                                let _ = c
+                                    .request(Request::Subscribe { topics: bootstrap::default_topics() })
+                                    .await;
 
                                 // Re-spawn IPC event forwarder for the new client.
                                 {
