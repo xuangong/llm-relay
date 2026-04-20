@@ -44,6 +44,13 @@ async fn fetch_errors(client: &IpcClient, state: &mut AppState) {
     }
 }
 
+/// Fetch TUI settings snapshot from the agent and store in state.
+async fn fetch_settings(client: &IpcClient, state: &mut AppState) {
+    if let Ok(Response::TuiSettings(s)) = client.request(Request::GetTuiSettings).await {
+        state.settings.snapshot = Some(s);
+    }
+}
+
 pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
@@ -65,6 +72,7 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
                         KeyCode::Enter => AppEvent::Enter,
                         KeyCode::Esc => AppEvent::Esc,
                         KeyCode::Char('r') => AppEvent::Refresh,
+                        // 'a' is context-sensitive: disambiguated after state.handle() below.
                         KeyCode::Char(c) => AppEvent::Char(c),
                         _ => continue,
                     };
@@ -103,6 +111,10 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
     term.draw(|f| crate::view::render(f, &state))?;
 
     while let Some(evt) = rx.recv().await {
+        // Capture whether this is a Char('a') on the Settings tab before mutating state.
+        let is_toggle_auto_launch = matches!(&evt, AppEvent::Char('a'))
+            && state.active_tab == Tab::Settings;
+
         // Refresh short-circuits before state.handle so we can do async IPC.
         if matches!(evt, AppEvent::Refresh) {
             if let Ok(resp) = client.request(Request::ListGateways).await {
@@ -114,10 +126,19 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
             match state.active_tab {
                 Tab::Usage => fetch_usage(&client, &mut state).await,
                 Tab::Errors => fetch_errors(&client, &mut state).await,
+                Tab::Settings => fetch_settings(&client, &mut state).await,
                 _ => {}
             }
         } else {
             state.handle(evt);
+        }
+
+        // Context-sensitive 'a' on Settings tab: toggle auto-launch.
+        if is_toggle_auto_launch {
+            let current = state.settings.snapshot.as_ref().map(|s| s.auto_launch).unwrap_or(false);
+            let _ = client.request(Request::SetAutoLaunch { enabled: !current }).await;
+            // Re-fetch to reflect the change.
+            fetch_settings(&client, &mut state).await;
         }
 
         // On tab switch, fetch data for the newly activated tab.
@@ -125,6 +146,7 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
             match state.active_tab {
                 Tab::Usage => fetch_usage(&client, &mut state).await,
                 Tab::Errors => fetch_errors(&client, &mut state).await,
+                Tab::Settings => fetch_settings(&client, &mut state).await,
                 _ => {}
             }
             prev_tab = state.active_tab;

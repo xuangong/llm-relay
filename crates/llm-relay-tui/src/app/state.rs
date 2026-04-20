@@ -3,7 +3,7 @@
 //! unit-test behavior without a terminal.
 
 use crate::app::event::AppEvent;
-use llm_relay_core::ipc::{ErrorRow, Event as IpcEvent, HealthStatus, UsageRange, UsageRowDetail};
+use llm_relay_core::ipc::{ErrorRow, Event as IpcEvent, HealthStatus, TuiSettings, UsageRange, UsageRowDetail};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -65,6 +65,11 @@ pub struct ErrorsState {
 }
 
 #[derive(Debug, Default)]
+pub struct SettingsState {
+    pub snapshot: Option<TuiSettings>,
+}
+
+#[derive(Debug, Default)]
 pub struct AppState {
     pub active_tab: Tab,
     pub should_quit: bool,
@@ -74,6 +79,7 @@ pub struct AppState {
     pub status_message: Option<String>,
     pub usage: UsageState,
     pub errors: ErrorsState,
+    pub settings: SettingsState,
 }
 
 impl AppState {
@@ -113,6 +119,9 @@ impl AppState {
             },
             AppEvent::Refresh => { /* triggers an IPC fetch in the loop */ }
             AppEvent::Ipc(evt) => self.apply_ipc(evt),
+            // ToggleAutoLaunch is handled asynchronously in loop_.rs after emitting the IPC call.
+            // The state update (flipping auto_launch in snapshot) happens after re-fetching settings.
+            AppEvent::ToggleAutoLaunch => { /* handled by loop_.rs */ }
         }
     }
 

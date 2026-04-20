@@ -45,6 +45,10 @@ pub enum Request {
     GetUsageRows { range: UsageRange },
     /// TUI: fetch recent error rows.
     GetErrors { limit: u32 },
+    /// TUI: fetch agent/system settings summary.
+    GetTuiSettings,
+    /// TUI: toggle the auto-launch-on-boot preference.
+    SetAutoLaunch { enabled: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +75,10 @@ pub enum Response {
     UsageRows { rows: Vec<UsageRowDetail> },
     /// TUI: recent error rows.
     ErrorRows { rows: Vec<ErrorRow> },
+    /// TUI: agent/system settings snapshot.
+    TuiSettings(TuiSettings),
+    /// TUI: acknowledgement for a settings mutation (e.g. SetAutoLaunch).
+    SettingsAck,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,4 +253,18 @@ pub struct ErrorRow {
     /// Error kind: "health" | "proxy" | "auth"
     pub kind: String,
     pub message: String,
+}
+
+/// Agent/system settings snapshot shown in the TUI Settings tab.
+/// Separate from `Settings` (used by the GUI) to avoid collisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiSettings {
+    /// "system" or "encrypted-file"
+    pub keystore_kind: String,
+    pub agent_pid: u32,
+    pub socket_path: String,
+    pub proxy_port: u16,
+    pub log_path: String,
+    /// TODO: wire to a real persistent setting.
+    pub auto_launch: bool,
 }

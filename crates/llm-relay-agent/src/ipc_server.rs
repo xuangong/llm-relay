@@ -241,5 +241,23 @@ async fn dispatch(ctx: &ConnCtx, req: Request, topics: &Arc<Mutex<HashSet<Topic>
             Ok(rows) => Response::ErrorRows { rows },
             Err(e) => Response::Error { message: e.to_string() },
         },
+        Request::GetTuiSettings => {
+            let socket_path = llm_relay_core::paths::sock_file().to_string_lossy().into_owned();
+            let log_path = llm_relay_core::paths::log_file().to_string_lossy().into_owned();
+            match ctx.service.get_tui_settings(
+                ctx.agent_pid,
+                ctx.keystore_kind,
+                socket_path,
+                llm_relay_core::paths::PROXY_PORT,
+                log_path,
+            ).await {
+                Ok(s) => Response::TuiSettings(s),
+                Err(e) => Response::Error { message: e.to_string() },
+            }
+        }
+        Request::SetAutoLaunch { enabled } => match ctx.service.set_auto_launch(enabled).await {
+            Ok(_) => Response::SettingsAck,
+            Err(e) => Response::Error { message: e.to_string() },
+        },
     }
 }

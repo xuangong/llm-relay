@@ -1,12 +1,13 @@
 pub mod gateways;
 pub mod usage;
 pub mod errors;
+pub mod settings;
 
 use crate::app::state::{AppState, Tab};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Tabs};
 use ratatui::Frame;
 
 pub fn render(frame: &mut Frame, state: &AppState) {
@@ -36,10 +37,6 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Tab::Gateways => gateways::render(frame, chunks[1], state),
         Tab::Usage => usage::render(frame, chunks[1], state),
         Tab::Errors => errors::render(frame, chunks[1], state),
-        Tab::Settings => {
-            let p = Paragraph::new("(coming in next tasks)")
-                .block(Block::default().borders(Borders::ALL));
-            frame.render_widget(p, chunks[1]);
-        }
+        Tab::Settings => settings::render(frame, chunks[1], state),
     }
 }

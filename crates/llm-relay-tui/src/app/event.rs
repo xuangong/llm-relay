@@ -15,4 +15,6 @@ pub enum AppEvent {
     Char(char),
     Refresh,
     Ipc(IpcEvent),
+    /// User pressed 'a' while on the Settings tab — toggle auto-launch.
+    ToggleAutoLaunch,
 }

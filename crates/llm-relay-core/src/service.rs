@@ -463,6 +463,42 @@ impl Service {
         // TODO: query `error_log` or equivalent table, ORDER BY timestamp DESC LIMIT _limit
         Ok(Vec::new())
     }
+
+    /// Return a TuiSettings snapshot for the Settings tab.
+    ///
+    /// `agent_pid`, `keystore_kind`, `socket_path`, `proxy_port`, and `log_path` are
+    /// passed in from `ServerCtx` so the service layer stays stateless.
+    pub async fn get_tui_settings(
+        &self,
+        agent_pid: u32,
+        keystore_kind: KeystoreKind,
+        socket_path: String,
+        proxy_port: u16,
+        log_path: String,
+    ) -> Result<TuiSettings, AppError> {
+        // TODO: persist & read auto_launch from a DB setting.
+        let auto_launch = self.db.get_setting("auto_launch")?.as_deref() == Some("true");
+        let keystore_str = match keystore_kind {
+            KeystoreKind::System => "system".to_string(),
+            KeystoreKind::EncryptedFile => "encrypted-file".to_string(),
+        };
+        Ok(TuiSettings {
+            keystore_kind: keystore_str,
+            agent_pid,
+            socket_path,
+            proxy_port,
+            log_path,
+            auto_launch,
+        })
+    }
+
+    /// Persist the auto-launch-on-boot preference.
+    ///
+    /// TODO: wire to OS-level launch agent registration (launchd / systemd).
+    pub async fn set_auto_launch(&self, enabled: bool) -> Result<(), AppError> {
+        self.db.set_setting("auto_launch", if enabled { "true" } else { "false" })?;
+        Ok(())
+    }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
