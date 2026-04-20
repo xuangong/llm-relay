@@ -6,22 +6,13 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Port check BEFORE acquiring the lock — fail fast if GUI or another agent
-    // already owns port 18080.
-    match std::net::TcpListener::bind(("127.0.0.1", llm_relay_core::paths::PROXY_PORT)) {
-        Ok(l) => drop(l),
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!("port {} already in use — is the GUI app running?", llm_relay_core::paths::PROXY_PORT);
-            std::process::exit(2);
-        }
-        Err(e) => {
-            eprintln!("port probe failed: {e}");
-            // Non-fatal: proceed — the proxy server will fail on bind and log more detail.
-        }
-    }
-
     init_log();
-    let _guard = lifecycle::LifecycleGuard::acquire()?;
+    // LifecycleGuard binds port 18080 atomically with the file lock — no separate
+    // probe step (which would race a competing process between probe and proxy bind).
+    let mut guard = lifecycle::LifecycleGuard::acquire().map_err(|e| {
+        eprintln!("{e}");
+        e
+    })?;
     log::info!("agent starting (pid {})", std::process::id());
 
     std::fs::create_dir_all(paths::config_dir())?;
@@ -33,9 +24,11 @@ async fn main() -> Result<()> {
     let sink: llm_relay_core::SharedEventSink = Arc::new(ipc_server::BusSink { bus: bus.clone() });
     let service = Service::new(db.clone(), sink);
 
-    // Spawn proxy + health
+    // Spawn proxy + health. Hand off the pre-bound listener so we don't re-bind
+    // and risk a TOCTOU race against another process.
+    let proxy_listener = guard.take_listener();
     let s1 = service.clone();
-    tokio::spawn(async move { llm_relay_core::proxy_server::start(s1).await });
+    tokio::spawn(async move { llm_relay_core::proxy_server::start_with_listener(s1, proxy_listener).await });
     let s2 = service.clone();
     tokio::spawn(async move { llm_relay_core::health::health_check_loop(s2).await });
 

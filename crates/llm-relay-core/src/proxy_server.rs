@@ -35,6 +35,16 @@ pub struct ProxyState {
 }
 
 pub async fn start(service: crate::Service) {
+    start_with_listener(service, None).await
+}
+
+/// Start the proxy server, optionally with a pre-bound listener.
+///
+/// Passing a `std::net::TcpListener` lets the agent's `LifecycleGuard` bind the
+/// port atomically with respect to the file lock — avoiding a TOCTOU window
+/// where another process could grab port 18080 between the lifecycle probe
+/// (which dropped its listener) and the proxy's own bind.
+pub async fn start_with_listener(service: crate::Service, listener: Option<std::net::TcpListener>) {
     let state = ProxyState {
         db: service.db.clone(),
         switch_lock: service.switch_lock.clone(),
@@ -47,16 +57,31 @@ pub async fn start(service: crate::Service) {
         .with_state(state);
 
     let addr = format!("127.0.0.1:{}", PROXY_PORT);
-    match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => {
-            log::info!("Local proxy started on {}", addr);
-            if let Err(e) = axum::serve(listener, app).await {
-                log::error!("Proxy server stopped: {}", e);
+    let tokio_listener = if let Some(std_l) = listener {
+        // Caller (lifecycle) already owns the bind. Convert std → tokio.
+        if let Err(e) = std_l.set_nonblocking(true) {
+            log::error!("Failed to set listener nonblocking on {}: {}", addr, e);
+            return;
+        }
+        match tokio::net::TcpListener::from_std(std_l) {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("Failed to wrap pre-bound listener on {}: {}", addr, e);
+                return;
             }
         }
-        Err(e) => {
-            log::error!("Failed to start proxy on {}: {}", addr, e);
+    } else {
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("Failed to start proxy on {}: {}", addr, e);
+                return;
+            }
         }
+    };
+    log::info!("Local proxy started on {}", addr);
+    if let Err(e) = axum::serve(tokio_listener, app).await {
+        log::error!("Proxy server stopped: {}", e);
     }
 }
 

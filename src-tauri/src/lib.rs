@@ -84,10 +84,14 @@ pub fn run() {
                 let _ = window.show();
             }
 
-            // Port check — refuse to start if another LLM Relay process already
-            // owns port 18080 (e.g., the TUI agent is running).
-            match std::net::TcpListener::bind(("127.0.0.1", llm_relay_core::paths::PROXY_PORT)) {
-                Ok(l) => drop(l),
+            // Bind port 18080 NOW and hand the listener to the proxy server.
+            // Doing this in one step (vs probe+drop then later bind) closes the
+            // TOCTOU window where another process could grab the port.
+            let proxy_listener = match std::net::TcpListener::bind((
+                "127.0.0.1",
+                llm_relay_core::paths::PROXY_PORT,
+            )) {
+                Ok(l) => Some(l),
                 Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                     log::error!(
                         "port {} in use; another LLM Relay process is running — exiting",
@@ -96,16 +100,20 @@ pub fn run() {
                     std::process::exit(1);
                 }
                 Err(e) => {
-                    log::error!("port probe failed: {e}");
-                    // Non-fatal; proceed.
+                    log::error!("port bind failed: {e}");
+                    None
                 }
-            }
+            };
 
             // Start local proxy server (http://127.0.0.1:18080)
             {
                 let svc_for_proxy = service.clone();
                 tauri::async_runtime::spawn(async move {
-                    llm_relay_core::proxy_server::start((*svc_for_proxy).clone()).await;
+                    llm_relay_core::proxy_server::start_with_listener(
+                        (*svc_for_proxy).clone(),
+                        proxy_listener,
+                    )
+                    .await;
                 });
             }
 
