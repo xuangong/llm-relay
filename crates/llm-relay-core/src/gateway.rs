@@ -1,4 +1,4 @@
-use llm_relay_core::AppError;
+use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

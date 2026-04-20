@@ -5,3 +5,4 @@ pub mod config_writer;
 pub mod keystore;
 pub mod database;
 pub use database::Database;
+pub mod gateway;

@@ -1,5 +1,4 @@
 mod commands;
-mod gateway;
 mod health;
 mod proxy_server;
 mod tray;

@@ -2,7 +2,7 @@ use tauri::State;
 
 use llm_relay_core::config_writer;
 use llm_relay_core::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthCache, HealthLogEntry, TrafficLogEntry, UsageSummary};
-use crate::gateway::{self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList};
+use llm_relay_core::gateway::{self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList};
 use crate::proxy_server;
 use crate::AppState;
 
