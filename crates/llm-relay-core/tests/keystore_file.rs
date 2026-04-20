@@ -2,6 +2,7 @@
 
 use llm_relay_core::keystore::{file_backend_for_test, Backend};
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 mod helper {
     pub fn unique_tmp(name: &str) -> std::path::PathBuf {
@@ -11,8 +12,14 @@ mod helper {
     }
 }
 
+// Both tests mutate the process-wide `LLM_RELAY_KEY` env var, so they must
+// not run concurrently. Cargo runs tests in a single binary in parallel by
+// default; this mutex serializes the env-mutating sections.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 #[test]
 fn round_trip_with_env_password() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("LLM_RELAY_KEY", "test-pw-123");
     let path = helper::unique_tmp("rt").join("secrets.enc");
     let _ = std::fs::remove_file(&path);
@@ -31,6 +38,7 @@ fn round_trip_with_env_password() {
 
 #[test]
 fn wrong_password_yields_empty_map() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("LLM_RELAY_KEY", "correct");
     let path = helper::unique_tmp("wp").join("secrets.enc");
     let _ = std::fs::remove_file(&path);
