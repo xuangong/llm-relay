@@ -445,6 +445,15 @@ impl Service {
         }
         Ok(())
     }
+
+    /// Return per-gateway, per-model usage rows for the TUI Usage tab.
+    ///
+    /// TODO: wire to a real DB query once the `usage_by_gateway` view exists.
+    /// For now returns an empty vec so the TUI compiles and shows an empty table.
+    pub async fn get_usage_rows(&self, _range: UsageRange) -> Result<Vec<UsageRowDetail>, AppError> {
+        // TODO: query `usage_log` table grouped by gateway_id+model for the requested range
+        Ok(Vec::new())
+    }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

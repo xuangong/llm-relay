@@ -41,6 +41,8 @@ pub enum Request {
     UpdateSettings(SettingsUpdate),
     Shutdown,
     ListGateways,
+    /// TUI: fetch per-gateway usage rows for a given range.
+    GetUsageRows { range: UsageRange },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +65,8 @@ pub enum Response {
     Usage(UsageReport),
     TrafficLog(Vec<TrafficEntry>),
     GatewayList { gateways: Vec<GatewaySummary> },
+    /// TUI: per-gateway usage rows (see `UsageRowDetail`).
+    UsageRows { rows: Vec<UsageRowDetail> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +169,27 @@ pub struct UsageRow {
     pub output: u64,
     pub cache: u64,
     pub total: u64,
+}
+
+/// Range selector used by the TUI Usage tab (distinct from `TimeRange` used by GUI).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageRange { Today, Last7Days, Last30Days, AllTime }
+
+impl Default for UsageRange {
+    fn default() -> Self { UsageRange::Today }
+}
+
+/// Per-gateway/model usage row returned for the TUI Usage tab.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageRowDetail {
+    pub gateway_id: uuid::Uuid,
+    pub gateway_name: String,
+    pub model: String,
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

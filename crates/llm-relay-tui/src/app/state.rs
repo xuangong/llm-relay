@@ -3,7 +3,7 @@
 //! unit-test behavior without a terminal.
 
 use crate::app::event::AppEvent;
-use llm_relay_core::ipc::{Event as IpcEvent, HealthStatus};
+use llm_relay_core::ipc::{Event as IpcEvent, HealthStatus, UsageRange, UsageRowDetail};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -52,6 +52,13 @@ pub struct GatewayRow {
 }
 
 #[derive(Debug, Default)]
+pub struct UsageState {
+    pub range: UsageRange,
+    pub rows: Vec<UsageRowDetail>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Default)]
 pub struct AppState {
     pub active_tab: Tab,
     pub should_quit: bool,
@@ -59,6 +66,7 @@ pub struct AppState {
     pub gateway_index: HashMap<Uuid, usize>,
     pub selected_row: usize,
     pub status_message: Option<String>,
+    pub usage: UsageState,
 }
 
 impl AppState {
@@ -93,6 +101,7 @@ impl AppState {
                         row.starred = !row.starred;
                     }
                 }
+                'p' if self.active_tab == Tab::Usage => self.cycle_usage_range(),
                 _ => {}
             },
             AppEvent::Refresh => { /* triggers an IPC fetch in the loop */ }
@@ -123,5 +132,15 @@ impl AppState {
         if self.selected_row >= self.gateways.len() {
             self.selected_row = self.gateways.len().saturating_sub(1);
         }
+    }
+
+    /// Cycle the usage range filter: Today → Last7Days → Last30Days → AllTime → Today.
+    pub fn cycle_usage_range(&mut self) {
+        self.usage.range = match self.usage.range {
+            UsageRange::Today => UsageRange::Last7Days,
+            UsageRange::Last7Days => UsageRange::Last30Days,
+            UsageRange::Last30Days => UsageRange::AllTime,
+            UsageRange::AllTime => UsageRange::Today,
+        };
     }
 }

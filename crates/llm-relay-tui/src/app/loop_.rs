@@ -1,7 +1,7 @@
 //! Main loop: drains crossterm key events and IPC events, applies them to
 //! `AppState`, and re-renders.
 
-use crate::app::{event::AppEvent, state::{AppState, GatewayRow}, terminal::Tui};
+use crate::app::{event::AppEvent, state::{AppState, GatewayRow, Tab}, terminal::Tui};
 use crate::ipc_client::IpcClient;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind};
 use llm_relay_core::ipc::{Request, Response};
@@ -27,6 +27,13 @@ fn gw_rows_from_response(resp: Response) -> Option<Vec<GatewayRow>> {
         )
     } else {
         None
+    }
+}
+
+/// Fetch usage rows from the agent and store them in state.
+async fn fetch_usage(client: &IpcClient, state: &mut AppState) {
+    if let Ok(Response::UsageRows { rows }) = client.request(Request::GetUsageRows { range: state.usage.range }).await {
+        state.usage.rows = rows;
     }
 }
 
@@ -76,6 +83,7 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
     }
 
     let mut state = AppState::new();
+    let mut prev_tab = state.active_tab;
 
     // Initial gateway load.
     if let Ok(resp) = client.request(Request::ListGateways).await {
@@ -95,9 +103,24 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
                     state.replace_gateways(rows);
                 }
             }
+            // Also refresh whichever data tab is active.
+            match state.active_tab {
+                Tab::Usage => fetch_usage(&client, &mut state).await,
+                _ => {}
+            }
         } else {
             state.handle(evt);
         }
+
+        // On tab switch, fetch data for the newly activated tab.
+        if state.active_tab != prev_tab {
+            match state.active_tab {
+                Tab::Usage => fetch_usage(&client, &mut state).await,
+                _ => {}
+            }
+            prev_tab = state.active_tab;
+        }
+
         term.draw(|f| crate::view::render(f, &state))?;
         if state.should_quit {
             break;
