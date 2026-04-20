@@ -24,3 +24,4 @@ argon2 = "0.5"
 rand = "0.8"
 rpassword = "7"
 base64 = "0.22"
+interprocess = { version = "2", features = ["tokio"] }
