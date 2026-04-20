@@ -11,3 +11,5 @@ pub use events::{emit_typed, EventSink, NullSink, SharedEventSink, TRAY_REFRESH_
 pub mod health;
 pub mod proxy_server;
 pub mod ipc;
+pub mod service;
+pub use service::Service;
