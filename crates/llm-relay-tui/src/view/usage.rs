@@ -6,6 +6,26 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
+    // If the agent reported an error (e.g. NotImplemented), render a banner
+    // instead of an empty table that would falsely imply "no usage".
+    if let Some(msg) = &state.usage.error {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(2), Constraint::Min(3), Constraint::Length(2)])
+            .split(area);
+        let header_p = Paragraph::new("Usage")
+            .style(Style::default().add_modifier(Modifier::BOLD));
+        frame.render_widget(header_p, chunks[0]);
+        let banner = Paragraph::new(format!("尚未实现 / Not yet implemented ({msg})"))
+            .style(Style::default().fg(Color::Yellow))
+            .block(Block::default().borders(Borders::ALL).title("Usage"));
+        frame.render_widget(banner, chunks[1]);
+        let hint = Paragraph::new("r refresh  Tab next  q quit")
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(hint, chunks[2]);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(3), Constraint::Length(2)])

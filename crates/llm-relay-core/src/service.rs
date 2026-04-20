@@ -448,20 +448,23 @@ impl Service {
 
     /// Return per-gateway, per-model usage rows for the TUI Usage tab.
     ///
-    /// TODO: wire to a real DB query once the `usage_by_gateway` view exists.
-    /// For now returns an empty vec so the TUI compiles and shows an empty table.
+    /// Not yet wired to the DB. Returns `NotImplemented` so the TUI can show a
+    /// banner instead of an empty table that misleadingly looks "successful".
     pub async fn get_usage_rows(&self, _range: UsageRange) -> Result<Vec<UsageRowDetail>, AppError> {
-        // TODO: query `usage_log` table grouped by gateway_id+model for the requested range
-        Ok(Vec::new())
+        Err(AppError::NotImplemented(
+            "usage rows not yet wired to DB".into(),
+        ))
     }
 
     /// Return recent error rows for the TUI Errors tab.
     ///
-    /// TODO: wire to a real DB query once an `error_log` table/view exists.
-    /// For now returns an empty vec so the TUI compiles and shows an empty table.
+    /// Not yet wired to a real `error_log` table. Returns `NotImplemented` so
+    /// the TUI surfaces the gap rather than presenting an empty (and untrue)
+    /// "no errors" view.
     pub async fn get_errors(&self, _limit: u32) -> Result<Vec<ErrorRow>, AppError> {
-        // TODO: query `error_log` or equivalent table, ORDER BY timestamp DESC LIMIT _limit
-        Ok(Vec::new())
+        Err(AppError::NotImplemented(
+            "error rows not yet wired to DB".into(),
+        ))
     }
 
     /// Return a TuiSettings snapshot for the Settings tab.
@@ -476,7 +479,10 @@ impl Service {
         proxy_port: u16,
         log_path: String,
     ) -> Result<TuiSettings, AppError> {
-        // TODO: persist & read auto_launch from a DB setting.
+        // NOTE: auto_launch reads from a DB setting, but it is NOT yet wired to
+        // any OS-level launch agent (launchd / systemd). The value reflects
+        // user intent, not actual OS state.
+        log::warn!("auto_launch not yet implemented: returning DB-stored intent only");
         let auto_launch = self.db.get_setting("auto_launch")?.as_deref() == Some("true");
         let keystore_str = match keystore_kind {
             KeystoreKind::System => "system".to_string(),
@@ -494,8 +500,12 @@ impl Service {
 
     /// Persist the auto-launch-on-boot preference.
     ///
-    /// TODO: wire to OS-level launch agent registration (launchd / systemd).
+    /// Currently a DB-only no-op; not yet wired to launchd / systemd.
     pub async fn set_auto_launch(&self, enabled: bool) -> Result<(), AppError> {
+        log::warn!(
+            "auto_launch not yet implemented: storing intent={} in DB but no OS registration",
+            enabled
+        );
         self.db.set_setting("auto_launch", if enabled { "true" } else { "false" })?;
         Ok(())
     }

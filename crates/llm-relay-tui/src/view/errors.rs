@@ -10,6 +10,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         .constraints([Constraint::Min(3), Constraint::Length(2)])
         .split(area);
 
+    // Surface fetch errors (e.g. NotImplemented) instead of an empty table.
+    if let Some(msg) = &state.errors.error {
+        let banner = Paragraph::new(format!("尚未实现 / Not yet implemented ({msg})"))
+            .style(Style::default().fg(Color::Yellow))
+            .block(Block::default().borders(Borders::ALL).title("Recent Errors"));
+        frame.render_widget(banner, chunks[0]);
+        let hint = Paragraph::new("r refresh  Tab next  q quit")
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(hint, chunks[1]);
+        return;
+    }
+
     let header = Row::new(vec!["Time", "Gateway", "Kind", "Message"])
         .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan));
     let rows = state.errors.rows.iter().map(|r| {

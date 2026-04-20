@@ -42,19 +42,39 @@ fn gw_rows_from_response(resp: Response) -> Option<Vec<GatewayRow>> {
 
 /// Fetch usage rows from the agent and store them in state.
 async fn fetch_usage(client: &IpcClient, state: &mut AppState) {
-    if let Ok(Response::UsageRows { rows }) =
-        client.request(Request::GetUsageRows { range: state.usage.range }).await
-    {
-        state.usage.rows = rows;
+    match client.request(Request::GetUsageRows { range: state.usage.range }).await {
+        Ok(Response::UsageRows { rows }) => {
+            state.usage.rows = rows;
+            state.usage.error = None;
+        }
+        Ok(Response::Error { message }) => {
+            state.usage.rows.clear();
+            state.usage.error = Some(message);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            state.usage.rows.clear();
+            state.usage.error = Some(e.to_string());
+        }
     }
 }
 
 /// Fetch error rows from the agent and store them in state.
 async fn fetch_errors(client: &IpcClient, state: &mut AppState) {
-    if let Ok(Response::ErrorRows { rows }) =
-        client.request(Request::GetErrors { limit: 100 }).await
-    {
-        state.errors.rows = rows;
+    match client.request(Request::GetErrors { limit: 100 }).await {
+        Ok(Response::ErrorRows { rows }) => {
+            state.errors.rows = rows;
+            state.errors.error = None;
+        }
+        Ok(Response::Error { message }) => {
+            state.errors.rows.clear();
+            state.errors.error = Some(message);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            state.errors.rows.clear();
+            state.errors.error = Some(e.to_string());
+        }
     }
 }
 

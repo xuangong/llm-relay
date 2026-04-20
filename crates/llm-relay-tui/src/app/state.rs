@@ -56,12 +56,17 @@ pub struct UsageState {
     pub range: UsageRange,
     pub rows: Vec<UsageRowDetail>,
     pub selected: usize,
+    /// If the most recent fetch returned an error (e.g. NotImplemented), the
+    /// view renders a banner instead of an empty table.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct ErrorsState {
     pub rows: Vec<ErrorRow>,
     pub selected: usize,
+    /// Same purpose as `UsageState::error` — surface fetch errors to the UI.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Default)]
