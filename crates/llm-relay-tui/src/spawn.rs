@@ -13,7 +13,7 @@ pub fn spawn_detached(cmd: &str, args: &[&str]) -> io::Result<u32> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let mut child = unsafe {
+    let child = unsafe {
         Command::new(cmd)
             .args(args)
             .stdin(Stdio::null())
