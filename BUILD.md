@@ -1,6 +1,6 @@
 # 构建指南
 
-本文档说明如何为 macOS、Windows、Linux 构建 LLM Relay 安装包。
+本文档说明如何为 macOS、Windows、Linux 构建 LLM Relay 安装包（v0.3.0+）。
 
 ## 目录
 
@@ -8,6 +8,9 @@
 - [macOS 构建](#macos-构建)
 - [Windows 构建](#windows-构建)
 - [Linux 构建](#linux-构建)
+- [WSL2 构建 Linux 版本（推荐 Windows 用户）](#wsl2-构建-linux-版本)
+- [手动发布：本地构建 + 上传到 Release](#手动发布)
+- [TUI / 无头 agent 构建](#tui--无头-agent-构建)
 - [交叉编译](#交叉编译)
 - [构建产物](#构建产物)
 - [常见问题](#常见问题)
@@ -103,24 +106,31 @@ src-tauri/target/release/bundle/
 ├── macos/
 │   └── LLM Relay.app          # 应用程序包
 └── dmg/
-    └── LLM Relay_0.2.4_aarch64.dmg    # Apple Silicon (M1/M2/M3)
-    └── LLM Relay_0.2.4_x64.dmg        # Intel (如果在 Intel Mac 上构建)
+    └── LLM Relay_0.3.0_aarch64.dmg    # Apple Silicon (M1/M2/M3)
+    └── LLM Relay_0.3.0_x64.dmg        # Intel (如果在 Intel Mac 上构建)
 ```
 
 ### 为不同架构构建
 
+在 Apple Silicon Mac 上（推荐流程 — 两个架构都能出）：
+
 ```bash
-# 构建 Apple Silicon (aarch64) 版本
+# 构建 Apple Silicon (aarch64) 版本 — 原生，最快
 rustup target add aarch64-apple-darwin
 pnpm tauri build --target aarch64-apple-darwin
 
-# 构建 Intel (x86_64) 版本
+# 构建 Intel (x86_64) 版本 — Rosetta 辅助，M1/M2/M3 上也能编译
 rustup target add x86_64-apple-darwin
 pnpm tauri build --target x86_64-apple-darwin
 
-# 构建通用二进制（Universal Binary，同时支持两种架构）
+# 构建通用二进制（Universal Binary，同时支持两种架构，体积约 2x）
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm tauri build --target universal-apple-darwin
 ```
+
+两个 DMG 会分别落在：
+- `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_aarch64.dmg`
+- `src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_x64.dmg`
 
 ### 代码签名（可选）
 
@@ -167,9 +177,9 @@ pnpm run tauri build
 ```
 src-tauri\target\release\bundle\
 ├── nsis\
-│   └── LLM Relay_0.2.4_x64-setup.exe     # NSIS 安装器（推荐）
+│   └── LLM Relay_0.3.0_x64-setup.exe     # NSIS 安装器（推荐）
 └── msi\
-    └── LLM Relay_0.2.4_x64_en-US.msi     # MSI 安装器
+    └── LLM Relay_0.3.0_x64_en-US.msi     # MSI 安装器
 ```
 
 ### 选择安装器类型
@@ -232,11 +242,11 @@ pnpm run tauri build
 ```
 src-tauri/target/release/bundle/
 ├── deb/
-│   └── llm-relay_0.2.4_amd64.deb      # Debian/Ubuntu 包
+│   └── llm-relay_0.3.0_amd64.deb      # Debian/Ubuntu 包
 ├── rpm/
-│   └── llm-relay-0.2.4-1.x86_64.rpm   # Fedora/RHEL 包
+│   └── llm-relay-0.3.0-1.x86_64.rpm   # Fedora/RHEL 包
 └── appimage/
-    └── llm-relay_0.2.4_amd64.AppImage # AppImage（通用）
+    └── llm-relay_0.3.0_amd64.AppImage # AppImage（通用）
 ```
 
 ### 选择打包格式
@@ -250,6 +260,222 @@ pnpm tauri build -- --bundles appimage
 
 # 构建所有格式（默认）
 pnpm tauri build
+```
+
+---
+
+## WSL2 构建 Linux 版本
+
+**✅ 推荐** — 如果你是 Windows 用户、想出 Linux 安装包，**WSL2 是最简单的方式**。
+比装 VM / 双系统都轻，性能几乎等同原生 Linux。
+
+### 一次性准备 WSL2
+
+```powershell
+# 以管理员运行 PowerShell
+wsl --install -d Ubuntu-22.04
+# 首次启动时设置用户名、密码
+```
+
+Ubuntu 22.04 / 24.04 都可以（24.04 的 webkit2gtk-4.1 包名相同）。
+
+### 在 WSL2 里装依赖（一次性）
+
+```bash
+# 在 WSL Ubuntu shell 里
+sudo apt update
+sudo apt install -y libwebkit2gtk-4.1-dev \
+  build-essential curl wget file \
+  libxdo-dev libssl-dev \
+  libayatana-appindicator3-dev librsvg2-dev \
+  pkg-config
+
+# Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source ~/.cargo/env
+
+# Node + pnpm
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+sudo npm install -g pnpm
+```
+
+### 克隆 + 构建（推荐把项目放 WSL 侧）
+
+⚠️ **不要**在 `/mnt/c/...`（Windows 文件系统）里编译 — 文件 I/O 走 9P 协议慢 10x+，
+而且 Rust 的 `target/` 大量小文件会把 Windows Defender 拖死。
+
+```bash
+# 在 WSL 文件系统里 clone
+cd ~
+git clone https://github.com/xuangong/llm-relay.git
+cd llm-relay
+pnpm install
+pnpm tauri build
+```
+
+产物路径（从 Windows 里也能访问）：
+
+```
+\\wsl$\Ubuntu-22.04\home\<你的 WSL 用户>\llm-relay\src-tauri\target\release\bundle\
+├── deb/llm-relay_0.3.0_amd64.deb
+├── rpm/llm-relay-0.3.0-1.x86_64.rpm
+└── appimage/llm-relay_0.3.0_amd64.AppImage
+```
+
+可以直接在 Windows 资源管理器里把 `.deb` / `.AppImage` 拖出来上传到 Release。
+
+### 常见 WSL2 坑
+
+| 问题 | 解决 |
+|------|------|
+| `Package webkit2gtk-4.1 was not found` | 一定是 `apt install libwebkit2gtk-4.1-dev`（不是 `-4.0`） |
+| `cannot find -lssl` | `sudo apt install libssl-dev` |
+| 构建巨慢 / 磁盘满 | 确认项目在 `~/`（WSL 原生），不是 `/mnt/c/`；定期 `cargo clean` |
+| GUI 测试时黑屏 | WSLg 要 Windows 11；Tauri 的 `pnpm tauri dev` 在 WSL 需要 WSLg 才能显示窗口，否则只做 `build` |
+| 内存炸了 | 在 `%UserProfile%\.wslconfig` 里设 `[wsl2] memory=8GB` |
+
+> 💡 只构建 TUI / agent 的话更简单 —— `cargo build --release -p llm-relay-agent -p llm-relay-tui` 不需要 webkit2gtk 这一堆 GTK 依赖，只要 `build-essential` + `libssl-dev` + `pkg-config`。
+
+---
+
+## 手动发布
+
+当 GitHub Actions 不可用（如账号 billing lock、Runner 排队、网络问题）时，
+可以**本地构建 + 手动上传到 GitHub Release**。v0.3.0 的发布就是这么做的。
+
+### 前提
+
+```bash
+# 1. 已安装 GitHub CLI
+brew install gh        # macOS
+# 或 winget install GitHub.cli   # Windows
+# 或 sudo apt install gh         # Linux
+
+gh auth login
+```
+
+### macOS 本地构建 + 上传
+
+在 Apple Silicon Mac 上一次出两个架构：
+
+```bash
+cd llm-relay
+
+# 1. 确认 tag 已推（CI 会尝试跑，失败没关系）
+git tag v0.3.0        # 已打过就跳过
+git push origin v0.3.0
+
+# 2. 本地构建两个架构
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+pnpm install
+pnpm tauri build --target aarch64-apple-darwin
+pnpm tauri build --target x86_64-apple-darwin
+
+# 3. 把 DMG 传到 release（release 不存在时会自动创建）
+gh release create v0.3.0 \
+  --title "v0.3.0" \
+  --notes-file RELEASE_NOTES.md \
+  --draft \
+  "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_aarch64.dmg" \
+  "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_x64.dmg"
+
+# release 已存在时追加资产
+gh release upload v0.3.0 \
+  "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_aarch64.dmg" \
+  "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_x64.dmg" \
+  --clobber
+```
+
+### Linux（用 WSL2 或原生 Ubuntu）
+
+```bash
+pnpm tauri build
+
+gh release upload v0.3.0 \
+  src-tauri/target/release/bundle/deb/llm-relay_0.3.0_amd64.deb \
+  src-tauri/target/release/bundle/appimage/llm-relay_0.3.0_amd64.AppImage \
+  --clobber
+```
+
+### Windows 本地构建 + 上传
+
+```powershell
+pnpm tauri build
+
+gh release upload v0.3.0 `
+  "src-tauri\target\release\bundle\nsis\LLM Relay_0.3.0_x64-setup.exe" `
+  --clobber
+```
+
+### 发布 checklist
+
+- [ ] `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处 version 一致
+- [ ] `cargo test --workspace` 全绿
+- [ ] README / CHANGELOG 更新
+- [ ] `git tag vX.Y.Z && git push origin vX.Y.Z`
+- [ ] macOS aarch64 DMG 上传
+- [ ] macOS x64 DMG 上传
+- [ ] Windows NSIS exe 上传
+- [ ] Linux deb + AppImage 上传
+- [ ] draft → publish（在 GitHub web UI 或 `gh release edit v0.3.0 --draft=false`）
+
+---
+
+## TUI / 无头 agent 构建
+
+TUI 客户端和 agent 不依赖 GTK / WebView，只要有 Rust 工具链就能编。
+适合放在服务器上跑。
+
+```bash
+# 只构建 TUI + agent 二进制（不构建 GUI）
+cargo build --release -p llm-relay-agent -p llm-relay-tui
+```
+
+产物：
+
+```
+target/release/
+├── llm-relay-agent    # 后台守护进程（无头模式）
+└── llm-relay-tui      # 终端客户端（ratatui）
+```
+
+### 交叉编译 TUI 到 Linux ARM64（例如部署到 Raspberry Pi / AWS Graviton）
+
+```bash
+# macOS 上用 musl 交叉编译（静态链接，产物能在任何 glibc 版本跑）
+brew install FiloSottile/musl-cross/musl-cross --with-aarch64
+
+rustup target add aarch64-unknown-linux-musl
+cargo build --release --target aarch64-unknown-linux-musl \
+  -p llm-relay-agent -p llm-relay-tui
+```
+
+### 打包成 systemd 服务
+
+见 `packaging/systemd/` 目录，包含 `llm-relay-agent.service` 单元文件。
+部署步骤：
+
+```bash
+# 把 agent 复制到服务器
+scp target/release/llm-relay-agent user@server:/usr/local/bin/
+
+# 生成主密钥（一次性）
+openssl rand -base64 32    # 保存到环境变量管理器
+
+# 安装 systemd 单元
+sudo cp packaging/systemd/llm-relay-agent.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now llm-relay-agent
+sudo systemctl status llm-relay-agent
+```
+
+然后在本地：
+
+```bash
+ssh -L 18080:127.0.0.1:18080 user@server      # 转发代理端口
+# 另开一个 ssh 跑 TUI
+ssh user@server /usr/local/bin/llm-relay-tui
 ```
 
 ---
@@ -306,16 +532,16 @@ pnpm tauri build --target x86_64-pc-windows-msvc
 ```json
 // package.json
 {
-  "version": "0.2.4"
+  "version": "0.3.0"
 }
 
 // src-tauri/Cargo.toml
 [package]
-version = "0.2.4"
+version = "0.3.0"
 
 // src-tauri/tauri.conf.json
 {
-  "version": "0.2.4"
+  "version": "0.3.0"
 }
 ```
 
@@ -559,7 +785,9 @@ rm -rf dist src-tauri/target
 | macOS Apple Silicon | `aarch64-apple-darwin` |
 | macOS Universal | `universal-apple-darwin` |
 | Windows 64-bit | `x86_64-pc-windows-msvc` |
-| Linux 64-bit | `x86_64-unknown-linux-gnu` |
+| Linux 64-bit (glibc) | `x86_64-unknown-linux-gnu` |
+| Linux 64-bit (musl, static) | `x86_64-unknown-linux-musl` |
+| Linux ARM64 (服务器 / Pi / Graviton) | `aarch64-unknown-linux-gnu` / `-musl` |
 
 ### 打包格式速查
 
