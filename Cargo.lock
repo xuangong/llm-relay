@@ -2720,6 +2720,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "uuid",
  "windows-sys 0.59.0",

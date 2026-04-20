@@ -3,6 +3,10 @@ name = "llm-relay-agent"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "llm_relay_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "llm-relay-agent"
 path = "src/main.rs"
@@ -15,6 +19,7 @@ serde.workspace = true
 uuid.workspace = true
 log.workspace = true
 anyhow.workspace = true
+thiserror = "1"
 fs2 = "0.4"
 chrono = { workspace = true }
 interprocess = { version = "2", features = ["tokio"] }

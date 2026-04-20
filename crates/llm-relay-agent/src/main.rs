@@ -1,6 +1,4 @@
-mod ipc_server;
-mod lifecycle;
-
+use llm_relay_agent::{ipc_server, lifecycle, login};
 use anyhow::Result;
 use chrono::Utc;
 use llm_relay_core::{paths, Database, Service};
@@ -26,6 +24,7 @@ async fn main() -> Result<()> {
     let s2 = service.clone();
     tokio::spawn(async move { llm_relay_core::health::health_check_loop(s2).await });
 
+    let login_registry = Arc::new(login::LoginRegistry::new(bus.0.clone()));
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let ctx = ipc_server::ServerCtx {
         service,
@@ -34,6 +33,7 @@ async fn main() -> Result<()> {
         agent_pid: std::process::id(),
         keystore_kind: llm_relay_core::keystore::current_kind(),
         shutdown: shutdown.clone(),
+        login_registry,
     };
 
     // Listen for SIGTERM / Ctrl-C and trip shutdown.

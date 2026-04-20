@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
+use crate::login::LoginRegistry;
 
 /// A bus that the agent's domain code pushes events into; each connected
 /// client subscribes to it (filtered by their Topic set).
@@ -30,8 +31,8 @@ impl llm_relay_core::EventSink for BusSink {
             "active_changed" => serde_json::from_value(payload).ok().map(|v: ActiveChanged| Event::ActiveChanged { gateway_id: v.gateway_id }),
             "traffic_error" => serde_json::from_value::<TrafficEntry>(payload).ok().map(Event::TrafficError),
             "usage_delta" => serde_json::from_value::<UsageDelta>(payload).ok().map(|v| Event::UsageDelta { gateway_id: v.gateway_id, model: v.model, input: v.input, output: v.output, cache: v.cache }),
-            "login_completed" => serde_json::from_value::<LoginCompleted>(payload).ok().map(|v| Event::LoginCompleted { gateway_id: v.gateway_id, user_name: v.user_name }),
-            "login_failed" => serde_json::from_value::<LoginFailed>(payload).ok().map(|v| Event::LoginFailed { gateway_id: v.gateway_id, reason: v.reason }),
+            "login_completed" => serde_json::from_value::<LoginCompleted>(payload).ok().map(|v| Event::LoginCompleted { gateway_id: v.gateway_id, session_token: v.session_token, user_id: v.user_id, user_name: v.user_name }),
+            "login_failed" => serde_json::from_value::<LoginFailed>(payload).ok().map(|v| Event::LoginFailed { gateway_id: v.gateway_id, message: v.message }),
             "login_expired" => serde_json::from_value::<LoginExpired>(payload).ok().map(|v| Event::LoginExpired { gateway_id: v.gateway_id }),
             other => { log::warn!("unmapped event name: {other}"); None }
         };
@@ -42,8 +43,8 @@ impl llm_relay_core::EventSink for BusSink {
 #[derive(serde::Deserialize)] struct HealthChanged { gateway_id: uuid::Uuid, status: HealthStatus }
 #[derive(serde::Deserialize)] struct ActiveChanged { gateway_id: Option<uuid::Uuid> }
 #[derive(serde::Deserialize)] struct UsageDelta { gateway_id: uuid::Uuid, model: String, input: u64, output: u64, cache: u64 }
-#[derive(serde::Deserialize)] struct LoginCompleted { gateway_id: uuid::Uuid, user_name: Option<String> }
-#[derive(serde::Deserialize)] struct LoginFailed { gateway_id: uuid::Uuid, reason: String }
+#[derive(serde::Deserialize)] struct LoginCompleted { gateway_id: uuid::Uuid, session_token: String, user_id: Option<String>, user_name: Option<String> }
+#[derive(serde::Deserialize)] struct LoginFailed { gateway_id: uuid::Uuid, message: String }
 #[derive(serde::Deserialize)] struct LoginExpired { gateway_id: uuid::Uuid }
 
 pub struct ServerCtx {
@@ -53,6 +54,7 @@ pub struct ServerCtx {
     pub agent_pid: u32,
     pub keystore_kind: KeystoreKind,
     pub shutdown: Arc<tokio::sync::Notify>,
+    pub login_registry: Arc<LoginRegistry>,
 }
 
 pub async fn run(sock_path: &Path, ctx: ServerCtx) -> Result<()> {
@@ -90,6 +92,7 @@ impl ServerCtx {
             agent_pid: self.agent_pid,
             keystore_kind: self.keystore_kind,
             shutdown: self.shutdown.clone(),
+            login_registry: self.login_registry.clone(),
         }
     }
 }
@@ -102,6 +105,7 @@ struct ConnCtx {
     agent_pid: u32,
     keystore_kind: KeystoreKind,
     shutdown: Arc<tokio::sync::Notify>,
+    login_registry: Arc<LoginRegistry>,
 }
 
 async fn handle_conn<S>(stream: S, ctx: ConnCtx) -> Result<()>
@@ -197,8 +201,27 @@ async fn dispatch(ctx: &ConnCtx, req: Request, topics: &Arc<Mutex<HashSet<Topic>
             Ok(s) => Response::Settings(s), Err(e) => Response::Error { message: e.to_string() },
         },
         Request::UpdateSettings(u) => ok_or_err!(ctx.service.update_settings(u).await),
-        Request::StartLogin { gateway_id: _ } => Response::Error { message: "not yet implemented (Task 23)".into() },
-        Request::CancelLogin { gateway_id: _ } => Response::Ok,
+        Request::StartLogin { gateway_id } => {
+            let url = match ctx.service.get_gateway_url(gateway_id).await {
+                Ok(u) => u,
+                Err(e) => return Response::Error { message: e.to_string() },
+            };
+            let base = url.trim_end_matches('/');
+            let verification_uri = format!("{base}/device/login");
+            match ctx.login_registry.start(gateway_id, url).await {
+                Ok(code) => Response::LoginInitiated {
+                    gateway_id,
+                    user_code: code.user_code,
+                    verification_uri,
+                    expires_in_secs: code.expires_in,
+                },
+                Err(e) => Response::Error { message: e.to_string() },
+            }
+        }
+        Request::CancelLogin { gateway_id } => {
+            ctx.login_registry.cancel(gateway_id).await;
+            Response::LoginCancelled { gateway_id }
+        }
         Request::Shutdown => {
             let sd = ctx.shutdown.clone();
             tokio::spawn(async move { tokio::time::sleep(std::time::Duration::from_millis(50)).await; sd.notify_one(); });

@@ -250,6 +250,15 @@ impl Service {
         Ok(())
     }
 
+    /// Return the base URL for a gateway (used by login flow).
+    pub async fn get_gateway_url(&self, gateway_id: Uuid) -> Result<String, AppError> {
+        let gw = self
+            .db
+            .get_gateway(&gateway_id.to_string())?
+            .ok_or_else(|| AppError::Config(format!("gateway {gateway_id} not found")))?;
+        Ok(gw.url)
+    }
+
     /// Fetch API keys available on a gateway.
     pub async fn fetch_keys(&self, gateway_id: Uuid) -> Result<Vec<KeyInfo>, AppError> {
         let gw = self

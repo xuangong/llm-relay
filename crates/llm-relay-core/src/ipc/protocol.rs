@@ -50,12 +50,12 @@ pub enum Response {
     Ok,
     Error { message: String },
     LoginInitiated {
-        device_code: String,
+        gateway_id: Uuid,
         user_code: String,
-        verification_url: String,
-        expires_at: DateTime<Utc>,
-        interval_secs: u64,
+        verification_uri: String,
+        expires_in_secs: u64,
     },
+    LoginCancelled { gateway_id: Uuid },
     Keys(Vec<KeyInfo>),
     Models(ModelCatalog),
     Settings(Settings),
@@ -70,8 +70,8 @@ pub enum Event {
     ActiveChanged { gateway_id: Option<Uuid> },
     TrafficError(TrafficEntry),
     UsageDelta { gateway_id: Uuid, model: String, input: u64, output: u64, cache: u64 },
-    LoginCompleted { gateway_id: Uuid, user_name: Option<String> },
-    LoginFailed { gateway_id: Uuid, reason: String },
+    LoginCompleted { gateway_id: Uuid, session_token: String, user_id: Option<String>, user_name: Option<String> },
+    LoginFailed { gateway_id: Uuid, message: String },
     LoginExpired { gateway_id: Uuid },
 }
 
