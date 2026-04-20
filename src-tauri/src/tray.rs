@@ -1,6 +1,7 @@
 use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem};
 use tauri::Manager;
 
+use llm_relay_core::database::ActiveConfig;
 use llm_relay_core::AppError;
 use crate::AppState;
 
@@ -154,7 +155,7 @@ fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: &str) 
 
     let config = match state.db.get_active_config() {
         Ok(c) => c,
-        Err(_) => crate::database::ActiveConfig {
+        Err(_) => ActiveConfig {
             gateway_id: None,
             key_id: None,
             key_name: None,
@@ -181,7 +182,7 @@ fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: &str) 
     );
 
     let now = chrono::Utc::now().to_rfc3339();
-    let new_config = crate::database::ActiveConfig {
+    let new_config = ActiveConfig {
         gateway_id: Some(gw.id.clone()),
         key_id: config.key_id,
         key_name: config.key_name,

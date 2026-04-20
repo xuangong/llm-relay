@@ -11,7 +11,7 @@ use axum::{
 use futures_util::StreamExt;
 use tauri::{Emitter, Manager};
 
-use crate::database::Database;
+use llm_relay_core::database::Database;
 
 pub const PROXY_PORT: u16 = 18080;
 pub const PLACEHOLDER_KEY: &str = "llm-relay-local";

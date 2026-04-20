@@ -1,5 +1,4 @@
 mod commands;
-mod database;
 mod gateway;
 mod health;
 mod proxy_server;
@@ -9,7 +8,7 @@ use std::sync::Arc;
 use tauri::Manager;
 use tauri::tray::TrayIconBuilder;
 
-pub use database::Database;
+pub use llm_relay_core::Database;
 pub use llm_relay_core::AppError;
 
 pub struct AppState {

@@ -1,7 +1,7 @@
 use tauri::Emitter;
 use tauri::Manager;
 
-use crate::database::{ActiveConfig, HealthCache};
+use llm_relay_core::database::{ActiveConfig, HealthCache};
 use crate::gateway;
 use crate::tray;
 use crate::AppState;

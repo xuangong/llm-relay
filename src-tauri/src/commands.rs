@@ -1,7 +1,7 @@
 use tauri::State;
 
 use llm_relay_core::config_writer;
-use crate::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthLogEntry, TrafficLogEntry, UsageSummary};
+use llm_relay_core::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthCache, HealthLogEntry, TrafficLogEntry, UsageSummary};
 use crate::gateway::{self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList};
 use crate::proxy_server;
 use crate::AppState;
@@ -46,7 +46,7 @@ pub async fn add_gateway(
             gateway::health_check(&gw_clone.url, &gw_clone.auth_key).await;
 
         let now = chrono::Utc::now().to_rfc3339();
-        let health = crate::database::HealthCache {
+        let health = HealthCache {
             gateway_id: gw_clone.id.clone(),
             is_healthy,
             latency_ms,
