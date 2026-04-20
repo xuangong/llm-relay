@@ -6,6 +6,20 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Port check BEFORE acquiring the lock — fail fast if GUI or another agent
+    // already owns port 18080.
+    match std::net::TcpListener::bind(("127.0.0.1", llm_relay_core::paths::PROXY_PORT)) {
+        Ok(l) => drop(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!("port {} already in use — is the GUI app running?", llm_relay_core::paths::PROXY_PORT);
+            std::process::exit(2);
+        }
+        Err(e) => {
+            eprintln!("port probe failed: {e}");
+            // Non-fatal: proceed — the proxy server will fail on bind and log more detail.
+        }
+    }
+
     init_log();
     let _guard = lifecycle::LifecycleGuard::acquire()?;
     log::info!("agent starting (pid {})", std::process::id());

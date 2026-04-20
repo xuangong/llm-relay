@@ -84,6 +84,23 @@ pub fn run() {
                 let _ = window.show();
             }
 
+            // Port check — refuse to start if another LLM Relay process already
+            // owns port 18080 (e.g., the TUI agent is running).
+            match std::net::TcpListener::bind(("127.0.0.1", llm_relay_core::paths::PROXY_PORT)) {
+                Ok(l) => drop(l),
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    log::error!(
+                        "port {} in use; another LLM Relay process is running — exiting",
+                        llm_relay_core::paths::PROXY_PORT
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    log::error!("port probe failed: {e}");
+                    // Non-fatal; proceed.
+                }
+            }
+
             // Start local proxy server (http://127.0.0.1:18080)
             {
                 let svc_for_proxy = service.clone();
