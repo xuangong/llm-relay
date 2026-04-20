@@ -1,7 +1,6 @@
 //! Agent lifecycle: file lock + pidfile + port probe + cleanup.
 
 use anyhow::{anyhow, Context, Result};
-use fs2::FileExt;
 use llm_relay_core::paths;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
