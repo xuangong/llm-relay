@@ -1,7 +1,7 @@
 use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem};
 use tauri::Manager;
 
-use crate::error::AppError;
+use llm_relay_core::AppError;
 use crate::AppState;
 
 /// Create the system tray menu.

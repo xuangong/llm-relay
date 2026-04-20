@@ -2446,6 +2446,7 @@ dependencies = [
  "futures-util",
  "hostname",
  "keyring",
+ "llm-relay-core",
  "log",
  "open",
  "reqwest 0.12.28",

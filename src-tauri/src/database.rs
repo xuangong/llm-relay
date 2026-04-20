@@ -1,4 +1,4 @@
-use crate::error::AppError;
+use llm_relay_core::AppError;
 use crate::keystore;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};

@@ -31,3 +31,4 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 open = "5"
+llm-relay-core = { path = "../crates/llm-relay-core" }

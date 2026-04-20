@@ -1,7 +1,6 @@
 mod commands;
 mod config_writer;
 mod database;
-mod error;
 mod gateway;
 mod health;
 mod keystore;
@@ -13,7 +12,7 @@ use tauri::Manager;
 use tauri::tray::TrayIconBuilder;
 
 pub use database::Database;
-pub use error::AppError;
+pub use llm_relay_core::AppError;
 
 pub struct AppState {
     pub db: Arc<Database>,
