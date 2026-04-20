@@ -1,3 +1,4 @@
+mod ipc_server;
 mod lifecycle;
 
 fn main() {

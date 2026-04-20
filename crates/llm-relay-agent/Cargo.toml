@@ -11,10 +11,14 @@ path = "src/main.rs"
 llm-relay-core = { path = "../llm-relay-core" }
 tokio.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+uuid.workspace = true
 log.workspace = true
 anyhow.workspace = true
 fs2 = "0.4"
 chrono = { workspace = true }
+interprocess = { version = "2", features = ["tokio"] }
+env_logger = "0.11"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
