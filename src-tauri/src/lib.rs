@@ -1,24 +1,19 @@
 mod commands;
-mod config_writer;
-mod database;
-mod error;
-mod gateway;
-mod health;
-mod keystore;
-mod proxy_server;
+mod tauri_sink;
 mod tray;
 
 use std::sync::Arc;
 use tauri::Manager;
 use tauri::tray::TrayIconBuilder;
 
-pub use database::Database;
-pub use error::AppError;
+pub use llm_relay_core::Database;
+pub use llm_relay_core::AppError;
 
 pub struct AppState {
     pub db: Arc<Database>,
     /// Held during any gateway switch to prevent concurrent switches.
     pub switch_lock: Arc<tokio::sync::Mutex<()>>,
+    pub service: Arc<llm_relay_core::Service>,
 }
 
 pub fn run() {
@@ -55,11 +50,19 @@ pub fn run() {
             // Init database
             let app_config_dir = get_app_config_dir();
             std::fs::create_dir_all(&app_config_dir).ok();
+            llm_relay_core::keystore::init(&app_config_dir);
             let db = Arc::new(Database::init(&app_config_dir)?);
+
+            // Build the shared event sink (Tauri implementation).
+            let sink: llm_relay_core::SharedEventSink =
+                std::sync::Arc::new(tauri_sink::TauriSink::new(app.handle().clone()));
+
+            let service = std::sync::Arc::new(llm_relay_core::Service::new(db.clone(), sink.clone()));
 
             let state = AppState {
                 db: db.clone(),
                 switch_lock: Arc::new(tokio::sync::Mutex::new(())),
+                service: service.clone(),
             };
 
             // Build tray
@@ -81,19 +84,46 @@ pub fn run() {
                 let _ = window.show();
             }
 
+            // Bind port 18080 NOW and hand the listener to the proxy server.
+            // Doing this in one step (vs probe+drop then later bind) closes the
+            // TOCTOU window where another process could grab the port.
+            let proxy_listener = match std::net::TcpListener::bind((
+                "127.0.0.1",
+                llm_relay_core::paths::PROXY_PORT,
+            )) {
+                Ok(l) => Some(l),
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    log::error!(
+                        "port {} in use; another LLM Relay process is running — exiting",
+                        llm_relay_core::paths::PROXY_PORT
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    log::error!("port bind failed: {e}");
+                    None
+                }
+            };
+
             // Start local proxy server (http://127.0.0.1:18080)
-            let db_for_proxy = db.clone();
-            let proxy_app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                proxy_server::start(db_for_proxy, proxy_app_handle).await;
-            });
+            {
+                let svc_for_proxy = service.clone();
+                tauri::async_runtime::spawn(async move {
+                    llm_relay_core::proxy_server::start_with_listener(
+                        (*svc_for_proxy).clone(),
+                        proxy_listener,
+                    )
+                    .await;
+                });
+            }
 
             // Start health check loop
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let state = app_handle.state::<AppState>();
-                health::health_check_loop(state.inner(), &app_handle).await;
-            });
+            {
+                let svc_for_health = service.clone();
+                tauri::async_runtime::spawn(async move {
+                    llm_relay_core::health::health_check_loop((*svc_for_health).clone()).await;
+                });
+            }
 
             Ok(())
         })

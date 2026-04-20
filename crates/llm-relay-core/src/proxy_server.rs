@@ -9,9 +9,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
-use tauri::{Emitter, Manager};
 
 use crate::database::Database;
+use crate::events::SharedEventSink;
 
 pub const PROXY_PORT: u16 = 18080;
 pub const PLACEHOLDER_KEY: &str = "llm-relay-local";
@@ -27,16 +27,28 @@ pub fn proxy_base_url() -> String {
 #[derive(Clone)]
 pub struct ProxyState {
     db: Arc<Database>,
-    app_handle: tauri::AppHandle,
+    switch_lock: Arc<tokio::sync::Mutex<()>>,
+    sink: SharedEventSink,
     /// Counts consecutive request errors (network failures or 5xx).
     /// Reset to 0 on any successful response.
     consecutive_errors: Arc<AtomicU32>,
 }
 
-pub async fn start(db: Arc<Database>, app_handle: tauri::AppHandle) {
+pub async fn start(service: crate::Service) {
+    start_with_listener(service, None).await
+}
+
+/// Start the proxy server, optionally with a pre-bound listener.
+///
+/// Passing a `std::net::TcpListener` lets the agent's `LifecycleGuard` bind the
+/// port atomically with respect to the file lock — avoiding a TOCTOU window
+/// where another process could grab port 18080 between the lifecycle probe
+/// (which dropped its listener) and the proxy's own bind.
+pub async fn start_with_listener(service: crate::Service, listener: Option<std::net::TcpListener>) {
     let state = ProxyState {
-        db,
-        app_handle,
+        db: service.db.clone(),
+        switch_lock: service.switch_lock.clone(),
+        sink: service.sink.clone(),
         consecutive_errors: Arc::new(AtomicU32::new(0)),
     };
 
@@ -45,16 +57,31 @@ pub async fn start(db: Arc<Database>, app_handle: tauri::AppHandle) {
         .with_state(state);
 
     let addr = format!("127.0.0.1:{}", PROXY_PORT);
-    match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => {
-            log::info!("Local proxy started on {}", addr);
-            if let Err(e) = axum::serve(listener, app).await {
-                log::error!("Proxy server stopped: {}", e);
+    let tokio_listener = if let Some(std_l) = listener {
+        // Caller (lifecycle) already owns the bind. Convert std → tokio.
+        if let Err(e) = std_l.set_nonblocking(true) {
+            log::error!("Failed to set listener nonblocking on {}: {}", addr, e);
+            return;
+        }
+        match tokio::net::TcpListener::from_std(std_l) {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("Failed to wrap pre-bound listener on {}: {}", addr, e);
+                return;
             }
         }
-        Err(e) => {
-            log::error!("Failed to start proxy on {}: {}", addr, e);
+    } else {
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("Failed to start proxy on {}: {}", addr, e);
+                return;
+            }
         }
+    };
+    log::info!("Local proxy started on {}", addr);
+    if let Err(e) = axum::serve(tokio_listener, app).await {
+        log::error!("Proxy server stopped: {}", e);
     }
 }
 
@@ -105,6 +132,16 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
         .as_deref()
         .unwrap_or(&gw.auth_key)
         .to_string();
+
+    // Refuse to forward with an empty bearer — upstream would silently 401.
+    // Surface the issue locally instead so the user knows to log in.
+    if api_key.is_empty() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "{\"error\":\"gateway requires login: run device-code flow first\"}",
+        )
+            .into_response();
+    }
 
     // Build target URL
     let target_url = format!("{}{}", gw.url.trim_end_matches('/'), path);
@@ -267,7 +304,7 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             let gw_error = gateway_id.clone();
             let path_error = path.clone();
             let start_error = start;
-            let app_handle_usage = state.app_handle.clone();
+            let sink_usage = state.sink.clone();
             let gw_id_event = gateway_id.clone();
 
             tokio::spawn(async move {
@@ -286,17 +323,15 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                                     let (inp, out, cr, cc) = parse_sse_tokens_incremental(text);
                                     // Emit event if usage changed (for real-time UI updates)
                                     if (inp, out, cr, cc) != last_emitted_usage && (inp > 0 || out > 0) {
-                                        if let Some(window) = app_handle_usage.get_webview_window("main") {
-                                            let payload = serde_json::json!({
-                                                "gatewayId": gw_id_event,
-                                                "model": model_usage,
-                                                "inputTokens": inp,
-                                                "outputTokens": out,
-                                                "cacheReadTokens": cr,
-                                                "cacheCreationTokens": cc,
-                                            });
-                                            let _ = window.emit::<serde_json::Value>("usage-update", payload);
-                                        }
+                                        let payload = serde_json::json!({
+                                            "gatewayId": gw_id_event,
+                                            "model": model_usage,
+                                            "inputTokens": inp,
+                                            "outputTokens": out,
+                                            "cacheReadTokens": cr,
+                                            "cacheCreationTokens": cc,
+                                        });
+                                        sink_usage.emit("usage-update", payload);
                                         last_emitted_usage = (inp, out, cr, cc);
                                     }
                                 }
@@ -566,9 +601,7 @@ fn emit_traffic(state: &ProxyState, path: &str, status: u16, latency_ms: u64, ga
         "gatewayId": gateway_id,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
-    if let Some(window) = state.app_handle.get_webview_window("main") {
-        let _ = window.emit("proxy-traffic", payload);
-    }
+    state.sink.emit("proxy-traffic", payload);
 }
 
 /// Attempt to switch to the next healthy gateway after consecutive proxy errors.
@@ -606,8 +639,14 @@ async fn try_proxy_failover(state: &ProxyState, current_gateway_id: &str, error_
             "Proxy failover: {} → {} after {} consecutive errors (status={})",
             current_gateway_id, next_gw.name, ERROR_FAILOVER_THRESHOLD, error_status
         );
-        let app_state = state.app_handle.state::<crate::AppState>();
-        crate::health::do_switch(app_state.inner(), &state.app_handle, &next_gw.id, &config).await;
+        crate::health::do_switch(
+            state.db.clone(),
+            state.switch_lock.clone(),
+            state.sink.clone(),
+            &next_gw.id,
+            &config,
+        )
+        .await;
     } else {
         log::warn!(
             "Proxy failover: no healthy alternative to {} (status={})",

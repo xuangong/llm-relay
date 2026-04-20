@@ -1,0 +1,25 @@
+[Unit]
+Description=LLM Relay agent (headless gateway proxy)
+Documentation=https://github.com/<org>/llm-relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The agent does its own daemonization when run interactively, but under
+# systemd we want it to stay foreground so journald captures stdout/stderr.
+Environment=LLM_RELAY_FOREGROUND=1
+Environment=LLM_RELAY_RUNTIME_DIR=%h/.local/state/llm-relay
+ExecStart=/usr/local/bin/llm-relay-agent
+Restart=on-failure
+RestartSec=5s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/llm-relay %h/.local/share/llm-relay
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

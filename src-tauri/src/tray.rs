@@ -1,7 +1,8 @@
 use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem};
 use tauri::Manager;
 
-use crate::error::AppError;
+use llm_relay_core::database::ActiveConfig;
+use llm_relay_core::AppError;
 use crate::AppState;
 
 /// Create the system tray menu.
@@ -154,7 +155,7 @@ fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: &str) 
 
     let config = match state.db.get_active_config() {
         Ok(c) => c,
-        Err(_) => crate::database::ActiveConfig {
+        Err(_) => ActiveConfig {
             gateway_id: None,
             key_id: None,
             key_name: None,
@@ -169,11 +170,11 @@ fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: &str) 
         },
     };
 
-    let api_key = config.key_value.as_deref().unwrap_or(&gw.auth_key);
+    let proxy_url = llm_relay_core::proxy_server::proxy_base_url();
 
-    let _ = crate::config_writer::apply_all_configs(
-        &gw.url,
-        api_key,
+    let _ = llm_relay_core::config_writer::apply_all_configs(
+        &proxy_url,
+        llm_relay_core::proxy_server::PLACEHOLDER_KEY,
         config.claude_model.as_deref(),
         config.claude_small_model.as_deref(),
         config.codex_model.as_deref(),
@@ -181,7 +182,7 @@ fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: &str) 
     );
 
     let now = chrono::Utc::now().to_rfc3339();
-    let new_config = crate::database::ActiveConfig {
+    let new_config = ActiveConfig {
         gateway_id: Some(gw.id.clone()),
         key_id: config.key_id,
         key_name: config.key_name,

@@ -7,6 +7,7 @@ pub enum AppError {
     Io(String),
     Json(String),
     Config(String),
+    NotImplemented(String),
 }
 
 impl fmt::Display for AppError {
@@ -17,6 +18,7 @@ impl fmt::Display for AppError {
             AppError::Io(msg) => write!(f, "IO error: {msg}"),
             AppError::Json(msg) => write!(f, "JSON error: {msg}"),
             AppError::Config(msg) => write!(f, "Config error: {msg}"),
+            AppError::NotImplemented(msg) => write!(f, "Not yet implemented: {msg}"),
         }
     }
 }

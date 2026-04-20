@@ -1,0 +1,38 @@
+[package]
+name = "llm-relay-agent"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "llm_relay_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "llm-relay-agent"
+path = "src/main.rs"
+
+[dependencies]
+llm-relay-core = { path = "../llm-relay-core" }
+tokio.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+uuid.workspace = true
+log.workspace = true
+anyhow.workspace = true
+thiserror = "1"
+fs2 = "0.4"
+chrono = { workspace = true }
+interprocess = { version = "2", features = ["tokio"] }
+env_logger = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

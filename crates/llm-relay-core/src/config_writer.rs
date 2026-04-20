@@ -1,4 +1,4 @@
-use crate::error::AppError;
+use crate::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -434,21 +434,18 @@ pub fn clear_gemini_config() -> Result<(), AppError> {
     atomic_write(&env_path, content.as_bytes())
 }
 
-/// Write all three CLI configs pointing to the local proxy.
-/// base_url and api_key are ignored — the proxy handles routing and key injection.
+/// Write all three CLI configs pointing to the provided base_url/api_key.
 pub fn apply_all_configs(
-    _base_url: &str,
-    _api_key: &str,
+    base_url: &str,
+    api_key: &str,
     claude_model: Option<&str>,
     claude_small_model: Option<&str>,
     codex_model: Option<&str>,
     _gemini_model: Option<&str>,
 ) -> Result<(), AppError> {
-    let proxy_url = crate::proxy_server::proxy_base_url();
-    let key = crate::proxy_server::PLACEHOLDER_KEY;
-    write_claude_config(&proxy_url, key, claude_model, claude_small_model)?;
-    write_codex_config(&proxy_url, key, codex_model)?;
-    write_gemini_config(&proxy_url, key)?;
+    write_claude_config(base_url, api_key, claude_model, claude_small_model)?;
+    write_codex_config(base_url, api_key, codex_model)?;
+    write_gemini_config(base_url, api_key)?;
     ensure_openai_api_key_in_shell_rc()?;
     Ok(())
 }

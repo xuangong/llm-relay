@@ -202,3 +202,21 @@ CLI 配置指向 `127.0.0.1:18080`，如果应用未运行，请求会连接失�
 ```bash
 source ~/.cargo/env
 ```
+
+## Terminal UI
+
+For headless servers or when you prefer the terminal:
+
+```sh
+cargo build --release -p llm-relay-tui -p llm-relay-agent
+./target/release/llm-relay-tui
+```
+
+The TUI auto-spawns a detached agent on first launch. To run the agent as
+a persistent systemd service, see [packaging/systemd/](packaging/systemd/).
+
+Keys:
+- `Tab` / `Shift+Tab` — switch tabs
+- `↑` / `↓` — select row, `Enter` — expand
+- `a` add gateway, `e` edit, `l` login, `s` star, `r` refresh
+- `q` quit (agent keeps running)

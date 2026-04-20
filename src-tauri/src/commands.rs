@@ -1,8 +1,9 @@
 use tauri::State;
 
-use crate::config_writer;
-use crate::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthLogEntry, TrafficLogEntry, UsageSummary};
-use crate::gateway::{self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList};
+use llm_relay_core::config_writer;
+use llm_relay_core::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthCache, HealthLogEntry, TrafficLogEntry, UsageSummary};
+use llm_relay_core::gateway::{self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList};
+use llm_relay_core::proxy_server;
 use crate::AppState;
 
 // ─── Gateway CRUD ───
@@ -45,7 +46,7 @@ pub async fn add_gateway(
             gateway::health_check(&gw_clone.url, &gw_clone.auth_key).await;
 
         let now = chrono::Utc::now().to_rfc3339();
-        let health = crate::database::HealthCache {
+        let health = HealthCache {
             gateway_id: gw_clone.id.clone(),
             is_healthy,
             latency_ms,
@@ -181,7 +182,9 @@ pub async fn check_all_health(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<GatewayWithHealth>, String> {
-    crate::health::check_and_switch(&state, &app_handle).await;
+    let sink: llm_relay_core::SharedEventSink =
+        std::sync::Arc::new(crate::tauri_sink::TauriSink::new(app_handle));
+    llm_relay_core::health::check_and_switch(state.db.clone(), state.switch_lock.clone(), sink).await;
     state
         .db
         .list_gateways_with_health()
@@ -192,7 +195,7 @@ pub async fn check_all_health(
 #[tauri::command]
 pub async fn test_heartbeat(state: State<'_, AppState>) -> Result<String, String> {
     log::info!("Manual heartbeat test triggered");
-    crate::health::send_heartbeat(state.inner()).await;
+    llm_relay_core::health::send_heartbeat(state.db.clone()).await;
     Ok("Heartbeat sent - check gateway's Clients panel or logs".to_string())
 }
 
@@ -248,12 +251,11 @@ pub async fn apply_config(
         .or_else(|| gw.gemini_model.clone())
         .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.gemini_model.clone()) } else { None });
 
-    // Use merged key_value, or fall back to gateway's auth_key
-    let api_key = merged_key_value.as_deref().unwrap_or(&gw.auth_key);
+    let proxy_url = proxy_server::proxy_base_url();
 
     config_writer::apply_all_configs(
-        &gw.url,
-        api_key,
+        &proxy_url,
+        proxy_server::PLACEHOLDER_KEY,
         merged_claude.as_deref(),
         merged_claude_small.as_deref(),
         merged_codex.as_deref(),

@@ -1,0 +1,33 @@
+[package]
+name = "llm-relay-tui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "llm-relay-tui"
+path = "src/main.rs"
+
+[lib]
+name = "llm_relay_tui"
+path = "src/lib.rs"
+
+[dependencies]
+llm-relay-core = { path = "../llm-relay-core" }
+tokio.workspace = true
+serde_json.workspace = true
+log.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+ratatui = "0.29"
+crossterm = "0.28"
+arboard = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
+[dev-dependencies]
+tempfile = "3"
