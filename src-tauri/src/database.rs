@@ -1,5 +1,5 @@
 use llm_relay_core::AppError;
-use crate::keystore;
+use llm_relay_core::keystore;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;

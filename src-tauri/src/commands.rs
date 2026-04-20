@@ -1,8 +1,9 @@
 use tauri::State;
 
-use crate::config_writer;
+use llm_relay_core::config_writer;
 use crate::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthLogEntry, TrafficLogEntry, UsageSummary};
 use crate::gateway::{self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList};
+use crate::proxy_server;
 use crate::AppState;
 
 // ─── Gateway CRUD ───
@@ -248,12 +249,11 @@ pub async fn apply_config(
         .or_else(|| gw.gemini_model.clone())
         .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.gemini_model.clone()) } else { None });
 
-    // Use merged key_value, or fall back to gateway's auth_key
-    let api_key = merged_key_value.as_deref().unwrap_or(&gw.auth_key);
+    let proxy_url = proxy_server::proxy_base_url();
 
     config_writer::apply_all_configs(
-        &gw.url,
-        api_key,
+        &proxy_url,
+        proxy_server::PLACEHOLDER_KEY,
         merged_claude.as_deref(),
         merged_claude_small.as_deref(),
         merged_codex.as_deref(),

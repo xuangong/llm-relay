@@ -1,9 +1,7 @@
 mod commands;
-mod config_writer;
 mod database;
 mod gateway;
 mod health;
-mod keystore;
 mod proxy_server;
 mod tray;
 
