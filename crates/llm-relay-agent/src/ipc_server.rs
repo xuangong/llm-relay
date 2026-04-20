@@ -110,6 +110,16 @@ struct ConnCtx {
 
 async fn handle_conn<S>(stream: S, ctx: ConnCtx) -> Result<()>
 where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static {
+    // Security note (Windows):
+    // The named-pipe DACL granted by `interprocess` permits any local interactive user.
+    // The ideal hardening is `GetNamedPipeClientProcessId` -> `OpenProcessToken` ->
+    // `GetTokenInformation(TokenUser)` to verify the peer's SID matches the agent's.
+    // However `interprocess::local_socket::tokio::Stream` (the wrapper enum) does not
+    // expose `AsRawHandle`, so we cannot reach the underlying HANDLE without forking
+    // the crate. On Unix the kernel enforces the chmod 0600 on the socket file (see
+    // `ipc/transport.rs`), which is the equivalent and primary mitigation. On Windows
+    // operators should rely on host-level controls until upstream exposes the handle
+    // or DACL hook.
     use tokio::io::split;
     let (mut rd, mut wr) = split(stream);
     let topics: Arc<Mutex<HashSet<Topic>>> = Arc::new(Mutex::new(HashSet::new()));
