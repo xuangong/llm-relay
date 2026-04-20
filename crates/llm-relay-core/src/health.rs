@@ -1,33 +1,40 @@
-use tauri::Emitter;
-use tauri::Manager;
+use std::sync::Arc;
 
-use llm_relay_core::database::{ActiveConfig, HealthCache};
-use llm_relay_core::gateway;
-use crate::tray;
-use crate::AppState;
+use crate::database::{ActiveConfig, HealthCache};
+use crate::events::SharedEventSink;
+use crate::gateway;
+use crate::Database;
 
 /// Minimum seconds between auto-switches to prevent flip-flopping.
 const SWITCH_HYSTERESIS_SECS: i64 = 60;
 
 /// Background health check loop.
-/// Runs every 30 seconds, checks all gateways concurrently.
+/// Runs every 60 seconds, checks all gateways concurrently.
 /// Implements priority-based auto-switch:
 /// - Gateways are ordered by sort_order (drag-and-drop priority)
 /// - Always use the first healthy gateway in the list
 /// - If current gateway goes down, switch to next healthy one
 /// - If a higher-priority gateway recovers, switch back (with hysteresis)
-pub async fn health_check_loop(state: &AppState, app_handle: &tauri::AppHandle) {
+pub async fn health_check_loop(
+    db: Arc<Database>,
+    switch_lock: Arc<tokio::sync::Mutex<()>>,
+    sink: SharedEventSink,
+) {
     log::info!("Health check loop started");
     loop {
-        check_and_switch(state, app_handle).await;
-        send_heartbeat(state).await;
+        check_and_switch(db.clone(), switch_lock.clone(), sink.clone()).await;
+        send_heartbeat(db.clone()).await;
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
 }
 
 /// Run a single round of health checks and auto-switch if needed.
-pub async fn check_and_switch(state: &AppState, app_handle: &tauri::AppHandle) {
-    let gateways = match state.db.list_gateways() {
+pub async fn check_and_switch(
+    db: Arc<Database>,
+    switch_lock: Arc<tokio::sync::Mutex<()>>,
+    sink: SharedEventSink,
+) {
+    let gateways = match db.list_gateways() {
         Ok(gws) => gws,
         Err(_) => return,
     };
@@ -37,7 +44,6 @@ pub async fn check_and_switch(state: &AppState, app_handle: &tauri::AppHandle) {
     }
 
     // Check all gateways concurrently
-    let db = state.db.clone();
     let mut handles = Vec::new();
 
     for gw in &gateways {
@@ -74,17 +80,15 @@ pub async fn check_and_switch(state: &AppState, app_handle: &tauri::AppHandle) {
     }
 
     // Emit health-updated event
-    if let Ok(gateways_with_health) = state.db.list_gateways_with_health() {
-        if let Some(window) = app_handle.get_webview_window("main") {
-            let _ = window.emit("health-updated", &gateways_with_health);
-        }
+    if let Ok(gateways_with_health) = db.list_gateways_with_health() {
+        crate::events::emit_typed(&*sink, "health-updated", &gateways_with_health);
     }
 
-    // Refresh tray menu to reflect latest health status
-    tray::refresh_tray_menu(app_handle);
+    // Signal tray refresh (Tauri sink intercepts this and calls refresh_tray_menu)
+    sink.emit(crate::TRAY_REFRESH_EVENT, serde_json::Value::Null);
 
     // Auto-switch logic
-    let config = match state.db.get_active_config() {
+    let config = match db.get_active_config() {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -124,11 +128,11 @@ pub async fn check_and_switch(state: &AppState, app_handle: &tauri::AppHandle) {
                 current_id,
                 best.name
             );
-            do_switch(state, app_handle, &best.id, &config).await;
+            do_switch(db, switch_lock, sink, &best.id, &config).await;
         }
         (Some(best), None) => {
             log::info!("Auto-switch: none -> {} (first healthy)", best.name);
-            do_switch(state, app_handle, &best.id, &config).await;
+            do_switch(db, switch_lock, sink, &best.id, &config).await;
         }
         (None, Some(_)) => {
             log::warn!("All gateways are offline");
@@ -150,15 +154,16 @@ fn should_switch_now(config: &ActiveConfig) -> bool {
 }
 
 pub async fn do_switch(
-    state: &AppState,
-    app_handle: &tauri::AppHandle,
+    db: Arc<Database>,
+    switch_lock: Arc<tokio::sync::Mutex<()>>,
+    sink: SharedEventSink,
     new_gw_id: &str,
     current_config: &ActiveConfig,
 ) {
     // Hold the switch lock to prevent concurrent switches
-    let _guard = state.switch_lock.lock().await;
+    let _guard = switch_lock.lock().await;
 
-    let gw = match state.db.get_gateway(new_gw_id) {
+    let gw = match db.get_gateway(new_gw_id) {
         Ok(Some(gw)) => gw,
         _ => return,
     };
@@ -179,27 +184,24 @@ pub async fn do_switch(
         applied_at: Some(now.clone()),
         last_switched_at: Some(now),
     };
-    let _ = state.db.set_active_config(&new_config);
+    let _ = db.set_active_config(&new_config);
 
-    tray::refresh_tray_menu(app_handle);
+    // Signal tray refresh (Tauri sink intercepts this)
+    sink.emit(crate::TRAY_REFRESH_EVENT, serde_json::Value::Null);
 
     let event_payload = serde_json::json!({
         "gatewayId": gw.id,
         "gatewayName": gw.name,
     });
-    if let Some(window) = app_handle.get_webview_window("main") {
-        let _ = window.emit("gateway-switched", &event_payload);
-    } else {
-        let _ = app_handle.emit("gateway-switched", &event_payload);
-    }
+    sink.emit("gateway-switched", event_payload);
 }
 
 /// Send a heartbeat to the active gateway so the server knows this client is online.
 /// Fire-and-forget: errors are logged but don't affect health check behavior.
-pub async fn send_heartbeat(state: &AppState) {
+pub async fn send_heartbeat(db: Arc<Database>) {
     log::info!("send_heartbeat called");
 
-    let config = match state.db.get_active_config() {
+    let config = match db.get_active_config() {
         Ok(c) => c,
         Err(e) => {
             log::warn!("Heartbeat skipped: no active config ({})", e);
@@ -220,21 +222,20 @@ pub async fn send_heartbeat(state: &AppState) {
         Some(k) => k.to_string(),
         None => {
             // Fall back to gateway's auth_key
-            match state.db.get_gateway(&gateway_id) {
+            match db.get_gateway(&gateway_id) {
                 Ok(Some(gw)) => gw.auth_key.clone(),
                 _ => return,
             }
         }
     };
 
-    let gw = match state.db.get_gateway(&gateway_id) {
+    let gw = match db.get_gateway(&gateway_id) {
         Ok(Some(gw)) => gw,
         _ => return,
     };
 
     // Get user-set client name (empty if not customized)
-    let client_name = state
-        .db
+    let client_name = db
         .get_setting("client_name")
         .ok()
         .flatten()
@@ -247,14 +248,13 @@ pub async fn send_heartbeat(state: &AppState) {
         .unwrap_or_else(|| "unknown".to_string());
 
     // Generate a stable client_id from settings or derive from hostname
-    let client_id = state
-        .db
+    let client_id = db
         .get_setting("client_id")
         .ok()
         .flatten()
         .unwrap_or_else(|| {
             let id = uuid::Uuid::new_v4().to_string();
-            let _ = state.db.set_setting("client_id", &id);
+            let _ = db.set_setting("client_id", &id);
             id
         });
 

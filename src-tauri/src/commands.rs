@@ -3,7 +3,7 @@ use tauri::State;
 use llm_relay_core::config_writer;
 use llm_relay_core::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthCache, HealthLogEntry, TrafficLogEntry, UsageSummary};
 use llm_relay_core::gateway::{self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList};
-use crate::proxy_server;
+use llm_relay_core::proxy_server;
 use crate::AppState;
 
 // ─── Gateway CRUD ───
@@ -182,7 +182,9 @@ pub async fn check_all_health(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<GatewayWithHealth>, String> {
-    crate::health::check_and_switch(&state, &app_handle).await;
+    let sink: llm_relay_core::SharedEventSink =
+        std::sync::Arc::new(crate::tauri_sink::TauriSink::new(app_handle));
+    llm_relay_core::health::check_and_switch(state.db.clone(), state.switch_lock.clone(), sink).await;
     state
         .db
         .list_gateways_with_health()
@@ -193,7 +195,7 @@ pub async fn check_all_health(
 #[tauri::command]
 pub async fn test_heartbeat(state: State<'_, AppState>) -> Result<String, String> {
     log::info!("Manual heartbeat test triggered");
-    crate::health::send_heartbeat(state.inner()).await;
+    llm_relay_core::health::send_heartbeat(state.db.clone()).await;
     Ok("Heartbeat sent - check gateway's Clients panel or logs".to_string())
 }
 

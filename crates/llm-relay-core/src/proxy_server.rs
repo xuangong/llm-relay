@@ -9,9 +9,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
-use tauri::{Emitter, Manager};
 
-use llm_relay_core::database::Database;
+use crate::database::Database;
+use crate::events::SharedEventSink;
 
 pub const PROXY_PORT: u16 = 18080;
 pub const PLACEHOLDER_KEY: &str = "llm-relay-local";
@@ -27,16 +27,22 @@ pub fn proxy_base_url() -> String {
 #[derive(Clone)]
 pub struct ProxyState {
     db: Arc<Database>,
-    app_handle: tauri::AppHandle,
+    switch_lock: Arc<tokio::sync::Mutex<()>>,
+    sink: SharedEventSink,
     /// Counts consecutive request errors (network failures or 5xx).
     /// Reset to 0 on any successful response.
     consecutive_errors: Arc<AtomicU32>,
 }
 
-pub async fn start(db: Arc<Database>, app_handle: tauri::AppHandle) {
+pub async fn start(
+    db: Arc<Database>,
+    switch_lock: Arc<tokio::sync::Mutex<()>>,
+    sink: SharedEventSink,
+) {
     let state = ProxyState {
         db,
-        app_handle,
+        switch_lock,
+        sink,
         consecutive_errors: Arc::new(AtomicU32::new(0)),
     };
 
@@ -267,7 +273,7 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             let gw_error = gateway_id.clone();
             let path_error = path.clone();
             let start_error = start;
-            let app_handle_usage = state.app_handle.clone();
+            let sink_usage = state.sink.clone();
             let gw_id_event = gateway_id.clone();
 
             tokio::spawn(async move {
@@ -286,17 +292,15 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                                     let (inp, out, cr, cc) = parse_sse_tokens_incremental(text);
                                     // Emit event if usage changed (for real-time UI updates)
                                     if (inp, out, cr, cc) != last_emitted_usage && (inp > 0 || out > 0) {
-                                        if let Some(window) = app_handle_usage.get_webview_window("main") {
-                                            let payload = serde_json::json!({
-                                                "gatewayId": gw_id_event,
-                                                "model": model_usage,
-                                                "inputTokens": inp,
-                                                "outputTokens": out,
-                                                "cacheReadTokens": cr,
-                                                "cacheCreationTokens": cc,
-                                            });
-                                            let _ = window.emit::<serde_json::Value>("usage-update", payload);
-                                        }
+                                        let payload = serde_json::json!({
+                                            "gatewayId": gw_id_event,
+                                            "model": model_usage,
+                                            "inputTokens": inp,
+                                            "outputTokens": out,
+                                            "cacheReadTokens": cr,
+                                            "cacheCreationTokens": cc,
+                                        });
+                                        sink_usage.emit("usage-update", payload);
                                         last_emitted_usage = (inp, out, cr, cc);
                                     }
                                 }
@@ -566,9 +570,7 @@ fn emit_traffic(state: &ProxyState, path: &str, status: u16, latency_ms: u64, ga
         "gatewayId": gateway_id,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
-    if let Some(window) = state.app_handle.get_webview_window("main") {
-        let _ = window.emit("proxy-traffic", payload);
-    }
+    state.sink.emit("proxy-traffic", payload);
 }
 
 /// Attempt to switch to the next healthy gateway after consecutive proxy errors.
@@ -606,8 +608,14 @@ async fn try_proxy_failover(state: &ProxyState, current_gateway_id: &str, error_
             "Proxy failover: {} → {} after {} consecutive errors (status={})",
             current_gateway_id, next_gw.name, ERROR_FAILOVER_THRESHOLD, error_status
         );
-        let app_state = state.app_handle.state::<crate::AppState>();
-        crate::health::do_switch(app_state.inner(), &state.app_handle, &next_gw.id, &config).await;
+        crate::health::do_switch(
+            state.db.clone(),
+            state.switch_lock.clone(),
+            state.sink.clone(),
+            &next_gw.id,
+            &config,
+        )
+        .await;
     } else {
         log::warn!(
             "Proxy failover: no healthy alternative to {} (status={})",

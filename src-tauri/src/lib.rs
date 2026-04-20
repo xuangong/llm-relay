@@ -1,6 +1,5 @@
 mod commands;
-mod health;
-mod proxy_server;
+mod tauri_sink;
 mod tray;
 
 use std::sync::Arc;
@@ -76,19 +75,29 @@ pub fn run() {
                 let _ = window.show();
             }
 
+            // Build the shared event sink (Tauri implementation).
+            let sink: llm_relay_core::SharedEventSink =
+                std::sync::Arc::new(tauri_sink::TauriSink::new(app.handle().clone()));
+
             // Start local proxy server (http://127.0.0.1:18080)
-            let db_for_proxy = db.clone();
-            let proxy_app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                proxy_server::start(db_for_proxy, proxy_app_handle).await;
-            });
+            {
+                let db_for_proxy = db.clone();
+                let switch_lock_for_proxy = app.state::<AppState>().switch_lock.clone();
+                let sink_for_proxy = sink.clone();
+                tauri::async_runtime::spawn(async move {
+                    llm_relay_core::proxy_server::start(db_for_proxy, switch_lock_for_proxy, sink_for_proxy).await;
+                });
+            }
 
             // Start health check loop
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let state = app_handle.state::<AppState>();
-                health::health_check_loop(state.inner(), &app_handle).await;
-            });
+            {
+                let db_for_health = db.clone();
+                let switch_lock_for_health = app.state::<AppState>().switch_lock.clone();
+                let sink_for_health = sink.clone();
+                tauri::async_runtime::spawn(async move {
+                    llm_relay_core::health::health_check_loop(db_for_health, switch_lock_for_health, sink_for_health).await;
+                });
+            }
 
             Ok(())
         })

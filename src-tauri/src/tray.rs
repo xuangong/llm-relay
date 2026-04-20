@@ -170,11 +170,11 @@ fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: &str) 
         },
     };
 
-    let proxy_url = crate::proxy_server::proxy_base_url();
+    let proxy_url = llm_relay_core::proxy_server::proxy_base_url();
 
     let _ = llm_relay_core::config_writer::apply_all_configs(
         &proxy_url,
-        crate::proxy_server::PLACEHOLDER_KEY,
+        llm_relay_core::proxy_server::PLACEHOLDER_KEY,
         config.claude_model.as_deref(),
         config.claude_small_model.as_deref(),
         config.codex_model.as_deref(),
