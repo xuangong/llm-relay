@@ -13,6 +13,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     /// Held during any gateway switch to prevent concurrent switches.
     pub switch_lock: Arc<tokio::sync::Mutex<()>>,
+    pub service: Arc<llm_relay_core::Service>,
 }
 
 pub fn run() {
@@ -52,9 +53,16 @@ pub fn run() {
             llm_relay_core::keystore::init(&app_config_dir);
             let db = Arc::new(Database::init(&app_config_dir)?);
 
+            // Build the shared event sink (Tauri implementation).
+            let sink: llm_relay_core::SharedEventSink =
+                std::sync::Arc::new(tauri_sink::TauriSink::new(app.handle().clone()));
+
+            let service = std::sync::Arc::new(llm_relay_core::Service::new(db.clone(), sink.clone()));
+
             let state = AppState {
                 db: db.clone(),
                 switch_lock: Arc::new(tokio::sync::Mutex::new(())),
+                service: service.clone(),
             };
 
             // Build tray
@@ -76,27 +84,19 @@ pub fn run() {
                 let _ = window.show();
             }
 
-            // Build the shared event sink (Tauri implementation).
-            let sink: llm_relay_core::SharedEventSink =
-                std::sync::Arc::new(tauri_sink::TauriSink::new(app.handle().clone()));
-
             // Start local proxy server (http://127.0.0.1:18080)
             {
-                let db_for_proxy = db.clone();
-                let switch_lock_for_proxy = app.state::<AppState>().switch_lock.clone();
-                let sink_for_proxy = sink.clone();
+                let svc_for_proxy = service.clone();
                 tauri::async_runtime::spawn(async move {
-                    llm_relay_core::proxy_server::start(db_for_proxy, switch_lock_for_proxy, sink_for_proxy).await;
+                    llm_relay_core::proxy_server::start((*svc_for_proxy).clone()).await;
                 });
             }
 
             // Start health check loop
             {
-                let db_for_health = db.clone();
-                let switch_lock_for_health = app.state::<AppState>().switch_lock.clone();
-                let sink_for_health = sink.clone();
+                let svc_for_health = service.clone();
                 tauri::async_runtime::spawn(async move {
-                    llm_relay_core::health::health_check_loop(db_for_health, switch_lock_for_health, sink_for_health).await;
+                    llm_relay_core::health::health_check_loop((*svc_for_health).clone()).await;
                 });
             }
 

@@ -15,15 +15,11 @@ const SWITCH_HYSTERESIS_SECS: i64 = 60;
 /// - Always use the first healthy gateway in the list
 /// - If current gateway goes down, switch to next healthy one
 /// - If a higher-priority gateway recovers, switch back (with hysteresis)
-pub async fn health_check_loop(
-    db: Arc<Database>,
-    switch_lock: Arc<tokio::sync::Mutex<()>>,
-    sink: SharedEventSink,
-) {
+pub async fn health_check_loop(service: crate::Service) {
     log::info!("Health check loop started");
     loop {
-        check_and_switch(db.clone(), switch_lock.clone(), sink.clone()).await;
-        send_heartbeat(db.clone()).await;
+        check_and_switch(service.db.clone(), service.switch_lock.clone(), service.sink.clone()).await;
+        send_heartbeat(service.db.clone()).await;
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
 }

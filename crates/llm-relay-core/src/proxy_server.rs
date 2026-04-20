@@ -34,15 +34,11 @@ pub struct ProxyState {
     consecutive_errors: Arc<AtomicU32>,
 }
 
-pub async fn start(
-    db: Arc<Database>,
-    switch_lock: Arc<tokio::sync::Mutex<()>>,
-    sink: SharedEventSink,
-) {
+pub async fn start(service: crate::Service) {
     let state = ProxyState {
-        db,
-        switch_lock,
-        sink,
+        db: service.db.clone(),
+        switch_lock: service.switch_lock.clone(),
+        sink: service.sink.clone(),
         consecutive_errors: Arc::new(AtomicU32::new(0)),
     };
 
