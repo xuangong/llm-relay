@@ -43,6 +43,8 @@ pub enum Request {
     ListGateways,
     /// TUI: fetch per-gateway usage rows for a given range.
     GetUsageRows { range: UsageRange },
+    /// TUI: fetch recent error rows.
+    GetErrors { limit: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +69,8 @@ pub enum Response {
     GatewayList { gateways: Vec<GatewaySummary> },
     /// TUI: per-gateway usage rows (see `UsageRowDetail`).
     UsageRows { rows: Vec<UsageRowDetail> },
+    /// TUI: recent error rows.
+    ErrorRows { rows: Vec<ErrorRow> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,4 +234,15 @@ pub struct Settings {
 pub struct SettingsUpdate {
     pub client_name: Option<String>,
     pub launch_at_login: Option<bool>,
+}
+
+/// A recent error entry shown in the TUI Errors tab.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorRow {
+    /// ISO-8601 timestamp string.
+    pub timestamp_iso: String,
+    pub gateway_name: String,
+    /// Error kind: "health" | "proxy" | "auth"
+    pub kind: String,
+    pub message: String,
 }

@@ -454,6 +454,15 @@ impl Service {
         // TODO: query `usage_log` table grouped by gateway_id+model for the requested range
         Ok(Vec::new())
     }
+
+    /// Return recent error rows for the TUI Errors tab.
+    ///
+    /// TODO: wire to a real DB query once an `error_log` table/view exists.
+    /// For now returns an empty vec so the TUI compiles and shows an empty table.
+    pub async fn get_errors(&self, _limit: u32) -> Result<Vec<ErrorRow>, AppError> {
+        // TODO: query `error_log` or equivalent table, ORDER BY timestamp DESC LIMIT _limit
+        Ok(Vec::new())
+    }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

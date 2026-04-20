@@ -1,5 +1,6 @@
 pub mod gateways;
 pub mod usage;
+pub mod errors;
 
 use crate::app::state::{AppState, Tab};
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -34,7 +35,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     match state.active_tab {
         Tab::Gateways => gateways::render(frame, chunks[1], state),
         Tab::Usage => usage::render(frame, chunks[1], state),
-        Tab::Errors | Tab::Settings => {
+        Tab::Errors => errors::render(frame, chunks[1], state),
+        Tab::Settings => {
             let p = Paragraph::new("(coming in next tasks)")
                 .block(Block::default().borders(Borders::ALL));
             frame.render_widget(p, chunks[1]);

@@ -237,5 +237,9 @@ async fn dispatch(ctx: &ConnCtx, req: Request, topics: &Arc<Mutex<HashSet<Topic>
             Ok(rows) => Response::UsageRows { rows },
             Err(e) => Response::Error { message: e.to_string() },
         },
+        Request::GetErrors { limit } => match ctx.service.get_errors(limit).await {
+            Ok(rows) => Response::ErrorRows { rows },
+            Err(e) => Response::Error { message: e.to_string() },
+        },
     }
 }

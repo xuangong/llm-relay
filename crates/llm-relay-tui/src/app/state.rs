@@ -3,7 +3,7 @@
 //! unit-test behavior without a terminal.
 
 use crate::app::event::AppEvent;
-use llm_relay_core::ipc::{Event as IpcEvent, HealthStatus, UsageRange, UsageRowDetail};
+use llm_relay_core::ipc::{ErrorRow, Event as IpcEvent, HealthStatus, UsageRange, UsageRowDetail};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -59,6 +59,12 @@ pub struct UsageState {
 }
 
 #[derive(Debug, Default)]
+pub struct ErrorsState {
+    pub rows: Vec<ErrorRow>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Default)]
 pub struct AppState {
     pub active_tab: Tab,
     pub should_quit: bool,
@@ -67,6 +73,7 @@ pub struct AppState {
     pub selected_row: usize,
     pub status_message: Option<String>,
     pub usage: UsageState,
+    pub errors: ErrorsState,
 }
 
 impl AppState {

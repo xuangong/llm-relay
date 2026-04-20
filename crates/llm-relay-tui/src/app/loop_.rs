@@ -37,6 +37,13 @@ async fn fetch_usage(client: &IpcClient, state: &mut AppState) {
     }
 }
 
+/// Fetch error rows from the agent and store them in state.
+async fn fetch_errors(client: &IpcClient, state: &mut AppState) {
+    if let Ok(Response::ErrorRows { rows }) = client.request(Request::GetErrors { limit: 100 }).await {
+        state.errors.rows = rows;
+    }
+}
+
 pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
@@ -106,6 +113,7 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
             // Also refresh whichever data tab is active.
             match state.active_tab {
                 Tab::Usage => fetch_usage(&client, &mut state).await,
+                Tab::Errors => fetch_errors(&client, &mut state).await,
                 _ => {}
             }
         } else {
@@ -116,6 +124,7 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
         if state.active_tab != prev_tab {
             match state.active_tab {
                 Tab::Usage => fetch_usage(&client, &mut state).await,
+                Tab::Errors => fetch_errors(&client, &mut state).await,
                 _ => {}
             }
             prev_tab = state.active_tab;
