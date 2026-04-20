@@ -49,6 +49,7 @@ pub fn run() {
             // Init database
             let app_config_dir = get_app_config_dir();
             std::fs::create_dir_all(&app_config_dir).ok();
+            llm_relay_core::keystore::init(&app_config_dir);
             let db = Arc::new(Database::init(&app_config_dir)?);
 
             let state = AppState {
