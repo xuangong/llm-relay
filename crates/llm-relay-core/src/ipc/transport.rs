@@ -4,8 +4,12 @@
 
 use interprocess::local_socket::{
     tokio::{prelude::*, Stream, Listener},
-    GenericFilePath, GenericNamespaced, ListenerOptions, ToFsName, ToNsName,
+    ListenerOptions,
 };
+#[cfg(unix)]
+use interprocess::local_socket::{GenericFilePath, ToFsName};
+#[cfg(windows)]
+use interprocess::local_socket::{GenericNamespaced, ToNsName};
 use std::io;
 use std::path::Path;
 
