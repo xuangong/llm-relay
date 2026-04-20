@@ -19,17 +19,25 @@ pub trait Backend: Send + Sync {
 static BACKEND: OnceLock<Box<dyn Backend>> = OnceLock::new();
 static CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
+use crate::ipc::protocol::KeystoreKind;
+static CURRENT_KIND: OnceLock<KeystoreKind> = OnceLock::new();
+
+pub fn current_kind() -> KeystoreKind {
+    *CURRENT_KIND.get().unwrap_or(&KeystoreKind::System)
+}
+
 /// Initialize the keystore. Call once at startup before any get/set.
 /// Tries the OS keychain first by performing a real read+write probe;
 /// on failure, falls back to encrypted file.
 pub fn init(config_dir: &std::path::Path) {
-    let backend: Box<dyn Backend> = match system_backend::SystemBackend::probe() {
-        Ok(b) => Box::new(b),
+    let (backend, kind): (Box<dyn Backend>, KeystoreKind) = match system_backend::SystemBackend::probe() {
+        Ok(b) => (Box::new(b), KeystoreKind::System),
         Err(e) => {
             log::warn!("system keychain unavailable: {e}; using encrypted file at {}", config_dir.display());
-            Box::new(file_backend::FileBackend::new(config_dir.join("secrets.enc")))
+            (Box::new(file_backend::FileBackend::new(config_dir.join("secrets.enc"))), KeystoreKind::EncryptedFile)
         }
     };
+    let _ = CURRENT_KIND.set(kind);
     let _ = BACKEND.set(backend);
 }
 

@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         bus,
         agent_started_at: Utc::now(),
         agent_pid: std::process::id(),
-        keystore_kind: llm_relay_core::ipc::protocol::KeystoreKind::System, // refined in Task 22
+        keystore_kind: llm_relay_core::keystore::current_kind(),
         shutdown: shutdown.clone(),
     };
 
