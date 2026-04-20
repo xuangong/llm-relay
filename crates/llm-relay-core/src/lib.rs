@@ -10,3 +10,4 @@ pub mod events;
 pub use events::{emit_typed, EventSink, NullSink, SharedEventSink, TRAY_REFRESH_EVENT};
 pub mod health;
 pub mod proxy_server;
+pub mod ipc;
