@@ -227,5 +227,11 @@ async fn dispatch(ctx: &ConnCtx, req: Request, topics: &Arc<Mutex<HashSet<Topic>
             tokio::spawn(async move { tokio::time::sleep(std::time::Duration::from_millis(50)).await; sd.notify_one(); });
             Response::Ok
         }
+        Request::ListGateways => {
+            match ctx.service.list_gateways() {
+                Ok(gateways) => Response::GatewayList { gateways },
+                Err(e) => Response::Error { message: e.to_string() },
+            }
+        }
     }
 }

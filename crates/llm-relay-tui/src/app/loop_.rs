@@ -1,12 +1,34 @@
 //! Main loop: drains crossterm key events and IPC events, applies them to
 //! `AppState`, and re-renders.
 
-use crate::app::{event::AppEvent, state::AppState, terminal::Tui};
+use crate::app::{event::AppEvent, state::{AppState, GatewayRow}, terminal::Tui};
 use crate::ipc_client::IpcClient;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind};
+use llm_relay_core::ipc::{Request, Response};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+fn gw_rows_from_response(resp: Response) -> Option<Vec<GatewayRow>> {
+    if let Response::GatewayList { gateways } = resp {
+        Some(
+            gateways
+                .into_iter()
+                .map(|g| GatewayRow {
+                    id: g.id,
+                    name: g.name,
+                    url: g.url,
+                    healthy: g.healthy,
+                    latency_ms: g.latency_ms,
+                    starred: g.starred,
+                    expanded: false,
+                })
+                .collect(),
+        )
+    } else {
+        None
+    }
+}
 
 pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -55,11 +77,27 @@ pub async fn run(mut term: Tui, client: Arc<IpcClient>) -> std::io::Result<()> {
 
     let mut state = AppState::new();
 
-    // Initial render
+    // Initial gateway load.
+    if let Ok(resp) = client.request(Request::ListGateways).await {
+        if let Some(rows) = gw_rows_from_response(resp) {
+            state.replace_gateways(rows);
+        }
+    }
+
+    // Initial render.
     term.draw(|f| crate::view::render(f, &state))?;
 
     while let Some(evt) = rx.recv().await {
-        state.handle(evt);
+        // Refresh short-circuits before state.handle so we can do async IPC.
+        if matches!(evt, AppEvent::Refresh) {
+            if let Ok(resp) = client.request(Request::ListGateways).await {
+                if let Some(rows) = gw_rows_from_response(resp) {
+                    state.replace_gateways(rows);
+                }
+            }
+        } else {
+            state.handle(evt);
+        }
         term.draw(|f| crate::view::render(f, &state))?;
         if state.should_quit {
             break;

@@ -85,6 +85,22 @@ impl Service {
             .collect())
     }
 
+    /// List gateways with health info, mapped to `GatewaySummary` for TUI use.
+    pub fn list_gateways(&self) -> Result<Vec<crate::ipc::GatewaySummary>, AppError> {
+        let views = self.list_gateway_views()?;
+        Ok(views
+            .into_iter()
+            .map(|v| crate::ipc::GatewaySummary {
+                id: v.id,
+                name: v.name,
+                url: v.url,
+                starred: false,
+                healthy: v.health.map(|h| matches!(h, HealthStatus::Healthy)),
+                latency_ms: None,
+            })
+            .collect())
+    }
+
     fn active_view(&self) -> Result<Option<ActiveView>, AppError> {
         let cfg = self.db.get_active_config()?;
         let (gw_id_str, key_id_str) = match (cfg.gateway_id.as_deref(), cfg.key_id.as_deref()) {

@@ -40,6 +40,7 @@ pub enum Request {
     GetSettings,
     UpdateSettings(SettingsUpdate),
     Shutdown,
+    ListGateways,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +62,7 @@ pub enum Response {
     Settings(Settings),
     Usage(UsageReport),
     TrafficLog(Vec<TrafficEntry>),
+    GatewayList { gateways: Vec<GatewaySummary> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +182,16 @@ pub struct TrafficEntry {
 pub struct KeyInfo {
     pub id: Uuid,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewaySummary {
+    pub id: Uuid,
+    pub name: String,
+    pub url: String,
+    pub starred: bool,
+    pub healthy: Option<bool>,
+    pub latency_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
