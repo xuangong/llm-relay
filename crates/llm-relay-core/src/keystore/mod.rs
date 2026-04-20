@@ -2,8 +2,11 @@
 //! to an AES-256-GCM encrypted file when the keychain is unavailable
 //! (e.g. Linux servers without DBus / Secret Service).
 
+mod env_backend;
 mod file_backend;
 mod system_backend;
+
+pub use env_backend::{setup_hint as env_setup_hint, ENV_VAR as ENV_KEY_VAR};
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -39,6 +42,21 @@ pub fn init(config_dir: &std::path::Path) {
     };
     let _ = CURRENT_KIND.set(kind);
     let _ = BACKEND.set(backend);
+}
+
+/// Initialize the keystore in env-only mode (headless agent / TUI server).
+/// Reads the master key from `LLM_RELAY_MASTER_KEY` (base64 32 bytes) and
+/// stores ciphertext at `<config_dir>/secrets.env.enc`. NEVER falls back to
+/// the OS keychain or interactive file backend — server deployments must
+/// supply the env var explicitly.
+pub fn init_env(config_dir: &std::path::Path) -> Result<(), String> {
+    let path = config_dir.join(env_backend::FILE_NAME);
+    let backend = env_backend::EnvBackend::from_env(path)?;
+    if BACKEND.set(Box::new(backend)).is_err() {
+        return Err("keystore already initialized".to_string());
+    }
+    let _ = CURRENT_KIND.set(KeystoreKind::Env);
+    Ok(())
 }
 
 fn backend() -> &'static dyn Backend {
@@ -122,4 +140,11 @@ pub(super) const KEYSTORE_ENTRY: &str = ENTRY_KEY;
 #[doc(hidden)]
 pub fn file_backend_for_test(path: std::path::PathBuf) -> impl Backend {
     file_backend::FileBackend::new(path)
+}
+
+/// Test-only constructor exposing the env backend. Reads `LLM_RELAY_MASTER_KEY`
+/// at call time; returns Err if missing/invalid.
+#[doc(hidden)]
+pub fn env_backend_for_test(path: std::path::PathBuf) -> Result<impl Backend, String> {
+    env_backend::EnvBackend::from_env(path)
 }

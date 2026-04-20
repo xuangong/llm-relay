@@ -20,7 +20,6 @@ uuid.workspace = true
 log.workspace = true
 anyhow.workspace = true
 thiserror = "1"
-fs2 = "0.4"
 chrono = { workspace = true }
 interprocess = { version = "2", features = ["tokio"] }
 env_logger = "0.11"

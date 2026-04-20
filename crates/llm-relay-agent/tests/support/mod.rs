@@ -22,14 +22,36 @@ impl AgentBin {
     }
 
     pub fn spawn(&self, runtime_dir: &Path) -> Child {
+        // Pick an ephemeral free port so the test never collides with a real
+        // GUI / agent that may be holding the default 18080.
+        let port = pick_free_port();
         Command::new(&self.bin)
             .env("LLM_RELAY_RUNTIME_DIR", runtime_dir)
+            .env("LLM_RELAY_PROXY_PORT", port.to_string())
+            // Headless agent requires LLM_RELAY_MASTER_KEY (base64 32 bytes).
+            // Use a deterministic per-test key so secrets.env.enc can roundtrip
+            // across restarts within the same test.
+            .env("LLM_RELAY_MASTER_KEY", test_master_key())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn agent")
     }
+}
+
+#[allow(dead_code)]
+fn test_master_key() -> &'static str {
+    // base64 of 32 zero bytes — fine for tests, never write this in prod.
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+}
+
+#[allow(dead_code)]
+fn pick_free_port() -> u16 {
+    // Bind to port 0, read assigned port, drop. Brief race window but fine
+    // for tests that immediately respawn into a fresh runtime dir.
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    l.local_addr().expect("local_addr").port()
 }
 
 // Each integration test binary recompiles this module independently,

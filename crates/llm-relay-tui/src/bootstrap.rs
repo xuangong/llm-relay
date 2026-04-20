@@ -9,6 +9,8 @@
 use crate::ipc_client::IpcClient;
 use crate::spawn;
 use llm_relay_core::ipc::{Request, Topic};
+use llm_relay_core::paths;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,6 +48,8 @@ pub enum AgentHandle {
 pub enum BootstrapError {
     #[error("no agent running and AttachOnly was requested")]
     NoAgent,
+    #[error("port {0} is in use — the LLM Relay GUI appears to be running. Quit it before starting the TUI.")]
+    GuiRunning(u16),
     #[error("spawn failed: {0}")]
     Spawn(String),
     #[error("agent did not become ready within timeout")]
@@ -73,6 +77,19 @@ pub async fn ensure_agent(
     match mode {
         EnsureMode::AttachOnly => Err(BootstrapError::NoAgent),
         EnsureMode::AttachOrSpawn => {
+            // Probe the proxy port BEFORE spawning. If it's bound but no
+            // agent socket answered above, that's almost certainly the GUI
+            // (or some other process) — spawning would just produce a
+            // useless "timeout" error after the agent fails to bind and
+            // exits silently.
+            match TcpListener::bind(("127.0.0.1", paths::proxy_port())) {
+                Ok(l) => drop(l),
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    return Err(BootstrapError::GuiRunning(paths::proxy_port()));
+                }
+                Err(e) => return Err(BootstrapError::Io(e)),
+            }
+
             let agent_bin = locate_agent_binary()?;
             let pid = spawn::spawn_detached(
                 agent_bin.to_str().expect("utf-8 path"),
@@ -80,8 +97,15 @@ pub async fn ensure_agent(
             )
             .map_err(|e| BootstrapError::Spawn(e.to_string()))?;
 
-            // Wait up to 5s for the agent to bind its socket and answer Ping.
-            let deadline = Instant::now() + Duration::from_secs(5);
+            // Wait for the agent to bind its socket and answer Ping.
+            // Windows cold-start (Defender, code-signing checks) can be
+            // noticeably slower than Unix, so give it more headroom.
+            let timeout = if cfg!(windows) {
+                Duration::from_secs(10)
+            } else {
+                Duration::from_secs(5)
+            };
+            let deadline = Instant::now() + timeout;
             loop {
                 if Instant::now() >= deadline {
                     return Err(BootstrapError::Timeout);

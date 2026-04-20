@@ -183,7 +183,7 @@ async fn dispatch(ctx: &ConnCtx, req: Request, topics: &Arc<Mutex<HashSet<Topic>
         Request::Ping => Response::Pong,
         Request::Subscribe { topics: t } => { topics.lock().await.extend(t); Response::Ok }
         Request::Unsubscribe { topics: t } => { for x in t { topics.lock().await.remove(&x); } Response::Ok }
-        Request::GetSnapshot => match ctx.service.snapshot(ctx.agent_pid, ctx.agent_started_at, llm_relay_core::paths::PROXY_PORT, ctx.keystore_kind).await {
+        Request::GetSnapshot => match ctx.service.snapshot(ctx.agent_pid, ctx.agent_started_at, llm_relay_core::paths::proxy_port(), ctx.keystore_kind).await {
             Ok(s) => Response::Snapshot(s), Err(e) => Response::Error { message: e.to_string() },
         },
         Request::AddGateway(input) => match ctx.service.add_gateway(input).await {
@@ -258,7 +258,7 @@ async fn dispatch(ctx: &ConnCtx, req: Request, topics: &Arc<Mutex<HashSet<Topic>
                 ctx.agent_pid,
                 ctx.keystore_kind,
                 socket_path,
-                llm_relay_core::paths::PROXY_PORT,
+                llm_relay_core::paths::proxy_port(),
                 log_path,
             ).await {
                 Ok(s) => Response::TuiSettings(s),

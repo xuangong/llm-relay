@@ -170,7 +170,7 @@ pub enum HealthStatus { Healthy, Degraded, Down, Unknown }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum KeystoreKind { System, EncryptedFile }
+pub enum KeystoreKind { System, EncryptedFile, Env }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

@@ -13,7 +13,6 @@ use futures_util::StreamExt;
 use crate::database::Database;
 use crate::events::SharedEventSink;
 
-pub const PROXY_PORT: u16 = 18080;
 pub const PLACEHOLDER_KEY: &str = "llm-relay-local";
 
 /// Consecutive error threshold before triggering auto-failover.
@@ -21,7 +20,7 @@ pub const PLACEHOLDER_KEY: &str = "llm-relay-local";
 const ERROR_FAILOVER_THRESHOLD: u32 = 10;
 
 pub fn proxy_base_url() -> String {
-    format!("http://127.0.0.1:{}", PROXY_PORT)
+    format!("http://127.0.0.1:{}", crate::paths::proxy_port())
 }
 
 #[derive(Clone)]
@@ -56,7 +55,7 @@ pub async fn start_with_listener(service: crate::Service, listener: Option<std::
         .fallback(forward)
         .with_state(state);
 
-    let addr = format!("127.0.0.1:{}", PROXY_PORT);
+    let addr = format!("127.0.0.1:{}", crate::paths::proxy_port());
     let tokio_listener = if let Some(std_l) = listener {
         // Caller (lifecycle) already owns the bind. Convert std → tokio.
         if let Err(e) = std_l.set_nonblocking(true) {

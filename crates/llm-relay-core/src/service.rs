@@ -505,6 +505,7 @@ impl Service {
         let keystore_str = match keystore_kind {
             KeystoreKind::System => "system".to_string(),
             KeystoreKind::EncryptedFile => "encrypted-file".to_string(),
+            KeystoreKind::Env => "env".to_string(),
         };
         Ok(TuiSettings {
             keystore_kind: keystore_str,

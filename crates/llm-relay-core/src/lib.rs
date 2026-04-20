@@ -15,3 +15,4 @@ pub mod service;
 pub use service::Service;
 pub mod paths;
 pub mod process;
+pub mod lifecycle;

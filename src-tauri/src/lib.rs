@@ -21,6 +21,20 @@ pub fn run() {
     let config_dir = get_app_config_dir();
     setup_panic_hook(&config_dir);
 
+    // Acquire the shared LLM Relay lifecycle guard BEFORE building Tauri.
+    // This atomically:
+    //   * grabs the global file lock at ~/.llm-relay/agent.lock
+    //   * binds 127.0.0.1:18080
+    //   * cleans stale pidfile / socket from prior unclean exits
+    //   * writes a fresh pidfile
+    // If another LLM Relay process (GUI or headless agent) is running, we
+    // surface a modal dialog and exit cleanly — no half-built window flash,
+    // no silent shutdown.
+    let lifecycle_guard = match acquire_with_daemon_takeover() {
+        Ok(g) => g,
+        Err(()) => std::process::exit(1),
+    };
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Second instance launched — bring existing window to front
@@ -46,7 +60,17 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
+            // Take the pre-bound listener out of the lifecycle guard for
+            // hand-off to the proxy server (no second bind, no TOCTOU).
+            let mut lifecycle_guard = lifecycle_guard;
+            let proxy_listener = lifecycle_guard.take_listener();
+            // Keep the guard alive for the lifetime of the app by leaking
+            // it. Drop on process exit isn't reached anyway because Tauri
+            // calls process::exit, but if we let the guard drop early the
+            // lock would release while the GUI is still running.
+            std::mem::forget(lifecycle_guard);
+
             // Init database
             let app_config_dir = get_app_config_dir();
             std::fs::create_dir_all(&app_config_dir).ok();
@@ -84,28 +108,8 @@ pub fn run() {
                 let _ = window.show();
             }
 
-            // Bind port 18080 NOW and hand the listener to the proxy server.
-            // Doing this in one step (vs probe+drop then later bind) closes the
-            // TOCTOU window where another process could grab the port.
-            let proxy_listener = match std::net::TcpListener::bind((
-                "127.0.0.1",
-                llm_relay_core::paths::PROXY_PORT,
-            )) {
-                Ok(l) => Some(l),
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                    log::error!(
-                        "port {} in use; another LLM Relay process is running — exiting",
-                        llm_relay_core::paths::PROXY_PORT
-                    );
-                    std::process::exit(1);
-                }
-                Err(e) => {
-                    log::error!("port bind failed: {e}");
-                    None
-                }
-            };
-
-            // Start local proxy server (http://127.0.0.1:18080)
+            // Start local proxy server (http://127.0.0.1:18080) using the
+            // listener that was bound atomically with the lifecycle lock.
             {
                 let svc_for_proxy = service.clone();
                 tauri::async_runtime::spawn(async move {
@@ -180,6 +184,98 @@ fn get_app_config_dir() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".llm-relay")
+}
+
+/// Acquire the lifecycle guard. If another LLM Relay process is detected and
+/// it appears to be the headless agent (live pidfile + reachable IPC socket),
+/// offer the user a one-click "Stop daemon and start GUI" option. The GUI
+/// always wins ties so users can't get locked out by a forgotten daemon.
+fn acquire_with_daemon_takeover() -> Result<llm_relay_core::lifecycle::LifecycleGuard, ()> {
+    use llm_relay_core::lifecycle::{self, AcquireError, LifecycleGuard};
+
+    match LifecycleGuard::acquire() {
+        Ok(g) => return Ok(g),
+        Err(AcquireError::AlreadyRunning) => {
+            // Try the takeover path: only if a live agent pid + socket exist.
+            let pid = lifecycle::live_agent_pid();
+            let sock_exists = llm_relay_core::paths::sock_file().exists();
+            if let (Some(pid), true) = (pid, sock_exists) {
+                let confirm = rfd::MessageDialog::new()
+                    .set_title("LLM Relay")
+                    .set_description(format!(
+                        "The LLM Relay daemon (PID {pid}) is already running.\n\n\
+                         The GUI cannot start while the daemon holds the port.\n\
+                         Stop the daemon and launch the GUI instead?"
+                    ))
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show();
+                if matches!(confirm, rfd::MessageDialogResult::Yes) {
+                    match lifecycle::request_agent_stop(std::time::Duration::from_secs(5)) {
+                        Ok(()) => match LifecycleGuard::acquire() {
+                            Ok(g) => return Ok(g),
+                            Err(e) => {
+                                log::error!("re-acquire after daemon stop failed: {e}");
+                                rfd::MessageDialog::new()
+                                    .set_title("LLM Relay")
+                                    .set_description(format!(
+                                        "Stopped the daemon, but couldn't start the GUI:\n{e}"
+                                    ))
+                                    .set_level(rfd::MessageLevel::Error)
+                                    .show();
+                                return Err(());
+                            }
+                        },
+                        Err(msg) => {
+                            log::error!("daemon stop request failed: {msg}");
+                            rfd::MessageDialog::new()
+                                .set_title("LLM Relay")
+                                .set_description(format!(
+                                    "Could not stop the daemon: {msg}\n\n\
+                                     Try `kill {pid}` from a terminal, then relaunch."
+                                ))
+                                .set_level(rfd::MessageLevel::Error)
+                                .show();
+                            return Err(());
+                        }
+                    }
+                }
+                // User declined — exit silently.
+                return Err(());
+            }
+            // No live agent — must be another GUI instance (single-instance
+            // plugin should bring it to front; we just bail).
+            rfd::MessageDialog::new()
+                .set_title("LLM Relay")
+                .set_description(
+                    "Another LLM Relay process is already running. \
+                     Please quit it before starting a new instance.",
+                )
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            Err(())
+        }
+        Err(AcquireError::PortInUse(_)) => {
+            rfd::MessageDialog::new()
+                .set_title("LLM Relay")
+                .set_description(format!(
+                    "Port {} is in use by another process. \
+                     Free the port (or quit the process holding it) and try again.",
+                    llm_relay_core::paths::proxy_port()
+                ))
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            Err(())
+        }
+        Err(AcquireError::Io(io)) => {
+            rfd::MessageDialog::new()
+                .set_title("LLM Relay")
+                .set_description(format!("LLM Relay failed to initialize: {io}"))
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            Err(())
+        }
+    }
 }
 
 fn setup_panic_hook(config_dir: &std::path::Path) {

@@ -11,13 +11,20 @@ async fn main() -> Result<()> {
     // probe step (which would race a competing process between probe and proxy bind).
     let mut guard = lifecycle::LifecycleGuard::acquire().map_err(|e| {
         eprintln!("{e}");
-        e
+        anyhow::anyhow!("{e}")
     })?;
     log::info!("agent starting (pid {})", std::process::id());
 
     std::fs::create_dir_all(paths::config_dir())?;
     std::fs::create_dir_all(paths::runtime_dir())?;
-    llm_relay_core::keystore::init(&paths::config_dir());
+    // Headless agent uses env-only keystore: master key from
+    // LLM_RELAY_MASTER_KEY, ciphertext at ~/.llm-relay/secrets.env.enc.
+    // No OS keychain, no interactive prompt — the agent is meant for
+    // server / TUI deployments where neither makes sense.
+    if let Err(e) = llm_relay_core::keystore::init_env(&paths::config_dir()) {
+        eprintln!("error: {e}\n\n{}", llm_relay_core::keystore::env_setup_hint());
+        std::process::exit(2);
+    }
 
     let db = Arc::new(Database::init(&paths::config_dir())?);
     let bus = ipc_server::EventBus::new();
@@ -44,17 +51,38 @@ async fn main() -> Result<()> {
         login_registry,
     };
 
-    // Listen for SIGTERM / Ctrl-C and trip shutdown.
+    // Listen for SIGTERM / Ctrl-C and trip shutdown so Drop runs and
+    // pid/sock files get cleaned up.
     let sd = shutdown.clone();
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        log::info!("ctrl_c received");
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+            let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+            tokio::select! {
+                _ = sigterm.recv() => log::info!("SIGTERM received"),
+                _ = sigint.recv() => log::info!("SIGINT received"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            log::info!("ctrl_c received");
+        }
         sd.notify_one();
     });
 
     ipc_server::run(&paths::sock_file(), ctx).await?;
     log::info!("agent exiting cleanly");
-    Ok(())
+    // Run guard's Drop now (cleans pid/sock + releases lock) instead of
+    // letting it happen during runtime drop, which can hang waiting on
+    // background tasks (proxy, health) that have no shutdown signal.
+    drop(guard);
+    // Force-terminate. The proxy and health-check loops are infinite by
+    // design and will block runtime drop forever; calling exit() is the
+    // simplest correct shutdown for a process whose only job is to vanish.
+    std::process::exit(0);
 }
 
 fn init_log() {
