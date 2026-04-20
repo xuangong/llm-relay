@@ -1,0 +1,15 @@
+[package]
+name = "llm-relay-agent"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "llm-relay-agent"
+path = "src/main.rs"
+
+[dependencies]
+llm-relay-core = { path = "../llm-relay-core" }
+tokio.workspace = true
+serde_json.workspace = true
+log.workspace = true
+anyhow.workspace = true

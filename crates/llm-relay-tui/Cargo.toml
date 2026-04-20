@@ -1,0 +1,15 @@
+[package]
+name = "llm-relay-tui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "llm-relay-tui"
+path = "src/main.rs"
+
+[dependencies]
+llm-relay-core = { path = "../llm-relay-core" }
+tokio.workspace = true
+serde_json.workspace = true
+log.workspace = true
+anyhow.workspace = true

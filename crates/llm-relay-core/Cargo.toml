@@ -1,0 +1,21 @@
+[package]
+name = "llm-relay-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+rusqlite.workspace = true
+toml_edit.workspace = true
+dirs.workspace = true
+hostname.workspace = true
+log.workspace = true
+keyring.workspace = true
+thiserror.workspace = true
