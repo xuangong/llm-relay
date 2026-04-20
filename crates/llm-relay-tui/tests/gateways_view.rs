@@ -12,6 +12,7 @@ fn make_state(n: usize) -> AppState {
         latency_ms: None,
         starred: false,
         expanded: false,
+        needs_login: false,
     }).collect();
     s.replace_gateways(rows);
     s

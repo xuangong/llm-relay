@@ -133,6 +133,16 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
         .unwrap_or(&gw.auth_key)
         .to_string();
 
+    // Refuse to forward with an empty bearer — upstream would silently 401.
+    // Surface the issue locally instead so the user knows to log in.
+    if api_key.is_empty() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "{\"error\":\"gateway requires login: run device-code flow first\"}",
+        )
+            .into_response();
+    }
+
     // Build target URL
     let target_url = format!("{}{}", gw.url.trim_end_matches('/'), path);
 

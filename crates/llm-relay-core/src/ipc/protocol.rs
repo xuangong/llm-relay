@@ -237,6 +237,11 @@ pub struct GatewaySummary {
     pub starred: bool,
     pub healthy: Option<bool>,
     pub latency_ms: Option<i64>,
+    /// True when neither the gateway's stored `auth_key` nor the active
+    /// config's `key_value` is populated. Proxy traffic in this state will be
+    /// rejected with 401 by the proxy server, so the TUI surfaces a 🔒 hint.
+    #[serde(default)]
+    pub needs_login: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

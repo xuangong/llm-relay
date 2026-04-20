@@ -29,6 +29,7 @@ fn into_row(g: GatewaySummary) -> GatewayRow {
         latency_ms: g.latency_ms,
         starred: g.starred,
         expanded: false,
+        needs_login: g.needs_login,
     }
 }
 

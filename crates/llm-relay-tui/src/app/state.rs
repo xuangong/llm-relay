@@ -49,6 +49,8 @@ pub struct GatewayRow {
     pub latency_ms: Option<i64>,
     pub starred: bool,
     pub expanded: bool,
+    /// Mirrors `GatewaySummary::needs_login` — render a 🔒 in the gateway list.
+    pub needs_login: bool,
 }
 
 #[derive(Debug, Default)]

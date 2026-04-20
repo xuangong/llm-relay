@@ -87,18 +87,36 @@ impl Service {
 
     /// List gateways with health info, mapped to `GatewaySummary` for TUI use.
     pub fn list_gateways(&self) -> Result<Vec<crate::ipc::GatewaySummary>, AppError> {
-        let views = self.list_gateway_views()?;
-        Ok(views
-            .into_iter()
-            .map(|v| crate::ipc::GatewaySummary {
-                id: v.id,
-                name: v.name,
-                url: v.url,
+        // Pull raw gateways once (resolves auth_key from keystore) plus active
+        // config so we can compute `needs_login` for each summary.
+        let gateways = self.db.list_gateways()?;
+        let active = self.db.get_active_config().ok();
+        let active_gw_id = active.as_ref().and_then(|a| a.gateway_id.clone());
+        let active_key_value = active.as_ref().and_then(|a| a.key_value.clone());
+
+        let mut summaries = Vec::with_capacity(gateways.len());
+        for gw in gateways {
+            let health = self.db.get_health(&gw.id).ok().flatten();
+            let id = Uuid::parse_str(&gw.id).unwrap_or_default();
+            let is_active = active_gw_id.as_deref() == Some(gw.id.as_str());
+            // `needs_login` if neither the gateway's stored auth_key nor (when
+            // this is the active gateway) the active key_value is populated.
+            let active_key_empty = active_key_value
+                .as_deref()
+                .map(|s| s.is_empty())
+                .unwrap_or(true);
+            let needs_login = gw.auth_key.is_empty() && (!is_active || active_key_empty);
+            summaries.push(crate::ipc::GatewaySummary {
+                id,
+                name: gw.name,
+                url: gw.url,
                 starred: false,
-                healthy: v.health.map(|h| matches!(h, HealthStatus::Healthy)),
-                latency_ms: None,
-            })
-            .collect())
+                healthy: health.as_ref().map(|h| h.is_healthy),
+                latency_ms: health.as_ref().and_then(|h| h.latency_ms),
+                needs_login,
+            });
+        }
+        Ok(summaries)
     }
 
     fn active_view(&self) -> Result<Option<ActiveView>, AppError> {

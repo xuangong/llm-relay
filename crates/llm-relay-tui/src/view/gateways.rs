@@ -43,11 +43,19 @@ fn row_to_item(_i: usize, row: &GatewayRow, _selected: bool) -> ListItem<'_> {
         .latency_ms
         .map(|ms| format!(" {ms}ms"))
         .unwrap_or_default();
+    // 🔒 indicates the gateway has no auth_key on file — proxy traffic will 401
+    // until the user runs the device-code flow.
+    let lock_hint: Span = if row.needs_login {
+        Span::styled(" [!login]", Style::default().fg(Color::Yellow))
+    } else {
+        Span::raw("")
+    };
     let header = Line::from(vec![
         Span::raw(star),
         icon,
         Span::raw("  "),
         Span::styled(&row.name, Style::default().add_modifier(Modifier::BOLD)),
+        lock_hint,
         Span::raw("  "),
         Span::styled(&row.url, Style::default().fg(Color::DarkGray)),
         Span::raw(latency),
