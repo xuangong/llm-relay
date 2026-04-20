@@ -46,11 +46,17 @@ jobs:
       - name: Lifecycle integration tests
         # Tests spawn child processes and use Unix sockets; run serially.
         # Tests are marked #[ignore] so we must pass --ignored to enable them.
+        # LLM_RELAY_RUNTIME_DIR is unique per OS+run to avoid path collisions
+        # when multiple matrix jobs share a self-hosted runner cache.
+        env:
+          LLM_RELAY_RUNTIME_DIR: ${{ runner.temp }}/llm-relay-${{ github.run_id }}-${{ matrix.os }}-lifecycle
         run: cargo test -p llm-relay-agent --test lifecycle_integration -- --ignored --test-threads=1
 
       - name: Mutual exclusion (agent vs another process holding 18080)
         if: matrix.os != 'windows-latest'
         # Test is marked #[ignore]; pass --ignored to enable it.
+        env:
+          LLM_RELAY_RUNTIME_DIR: ${{ runner.temp }}/llm-relay-${{ github.run_id }}-${{ matrix.os }}-mutex
         run: cargo test -p llm-relay-agent --test mutual_exclusion -- --ignored --test-threads=1
 
   clippy:
