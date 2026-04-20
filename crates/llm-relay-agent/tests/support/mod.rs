@@ -32,6 +32,10 @@ impl AgentBin {
     }
 }
 
+// Each integration test binary recompiles this module independently,
+// so a helper used in one binary appears dead in another. Suppress the
+// warning rather than scattering #[allow] at every import site.
+#[allow(dead_code)]
 pub fn wait_for_socket(path: &Path, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -41,6 +45,7 @@ pub fn wait_for_socket(path: &Path, timeout: Duration) -> bool {
     false
 }
 
+#[allow(dead_code)]
 pub fn wait_for_no_socket(path: &Path, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {

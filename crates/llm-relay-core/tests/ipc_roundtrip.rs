@@ -1,6 +1,6 @@
 use llm_relay_core::ipc::codec::{read_frame, write_frame};
 use llm_relay_core::ipc::protocol::*;
-use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{duplex, AsyncWriteExt};
 use uuid::Uuid;
 
 #[tokio::test]
