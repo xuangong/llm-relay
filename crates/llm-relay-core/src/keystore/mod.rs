@@ -109,3 +109,9 @@ pub fn migrate_legacy_entries(gateway_ids: &[String]) {
 
 pub(super) const KEYSTORE_SERVICE: &str = SERVICE;
 pub(super) const KEYSTORE_ENTRY: &str = ENTRY_KEY;
+
+/// Test-only constructor exposing the file backend without going through `init()`.
+#[doc(hidden)]
+pub fn file_backend_for_test(path: std::path::PathBuf) -> impl Backend {
+    file_backend::FileBackend::new(path)
+}
