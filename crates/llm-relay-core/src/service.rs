@@ -499,6 +499,26 @@ impl Service {
         self.db.set_setting("auto_launch", if enabled { "true" } else { "false" })?;
         Ok(())
     }
+
+    /// TUI: add a gateway with name+url only (auth_key defaults to empty).
+    pub async fn add_gateway_simple(&self, name: String, url: String) -> Result<Uuid, AppError> {
+        self.add_gateway(GatewayInput {
+            name,
+            url,
+            auth_key: String::new(),
+        })
+        .await
+    }
+
+    /// TUI: update a gateway's name and url only.
+    pub async fn update_gateway_simple(&self, id: Uuid, name: String, url: String) -> Result<(), AppError> {
+        self.update_gateway(id, GatewayUpdate {
+            name: Some(name),
+            url: Some(url),
+            auth_key: None,
+        })
+        .await
+    }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

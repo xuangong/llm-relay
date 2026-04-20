@@ -80,6 +80,7 @@ pub struct AppState {
     pub usage: UsageState,
     pub errors: ErrorsState,
     pub settings: SettingsState,
+    pub modal: Option<crate::app::modal::Modal>,
 }
 
 impl AppState {
@@ -131,6 +132,30 @@ impl AppState {
                 if let Some(&idx) = self.gateway_index.get(&gateway_id) {
                     if let Some(row) = self.gateways.get_mut(idx) {
                         row.healthy = Some(matches!(status, HealthStatus::Healthy));
+                    }
+                }
+            }
+            IpcEvent::LoginCompleted { gateway_id, .. } => {
+                use crate::app::modal::LoginUiState;
+                if let Some(crate::app::modal::Modal::Login(f)) = self.modal.as_mut() {
+                    if f.gateway_id == gateway_id {
+                        f.state = LoginUiState::Completed;
+                    }
+                }
+            }
+            IpcEvent::LoginFailed { gateway_id, message } => {
+                use crate::app::modal::LoginUiState;
+                if let Some(crate::app::modal::Modal::Login(f)) = self.modal.as_mut() {
+                    if f.gateway_id == gateway_id {
+                        f.state = LoginUiState::Failed(message);
+                    }
+                }
+            }
+            IpcEvent::LoginExpired { gateway_id } => {
+                use crate::app::modal::LoginUiState;
+                if let Some(crate::app::modal::Modal::Login(f)) = self.modal.as_mut() {
+                    if f.gateway_id == gateway_id {
+                        f.state = LoginUiState::Expired;
                     }
                 }
             }

@@ -49,6 +49,10 @@ pub enum Request {
     GetTuiSettings,
     /// TUI: toggle the auto-launch-on-boot preference.
     SetAutoLaunch { enabled: bool },
+    /// TUI: add a gateway with just name+url (auth_key defaults to empty).
+    AddGatewaySimple { name: String, url: String },
+    /// TUI: update a gateway's name and url.
+    UpdateGatewaySimple { id: Uuid, name: String, url: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +83,10 @@ pub enum Response {
     TuiSettings(TuiSettings),
     /// TUI: acknowledgement for a settings mutation (e.g. SetAutoLaunch).
     SettingsAck,
+    /// TUI: gateway created, returns new id.
+    GatewayCreated { id: Uuid },
+    /// TUI: gateway updated.
+    GatewayUpdated { id: Uuid },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

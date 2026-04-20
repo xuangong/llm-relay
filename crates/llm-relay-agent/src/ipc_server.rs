@@ -259,5 +259,17 @@ async fn dispatch(ctx: &ConnCtx, req: Request, topics: &Arc<Mutex<HashSet<Topic>
             Ok(_) => Response::SettingsAck,
             Err(e) => Response::Error { message: e.to_string() },
         },
+        Request::AddGatewaySimple { name, url } => {
+            match ctx.service.add_gateway_simple(name, url).await {
+                Ok(id) => Response::GatewayCreated { id },
+                Err(e) => Response::Error { message: e.to_string() },
+            }
+        }
+        Request::UpdateGatewaySimple { id, name, url } => {
+            match ctx.service.update_gateway_simple(id, name, url).await {
+                Ok(_) => Response::GatewayUpdated { id },
+                Err(e) => Response::Error { message: e.to_string() },
+            }
+        }
     }
 }

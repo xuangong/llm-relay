@@ -2,6 +2,7 @@ pub mod gateways;
 pub mod usage;
 pub mod errors;
 pub mod settings;
+pub mod modals;
 
 use crate::app::state::{AppState, Tab};
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -38,5 +39,15 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Tab::Usage => usage::render(frame, chunks[1], state),
         Tab::Errors => errors::render(frame, chunks[1], state),
         Tab::Settings => settings::render(frame, chunks[1], state),
+    }
+
+    if let Some(modal) = &state.modal {
+        use crate::app::modal::Modal;
+        let area = frame.area();
+        match modal {
+            Modal::AddGateway(f) => modals::add_gateway::render(frame, area, f),
+            Modal::EditGateway(f) => modals::edit_gateway::render(frame, area, f),
+            Modal::Login(f) => modals::login::render(frame, area, f),
+        }
     }
 }
