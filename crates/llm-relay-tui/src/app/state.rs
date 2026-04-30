@@ -49,8 +49,13 @@ pub struct GatewayRow {
     pub latency_ms: Option<i64>,
     pub starred: bool,
     pub expanded: bool,
-    /// Mirrors `GatewaySummary::needs_login` — render a 🔒 in the gateway list.
     pub needs_login: bool,
+    pub active_key_name: Option<String>,
+    pub claude_model: Option<String>,
+    pub claude_small_model: Option<String>,
+    pub codex_model: Option<String>,
+    pub gemini_model: Option<String>,
+    pub user_name: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -100,16 +105,42 @@ impl AppState {
             AppEvent::Quit => self.should_quit = true,
             AppEvent::NextTab => self.active_tab = self.active_tab.next(),
             AppEvent::PrevTab => self.active_tab = self.active_tab.prev(),
-            AppEvent::Up => {
-                if self.selected_row > 0 {
-                    self.selected_row -= 1;
+            AppEvent::Up => match self.active_tab {
+                Tab::Gateways => {
+                    if self.selected_row > 0 {
+                        self.selected_row -= 1;
+                    }
                 }
-            }
-            AppEvent::Down => {
-                if self.selected_row + 1 < self.gateways.len() {
-                    self.selected_row += 1;
+                Tab::Usage => {
+                    if self.usage.selected > 0 {
+                        self.usage.selected -= 1;
+                    }
                 }
-            }
+                Tab::Errors => {
+                    if self.errors.selected > 0 {
+                        self.errors.selected -= 1;
+                    }
+                }
+                Tab::Settings => {}
+            },
+            AppEvent::Down => match self.active_tab {
+                Tab::Gateways => {
+                    if self.selected_row + 1 < self.gateways.len() {
+                        self.selected_row += 1;
+                    }
+                }
+                Tab::Usage => {
+                    if self.usage.selected + 1 < self.usage.rows.len() {
+                        self.usage.selected += 1;
+                    }
+                }
+                Tab::Errors => {
+                    if self.errors.selected + 1 < self.errors.rows.len() {
+                        self.errors.selected += 1;
+                    }
+                }
+                Tab::Settings => {}
+            },
             AppEvent::Enter => {
                 if let Some(row) = self.gateways.get_mut(self.selected_row) {
                     row.expanded = !row.expanded;
@@ -117,11 +148,6 @@ impl AppState {
             }
             AppEvent::Esc => { /* dialogs handle this; default no-op */ }
             AppEvent::Char(c) => match c {
-                's' => {
-                    if let Some(row) = self.gateways.get_mut(self.selected_row) {
-                        row.starred = !row.starred;
-                    }
-                }
                 'p' if self.active_tab == Tab::Usage => self.cycle_usage_range(),
                 _ => {}
             },
@@ -129,7 +155,10 @@ impl AppState {
             AppEvent::Ipc(evt) => self.apply_ipc(evt),
             // ToggleAutoLaunch is handled asynchronously in loop_.rs after emitting the IPC call.
             // The state update (flipping auto_launch in snapshot) happens after re-fetching settings.
-            AppEvent::ToggleAutoLaunch => { /* handled by loop_.rs */ }
+            AppEvent::ToggleAutoLaunch => { /* handled by loop_.rs */ },
+            AppEvent::ToggleAutoFailover => { /* handled by loop_.rs */ },
+            AppEvent::ShutdownAgent => { /* handled by loop_.rs */ },
+            AppEvent::Left | AppEvent::Right | AppEvent::Backspace => { /* handled by modals */ }
         }
     }
 

@@ -1,4 +1,5 @@
 use crate::app::event::AppEvent;
+use llm_relay_core::ipc::{KeyInfo, ModelCatalog, ModelSelection};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -6,6 +7,7 @@ pub enum Modal {
     AddGateway(AddGatewayForm),
     EditGateway(EditGatewayForm),
     Login(LoginForm),
+    SelectKeyModel(SelectKeyModelForm),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -70,6 +72,75 @@ pub enum LoginUiState {
     Expired,
 }
 
+#[derive(Debug, Clone)]
+pub struct SelectKeyModelForm {
+    pub gateway_id: Uuid,
+    pub gateway_name: String,
+    pub keys: Vec<KeyInfo>,
+    pub selected_key_idx: usize,
+    pub catalog: Option<ModelCatalog>,
+    /// Indexes into the per-category model lists from `catalog`.
+    pub claude_idx: usize,
+    pub claude_small_idx: usize,
+    pub codex_idx: usize,
+    pub gemini_idx: usize,
+    pub focus: SelectField,
+    pub error: Option<String>,
+    pub submitting: bool,
+    pub loading_models: bool,
+}
+
+impl SelectKeyModelForm {
+    /// Currently selected key, if any.
+    pub fn selected_key(&self) -> Option<&KeyInfo> {
+        self.keys.get(self.selected_key_idx)
+    }
+
+    /// Build a `ModelSelection` from the current indexes.
+    pub fn model_selection(&self) -> ModelSelection {
+        let cat = match &self.catalog {
+            Some(c) => c,
+            None => return ModelSelection::default(),
+        };
+        ModelSelection {
+            claude: cat.claude.get(self.claude_idx).cloned(),
+            claude_small: cat.claude.get(self.claude_small_idx).cloned(),
+            codex: cat.codex.get(self.codex_idx).cloned(),
+            gemini: cat.gemini.get(self.gemini_idx).cloned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectField {
+    Key,
+    Claude,
+    ClaudeSmall,
+    Codex,
+    Gemini,
+}
+
+impl SelectField {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Key => Self::Claude,
+            Self::Claude => Self::ClaudeSmall,
+            Self::ClaudeSmall => Self::Codex,
+            Self::Codex => Self::Gemini,
+            Self::Gemini => Self::Key,
+        }
+    }
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Key => Self::Gemini,
+            Self::Claude => Self::Key,
+            Self::ClaudeSmall => Self::Claude,
+            Self::Codex => Self::ClaudeSmall,
+            Self::Gemini => Self::Codex,
+        }
+    }
+}
+
 /// Routing decision: handled here vs. fall through.
 #[derive(Debug)]
 pub enum ModalOutcome {
@@ -83,6 +154,7 @@ pub enum ModalOutcome {
 pub enum ModalSubmit {
     AddGateway { name: String, url: String },
     EditGateway { id: Uuid, name: String, url: String },
+    SaveConfig { gateway_id: Uuid, key_id: Uuid, models: ModelSelection },
 }
 
 impl Modal {
@@ -93,6 +165,7 @@ impl Modal {
             Modal::AddGateway(f) => add_handle(f, event),
             Modal::EditGateway(f) => edit_handle(f, event),
             Modal::Login(_) => login_handle(event),
+            Modal::SelectKeyModel(f) => select_key_model_handle(f, event),
         }
     }
 }
@@ -182,5 +255,85 @@ fn login_handle(event: &AppEvent) -> ModalOutcome {
         AppEvent::Char('c') => ModalOutcome::Consumed, // copy handled in loop_ — needs IO
         AppEvent::Ipc(_) => ModalOutcome::PassThrough, // let IPC events reach state.apply_ipc
         _ => ModalOutcome::Consumed,
+    }
+}
+
+fn select_key_model_handle(f: &mut SelectKeyModelForm, event: &AppEvent) -> ModalOutcome {
+    if f.submitting || f.loading_models {
+        return ModalOutcome::Consumed;
+    }
+    match event {
+        AppEvent::Esc => ModalOutcome::Close,
+        AppEvent::Up => { f.focus = f.focus.prev(); ModalOutcome::Consumed }
+        AppEvent::Down => { f.focus = f.focus.next(); ModalOutcome::Consumed }
+        AppEvent::Left => {
+            select_prev(f);
+            ModalOutcome::Consumed
+        }
+        AppEvent::Right => {
+            select_next(f);
+            ModalOutcome::Consumed
+        }
+        AppEvent::Enter => {
+            let key = match f.selected_key() {
+                Some(k) => k,
+                None => {
+                    f.error = Some("No key available".into());
+                    return ModalOutcome::Consumed;
+                }
+            };
+            ModalOutcome::Submit(ModalSubmit::SaveConfig {
+                gateway_id: f.gateway_id,
+                key_id: key.id,
+                models: f.model_selection(),
+            })
+        }
+        AppEvent::Ipc(_) => ModalOutcome::PassThrough,
+        _ => ModalOutcome::Consumed,
+    }
+}
+
+fn select_prev(f: &mut SelectKeyModelForm) {
+    match f.focus {
+        SelectField::Key => {
+            if f.selected_key_idx > 0 { f.selected_key_idx -= 1; }
+        }
+        SelectField::Claude => {
+            if f.claude_idx > 0 { f.claude_idx -= 1; }
+        }
+        SelectField::ClaudeSmall => {
+            if f.claude_small_idx > 0 { f.claude_small_idx -= 1; }
+        }
+        SelectField::Codex => {
+            if f.codex_idx > 0 { f.codex_idx -= 1; }
+        }
+        SelectField::Gemini => {
+            if f.gemini_idx > 0 { f.gemini_idx -= 1; }
+        }
+    }
+}
+
+fn select_next(f: &mut SelectKeyModelForm) {
+    let cat = f.catalog.as_ref();
+    match f.focus {
+        SelectField::Key => {
+            if f.selected_key_idx + 1 < f.keys.len() { f.selected_key_idx += 1; }
+        }
+        SelectField::Claude => {
+            let max = cat.map(|c| c.claude.len()).unwrap_or(0);
+            if f.claude_idx + 1 < max { f.claude_idx += 1; }
+        }
+        SelectField::ClaudeSmall => {
+            let max = cat.map(|c| c.claude.len()).unwrap_or(0);
+            if f.claude_small_idx + 1 < max { f.claude_small_idx += 1; }
+        }
+        SelectField::Codex => {
+            let max = cat.map(|c| c.codex.len()).unwrap_or(0);
+            if f.codex_idx + 1 < max { f.codex_idx += 1; }
+        }
+        SelectField::Gemini => {
+            let max = cat.map(|c| c.gemini.len()).unwrap_or(0);
+            if f.gemini_idx + 1 < max { f.gemini_idx += 1; }
+        }
     }
 }

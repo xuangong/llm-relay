@@ -624,6 +624,10 @@ async fn try_proxy_failover(state: &ProxyState, current_gateway_id: &str, error_
         if gw.id == current_gateway_id {
             return false;
         }
+        // Skip gateways without an auth_key — they can't forward API traffic.
+        if gw.auth_key.is_empty() {
+            return false;
+        }
         state
             .db
             .get_health(&gw.id)

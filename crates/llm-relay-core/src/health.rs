@@ -45,7 +45,11 @@ pub async fn check_and_switch(
     for gw in &gateways {
         let gw_id = gw.id.clone();
         let gw_url = gw.url.clone();
-        let gw_auth = gw.auth_key.clone();
+        let gw_auth = if gw.auth_key.is_empty() {
+            gw.session_token.clone().unwrap_or_default()
+        } else {
+            gw.auth_key.clone()
+        };
         let db_ref = db.clone();
 
         handles.push(tokio::spawn(async move {
@@ -217,9 +221,15 @@ pub async fn send_heartbeat(db: Arc<Database>) {
     let api_key = match config.key_value.as_deref() {
         Some(k) => k.to_string(),
         None => {
-            // Fall back to gateway's auth_key
+            // Fall back to gateway's auth_key or session_token
             match db.get_gateway(&gateway_id) {
-                Ok(Some(gw)) => gw.auth_key.clone(),
+                Ok(Some(gw)) => {
+                    if !gw.auth_key.is_empty() {
+                        gw.auth_key.clone()
+                    } else {
+                        gw.session_token.clone().unwrap_or_default()
+                    }
+                }
                 _ => return,
             }
         }

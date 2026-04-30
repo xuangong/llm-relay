@@ -50,7 +50,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     ts.select(Some(state.errors.selected));
     frame.render_stateful_widget(table, chunks[0], &mut ts);
 
-    let hint = Paragraph::new("r refresh  Tab next  q quit")
+    let hint = Paragraph::new("↑/↓ select  r refresh  Tab next  q quit")
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hint, chunks[1]);
 }

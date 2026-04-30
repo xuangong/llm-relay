@@ -41,6 +41,31 @@ async fn main() -> Result<()> {
 
     let login_registry = Arc::new(login::LoginRegistry::new(bus.0.clone()));
     let shutdown = Arc::new(tokio::sync::Notify::new());
+
+    // Persist session_token when login completes.
+    {
+        let service = service.clone();
+        let mut rx = bus.subscribe();
+        tokio::spawn(async move {
+            use llm_relay_core::ipc::Event;
+            loop {
+                match rx.recv().await {
+                    Ok(Event::LoginCompleted { gateway_id, session_token, user_id, user_name }) => {
+                        log::info!("persisting session token for gateway {gateway_id}");
+                        if let Err(e) = service.save_login_session(gateway_id, session_token, user_id, user_name).await {
+                            log::error!("failed to save login session: {e}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("login listener lagged {n}");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
     let ctx = ipc_server::ServerCtx {
         service,
         bus,

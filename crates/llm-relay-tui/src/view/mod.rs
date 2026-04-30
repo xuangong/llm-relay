@@ -48,6 +48,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             Modal::AddGateway(f) => modals::add_gateway::render(frame, area, f),
             Modal::EditGateway(f) => modals::edit_gateway::render(frame, area, f),
             Modal::Login(f) => modals::login::render(frame, area, f),
+            Modal::SelectKeyModel(f) => modals::select_key_model::render(frame, area, f),
         }
     }
 }

@@ -193,19 +193,19 @@ async fn dispatch(ctx: &ConnCtx, req: Request, topics: &Arc<Mutex<HashSet<Topic>
         Request::DeleteGateway { id } => ok_or_err!(ctx.service.delete_gateway(id).await),
         Request::SetActive { gateway_id, key_id, models } => ok_or_err!(ctx.service.set_active(gateway_id, key_id, models).await),
         Request::ClearActive => ok_or_err!(ctx.service.clear_active().await),
-        Request::SetAutoFailover(b) => ok_or_err!(ctx.service.set_auto_failover(b).await),
-        Request::Reorder(ids) => ok_or_err!(ctx.service.reorder(ids).await),
+        Request::SetAutoFailover { enabled } => ok_or_err!(ctx.service.set_auto_failover(enabled).await),
+        Request::Reorder { ids } => ok_or_err!(ctx.service.reorder(ids).await),
         Request::FetchKeys { gateway_id } => match ctx.service.fetch_keys(gateway_id).await {
-            Ok(v) => Response::Keys(v), Err(e) => Response::Error { message: e.to_string() },
+            Ok(v) => Response::Keys { keys: v }, Err(e) => Response::Error { message: e.to_string() },
         },
         Request::FetchModels { gateway_id, key_id } => match ctx.service.fetch_models(gateway_id, key_id).await {
-            Ok(c) => Response::Models(c), Err(e) => Response::Error { message: e.to_string() },
+            Ok(c) => Response::Models { catalog: c }, Err(e) => Response::Error { message: e.to_string() },
         },
         Request::GetUsage { range, gateway_id } => match ctx.service.get_usage(range, gateway_id).await {
             Ok(u) => Response::Usage(u), Err(e) => Response::Error { message: e.to_string() },
         },
         Request::GetTrafficLog { gateway_id } => match ctx.service.get_traffic_log(gateway_id).await {
-            Ok(v) => Response::TrafficLog(v), Err(e) => Response::Error { message: e.to_string() },
+            Ok(v) => Response::TrafficLog { entries: v }, Err(e) => Response::Error { message: e.to_string() },
         },
         Request::GetSettings => match ctx.service.get_settings().await {
             Ok(s) => Response::Settings(s), Err(e) => Response::Error { message: e.to_string() },
@@ -280,6 +280,21 @@ async fn dispatch(ctx: &ConnCtx, req: Request, topics: &Arc<Mutex<HashSet<Topic>
                 Ok(_) => Response::GatewayUpdated { id },
                 Err(e) => Response::Error { message: e.to_string() },
             }
+        }
+        Request::GetGatewayConfig { gateway_id } => {
+            match ctx.service.get_gateway_config(gateway_id).await {
+                Ok((active_key_id, claude, claude_small, codex, gemini)) => Response::GatewayConfig {
+                    active_key_id,
+                    claude,
+                    claude_small,
+                    codex,
+                    gemini,
+                },
+                Err(e) => Response::Error { message: e.to_string() },
+            }
+        }
+        Request::SaveGatewayConfig { gateway_id, key_id, models } => {
+            ok_or_err!(ctx.service.save_gateway_config(gateway_id, key_id, models).await)
         }
     }
 }

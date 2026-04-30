@@ -27,6 +27,7 @@ pub struct Gateway {
     pub claude_small_model: Option<String>,
     pub codex_model: Option<String>,
     pub gemini_model: Option<String>,
+    pub preferred_key_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +96,17 @@ pub struct UsageSummary {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
+    pub requests: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSummaryByGateway {
+    pub gateway_id: String,
+    pub gateway_name: String,
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
     pub requests: i64,
 }
 
@@ -309,6 +321,28 @@ impl Database {
             conn.execute_batch("PRAGMA user_version = 8")?;
         }
 
+        // v9: per-gateway preferred_key_id so config can be saved without activating.
+        if version < 9 {
+            conn.execute_batch(
+                "ALTER TABLE gateways ADD COLUMN preferred_key_id TEXT;",
+            )?;
+            // Back-fill from active_config if the gateway matches.
+            let active: Option<(Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT gateway_id, key_id FROM active_config WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok();
+            if let Some((Some(gw_id), Some(key_id))) = active {
+                conn.execute(
+                    "UPDATE gateways SET preferred_key_id = ?1 WHERE id = ?2",
+                    params![key_id, gw_id],
+                )?;
+            }
+            conn.execute_batch("PRAGMA user_version = 9")?;
+        }
+
         Ok(Database {
             conn: Mutex::new(conn),
         })
@@ -325,8 +359,8 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO gateways (id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at,
-                                   claude_model, claude_small_model, codex_model, gemini_model)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                   claude_model, claude_small_model, codex_model, gemini_model, preferred_key_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 gw.id,
                 gw.name,
@@ -342,6 +376,7 @@ impl Database {
                 gw.claude_small_model,
                 gw.codex_model,
                 gw.gemini_model,
+                gw.preferred_key_id,
             ],
         )?;
         Ok(())
@@ -351,7 +386,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at,
-                    claude_model, claude_small_model, codex_model, gemini_model
+                    claude_model, claude_small_model, codex_model, gemini_model, preferred_key_id
              FROM gateways ORDER BY sort_order ASC, created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -370,6 +405,7 @@ impl Database {
                 claude_small_model: row.get(11)?,
                 codex_model: row.get(12)?,
                 gemini_model: row.get(13)?,
+                preferred_key_id: row.get(14)?,
             })
         })?;
         let mut gateways: Vec<Gateway> = rows.filter_map(|r| r.ok()).collect();
@@ -389,7 +425,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at,
-                    claude_model, claude_small_model, codex_model, gemini_model
+                    claude_model, claude_small_model, codex_model, gemini_model, preferred_key_id
              FROM gateways WHERE id = ?1",
         )?;
         let result = stmt.query_row(params![id], |row| {
@@ -408,6 +444,7 @@ impl Database {
                 claude_small_model: row.get(11)?,
                 codex_model: row.get(12)?,
                 gemini_model: row.get(13)?,
+                preferred_key_id: row.get(14)?,
             })
         });
         match result {
@@ -489,11 +526,11 @@ impl Database {
         Ok(())
     }
 
-    /// Persist per-gateway model preferences. Only overwrites fields that are
-    /// provided; passing None for a field leaves the stored value untouched.
-    pub fn update_gateway_models(
+    /// Persist per-gateway model preferences and preferred key.
+    pub fn update_gateway_config(
         &self,
         id: &str,
+        preferred_key_id: Option<&str>,
         claude: Option<&str>,
         claude_small: Option<&str>,
         codex: Option<&str>,
@@ -502,12 +539,13 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE gateways SET
-                claude_model       = COALESCE(?1, claude_model),
-                claude_small_model = COALESCE(?2, claude_small_model),
-                codex_model        = COALESCE(?3, codex_model),
-                gemini_model       = COALESCE(?4, gemini_model)
-             WHERE id = ?5",
-            params![claude, claude_small, codex, gemini, id],
+                preferred_key_id   = COALESCE(?1, preferred_key_id),
+                claude_model       = COALESCE(?2, claude_model),
+                claude_small_model = COALESCE(?3, claude_small_model),
+                codex_model        = COALESCE(?4, codex_model),
+                gemini_model       = COALESCE(?5, gemini_model)
+             WHERE id = ?6",
+            params![preferred_key_id, claude, claude_small, codex, gemini, id],
         )?;
         Ok(())
     }
@@ -866,5 +904,42 @@ impl Database {
             rows.filter_map(|r| r.ok()).collect()
         };
         Ok(entries)
+    }
+
+    /// Aggregate usage grouped by (gateway, model) for the TUI Usage tab.
+    pub fn get_usage_stats_by_gateway(
+        &self,
+        period: &str,
+    ) -> Result<Vec<UsageSummaryByGateway>, AppError> {
+        let since = match period {
+            "today"  => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
+            "7d"     => "strftime('%Y-%m-%dT%H', datetime('now', '-7 days'))".to_string(),
+            "30d"    => "strftime('%Y-%m-%dT%H', datetime('now', '-30 days'))".to_string(),
+            "all"    => "'0000'".to_string(),
+            _        => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
+        };
+
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT u.gateway_id, COALESCE(g.name, u.gateway_id), u.model,
+                    SUM(u.input_tokens), SUM(u.output_tokens), SUM(u.requests)
+             FROM usage_log u
+             LEFT JOIN gateways g ON g.id = u.gateway_id
+             WHERE u.hour >= ({since})
+             GROUP BY u.gateway_id, u.model
+             ORDER BY SUM(u.input_tokens) + SUM(u.output_tokens) DESC",
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(UsageSummaryByGateway {
+                gateway_id: row.get(0)?,
+                gateway_name: row.get(1)?,
+                model: row.get(2)?,
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                requests: row.get(5)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 }

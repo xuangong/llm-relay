@@ -7,7 +7,7 @@
 
 use crate::app::{
     event::AppEvent,
-    modal::{EditGatewayForm, Modal, ModalOutcome, ModalSubmit},
+    modal::{EditGatewayForm, Modal, ModalOutcome, ModalSubmit, SelectField, SelectKeyModelForm},
     state::{AppState, GatewayRow, Tab},
     terminal::Tui,
 };
@@ -30,6 +30,12 @@ fn into_row(g: GatewaySummary) -> GatewayRow {
         starred: g.starred,
         expanded: false,
         needs_login: g.needs_login,
+        active_key_name: g.active_key_name,
+        claude_model: g.claude_model,
+        claude_small_model: g.claude_small_model,
+        codex_model: g.codex_model,
+        gemini_model: g.gemini_model,
+        user_name: g.user_name,
     }
 }
 
@@ -140,7 +146,163 @@ async fn handle_submit(client: &Arc<IpcClient>, state: &mut AppState, submit: Mo
                 }
             }
         }
+        ModalSubmit::SaveConfig { gateway_id, key_id, models } => {
+            if let Some(Modal::SelectKeyModel(f)) = state.modal.as_mut() {
+                f.submitting = true;
+                f.error = None;
+            }
+            match client.request(Request::SaveGatewayConfig { gateway_id, key_id, models }).await {
+                Ok(Response::Ok) => {
+                    state.modal = None;
+                    state.status_message = Some("Config saved".to_string());
+                    if let Ok(resp) = client.request(Request::ListGateways).await {
+                        if let Some(rows) = gw_rows_from_response(resp) {
+                            state.replace_gateways(rows);
+                        }
+                    }
+                }
+                Ok(Response::Error { message }) => {
+                    if let Some(Modal::SelectKeyModel(f)) = state.modal.as_mut() {
+                        f.submitting = false;
+                        f.error = Some(message);
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    if let Some(Modal::SelectKeyModel(f)) = state.modal.as_mut() {
+                        f.submitting = false;
+                        f.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
     }
+}
+
+/// Open SelectKeyModel modal: show loading state immediately, then fetch in background.
+async fn open_select_key_model(
+    client: &Arc<IpcClient>,
+    state: &mut AppState,
+    gateway_id: uuid::Uuid,
+    gateway_name: String,
+    term: &mut crate::app::terminal::Tui,
+) -> std::io::Result<()> {
+    log::info!("open_select_key_model: gateway_id={gateway_id}");
+    // Show loading modal immediately.
+    state.modal = Some(Modal::SelectKeyModel(SelectKeyModelForm {
+        gateway_id,
+        gateway_name: gateway_name.clone(),
+        keys: vec![],
+        selected_key_idx: 0,
+        catalog: None,
+        claude_idx: 0,
+        claude_small_idx: 0,
+        codex_idx: 0,
+        gemini_idx: 0,
+        focus: SelectField::Key,
+        error: None,
+        submitting: false,
+        loading_models: true,
+    }));
+    term.draw(|f| crate::view::render(f, state))?;
+
+    // Fetch keys.
+    let keys = match client.request(Request::FetchKeys { gateway_id }).await {
+        Ok(Response::Keys { keys: k }) => k,
+        Ok(Response::Error { message }) => {
+            log::warn!("FetchKeys error: {message}");
+            if let Some(Modal::SelectKeyModel(f)) = state.modal.as_mut() {
+                f.loading_models = false;
+                f.error = Some(format!("FetchKeys: {message}"));
+            }
+            return Ok(());
+        }
+        Ok(_other) => {
+            if let Some(Modal::SelectKeyModel(f)) = state.modal.as_mut() {
+                f.loading_models = false;
+                f.error = Some("FetchKeys: unexpected response".into());
+            }
+            return Ok(());
+        }
+        Err(e) => {
+            log::warn!("FetchKeys failed: {e}");
+            if let Some(Modal::SelectKeyModel(f)) = state.modal.as_mut() {
+                f.loading_models = false;
+                f.error = Some(format!("FetchKeys: {e}"));
+            }
+            return Ok(());
+        }
+    };
+    if keys.is_empty() {
+        if let Some(Modal::SelectKeyModel(f)) = state.modal.as_mut() {
+            f.loading_models = false;
+            f.error = Some("No keys available".into());
+        }
+        return Ok(());
+    }
+
+    // Fetch saved config to pre-select key and models.
+    let (saved_key_id, saved_claude, saved_claude_small, saved_codex, saved_gemini) =
+        match client.request(Request::GetGatewayConfig { gateway_id }).await {
+            Ok(Response::GatewayConfig { active_key_id, claude, claude_small, codex, gemini }) => {
+                (active_key_id, claude, claude_small, codex, gemini)
+            }
+            _ => (None, None, None, None, None),
+        };
+
+    // Pre-select the saved key, or default to first.
+    let selected_key_idx = saved_key_id
+        .and_then(|kid| keys.iter().position(|k| k.id == kid))
+        .unwrap_or(0);
+    let key_id = keys[selected_key_idx].id;
+
+    let catalog = match client.request(Request::FetchModels { gateway_id, key_id }).await {
+        Ok(Response::Models { catalog: c }) => Some(c),
+        _ => None,
+    };
+
+    // Use saved models if available, otherwise auto-suggest.
+    let (claude_idx, claude_small_idx, codex_idx, gemini_idx) =
+        saved_model_indexes(&catalog, &saved_claude, &saved_claude_small, &saved_codex, &saved_gemini);
+
+    if let Some(Modal::SelectKeyModel(f)) = state.modal.as_mut() {
+        f.keys = keys;
+        f.selected_key_idx = selected_key_idx;
+        f.catalog = catalog;
+        f.claude_idx = claude_idx;
+        f.claude_small_idx = claude_small_idx;
+        f.codex_idx = codex_idx;
+        f.gemini_idx = gemini_idx;
+        f.loading_models = false;
+    }
+    Ok(())
+}
+
+fn saved_model_indexes(
+    catalog: &Option<llm_relay_core::ipc::ModelCatalog>,
+    saved_claude: &Option<String>,
+    saved_claude_small: &Option<String>,
+    saved_codex: &Option<String>,
+    saved_gemini: &Option<String>,
+) -> (usize, usize, usize, usize) {
+    let cat = match catalog {
+        Some(c) => c,
+        None => return (0, 0, 0, 0),
+    };
+    let find = |list: &[String], saved: &Option<String>, fallback: &str| -> usize {
+        if let Some(s) = saved {
+            if let Some(pos) = list.iter().position(|m| m == s) {
+                return pos;
+            }
+        }
+        list.iter().position(|m| m.contains(fallback)).unwrap_or(0)
+    };
+    (
+        find(&cat.claude, saved_claude, "opus"),
+        find(&cat.claude, saved_claude_small, "haiku"),
+        find(&cat.codex, saved_codex, ""),
+        find(&cat.gemini, saved_gemini, ""),
+    )
 }
 
 pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf) -> std::io::Result<()> {
@@ -164,8 +326,11 @@ pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf)
                         KeyCode::BackTab => AppEvent::PrevTab,
                         KeyCode::Up => AppEvent::Up,
                         KeyCode::Down => AppEvent::Down,
+                        KeyCode::Left => AppEvent::Left,
+                        KeyCode::Right => AppEvent::Right,
                         KeyCode::Enter => AppEvent::Enter,
                         KeyCode::Esc => AppEvent::Esc,
+                        KeyCode::Backspace => AppEvent::Backspace,
                         KeyCode::Char('r') => AppEvent::Refresh,
                         // 'a' is context-sensitive: disambiguated after state.handle() below.
                         KeyCode::Char(c) => AppEvent::Char(c),
@@ -319,7 +484,21 @@ pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf)
                             state.modal = None;
                         }
                         ModalOutcome::PassThrough => {
+                            // Check if this is a LoginCompleted event — auto-open key/model select.
+                            let login_gw = if let AppEvent::Ipc(llm_relay_core::ipc::Event::LoginCompleted { gateway_id, .. }) = &evt {
+                                // Grab gateway info before state.handle consumes the event.
+                                let gname = state.gateways.iter()
+                                    .find(|r| r.id == *gateway_id)
+                                    .map(|r| r.name.clone());
+                                Some((*gateway_id, gname))
+                            } else {
+                                None
+                            };
                             state.handle(evt);
+                            // After login completes, auto-open SelectKeyModel.
+                            if let Some((gid, Some(gname))) = login_gw {
+                                open_select_key_model(&client, &mut state, gid, gname, &mut term).await?;
+                            }
                         }
                         ModalOutcome::Submit(ms) => {
                             handle_submit(&client, &mut state, ms).await;
@@ -335,6 +514,10 @@ pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf)
                 // ── Context-sensitive pre-checks before state.handle ─────────
                 let is_toggle_auto_launch =
                     matches!(&evt, AppEvent::Char('a')) && state.active_tab == Tab::Settings;
+                let is_toggle_auto_failover =
+                    matches!(&evt, AppEvent::Char('f')) && state.active_tab == Tab::Settings;
+                let is_shutdown_agent =
+                    matches!(&evt, AppEvent::Char('S')) && state.active_tab == Tab::Settings;
 
                 // Open AddGateway modal on 'a' in Gateways tab.
                 if matches!(&evt, AppEvent::Char('a'))
@@ -412,6 +595,85 @@ pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf)
                     continue;
                 }
 
+                // Set active gateway on 's' in Gateways tab.
+                if matches!(&evt, AppEvent::Char('s'))
+                    && state.active_tab == Tab::Gateways
+                {
+                    if let Some(row) = state.gateways.get(state.selected_row) {
+                        let gid = row.id;
+                        match client.request(Request::GetGatewayConfig { gateway_id: gid }).await {
+                            Ok(Response::GatewayConfig { active_key_id: Some(key_id), claude, claude_small, codex, gemini }) => {
+                                let models = llm_relay_core::ipc::ModelSelection {
+                                    claude, claude_small, codex, gemini,
+                                };
+                                match client.request(Request::SetActive { gateway_id: gid, key_id, models }).await {
+                                    Ok(Response::Ok) => {
+                                        state.status_message = Some(format!("Activated: {}", row.name));
+                                    }
+                                    Ok(Response::Error { message }) => {
+                                        state.status_message = Some(format!("SetActive failed: {message}"));
+                                    }
+                                    _ => {}
+                                }
+                                // Refresh gateway list to reflect active state.
+                                if let Ok(resp) = client.request(Request::ListGateways).await {
+                                    if let Some(rows) = gw_rows_from_response(resp) {
+                                        state.replace_gateways(rows);
+                                    }
+                                }
+                            }
+                            Ok(Response::GatewayConfig { active_key_id: None, .. }) => {
+                                state.status_message = Some("No key configured — press 'k' to set up".to_string());
+                            }
+                            Ok(Response::Error { message }) => {
+                                state.status_message = Some(format!("Error: {message}"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    term.draw(|f| crate::view::render(f, &state))?;
+                    continue;
+                }
+
+                // Open SelectKeyModel modal on 'k' in Gateways tab.
+                if matches!(&evt, AppEvent::Char('k'))
+                    && state.active_tab == Tab::Gateways
+                    && state.modal.is_none()
+                {
+                    if let Some(row) = state.gateways.get(state.selected_row) {
+                        let gid = row.id;
+                        let gname = row.name.clone();
+                        open_select_key_model(&client, &mut state, gid, gname, &mut term).await?;
+                    }
+                    term.draw(|f| crate::view::render(f, &state))?;
+                    continue;
+                }
+
+                // Move gateway up/down with U/D in Gateways tab.
+                if matches!(&evt, AppEvent::Char('U') | AppEvent::Char('D'))
+                    && state.active_tab == Tab::Gateways
+                    && state.gateways.len() > 1
+                {
+                    let moving_up = matches!(&evt, AppEvent::Char('U'));
+                    let idx = state.selected_row;
+                    let can_move = if moving_up { idx > 0 } else { idx + 1 < state.gateways.len() };
+                    if can_move {
+                        let swap_idx = if moving_up { idx - 1 } else { idx + 1 };
+                        state.gateways.swap(idx, swap_idx);
+                        state.selected_row = swap_idx;
+                        // Rebuild index.
+                        state.gateway_index.clear();
+                        for (i, row) in state.gateways.iter().enumerate() {
+                            state.gateway_index.insert(row.id, i);
+                        }
+                        // Persist new order.
+                        let ids: Vec<uuid::Uuid> = state.gateways.iter().map(|r| r.id).collect();
+                        let _ = client.request(Request::Reorder { ids }).await;
+                    }
+                    term.draw(|f| crate::view::render(f, &state))?;
+                    continue;
+                }
+
                 // ── Normal event dispatch ────────────────────────────────────
                 if matches!(evt, AppEvent::Refresh) {
                     if let Ok(resp) = client.request(Request::ListGateways).await {
@@ -441,8 +703,27 @@ pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf)
                     let _ = client
                         .request(Request::SetAutoLaunch { enabled: !current })
                         .await;
-                    // Re-fetch to reflect the change.
                     fetch_settings(&client, &mut state).await;
+                }
+
+                // Context-sensitive 'f' on Settings tab: toggle auto-failover.
+                if is_toggle_auto_failover {
+                    let current = state
+                        .settings
+                        .snapshot
+                        .as_ref()
+                        .map(|s| s.auto_failover)
+                        .unwrap_or(false);
+                    let _ = client
+                        .request(Request::SetAutoFailover { enabled: !current })
+                        .await;
+                    fetch_settings(&client, &mut state).await;
+                }
+
+                // Context-sensitive 'S' on Settings tab: shutdown agent + quit TUI.
+                if is_shutdown_agent {
+                    let _ = client.request(Request::Shutdown).await;
+                    state.should_quit = true;
                 }
 
                 // On tab switch, fetch data for the newly activated tab.

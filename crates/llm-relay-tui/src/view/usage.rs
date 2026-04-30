@@ -69,7 +69,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     ts.select(Some(state.usage.selected));
     frame.render_stateful_widget(table, chunks[1], &mut ts);
 
-    let hint = Paragraph::new("p cycle range  r refresh  Tab next  q quit")
+    let hint = Paragraph::new("↑/↓ select  p cycle range  r refresh  Tab next  q quit")
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hint, chunks[2]);
 }

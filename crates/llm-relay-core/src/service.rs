@@ -94,26 +94,34 @@ impl Service {
         let active_gw_id = active.as_ref().and_then(|a| a.gateway_id.clone());
         let active_key_value = active.as_ref().and_then(|a| a.key_value.clone());
 
+        let active_key_name = active.as_ref().and_then(|a| a.key_name.clone());
+
         let mut summaries = Vec::with_capacity(gateways.len());
         for gw in gateways {
             let health = self.db.get_health(&gw.id).ok().flatten();
             let id = Uuid::parse_str(&gw.id).unwrap_or_default();
             let is_active = active_gw_id.as_deref() == Some(gw.id.as_str());
-            // `needs_login` if neither the gateway's stored auth_key nor (when
-            // this is the active gateway) the active key_value is populated.
             let active_key_empty = active_key_value
                 .as_deref()
                 .map(|s| s.is_empty())
                 .unwrap_or(true);
-            let needs_login = gw.auth_key.is_empty() && (!is_active || active_key_empty);
+            let has_auth = !gw.auth_key.is_empty()
+                || gw.session_token.as_deref().is_some_and(|s| !s.is_empty());
+            let needs_login = !has_auth && (!is_active || active_key_empty);
             summaries.push(crate::ipc::GatewaySummary {
                 id,
                 name: gw.name,
                 url: gw.url,
-                starred: false,
+                starred: is_active,
                 healthy: health.as_ref().map(|h| h.is_healthy),
                 latency_ms: health.as_ref().and_then(|h| h.latency_ms),
                 needs_login,
+                active_key_name: if is_active { active_key_name.clone() } else { None },
+                claude_model: gw.claude_model,
+                claude_small_model: gw.claude_small_model,
+                codex_model: gw.codex_model,
+                gemini_model: gw.gemini_model,
+                user_name: gw.user_name,
             });
         }
         Ok(summaries)
@@ -160,6 +168,7 @@ impl Service {
             claude_small_model: None,
             codex_model: None,
             gemini_model: None,
+            preferred_key_id: None,
         };
         self.db.add_gateway(&gw)?;
         Ok(id)
@@ -199,14 +208,25 @@ impl Service {
         let gw_id_str = gateway_id.to_string();
         let key_id_str = key_id.to_string();
 
-        // Fetch current config to preserve key_name / key_value
+        // Fetch the key value from the gateway so the proxy can forward with it.
+        let gw = self.db.get_gateway(&gw_id_str)?
+            .ok_or_else(|| AppError::Config(format!("gateway {gateway_id} not found")))?;
+        let auth = gw.session_token.as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&gw.auth_key);
+        let keys = crate::gateway::fetch_keys(&gw.url, auth).await?;
+        let matched_key = keys.iter().find(|k| k.id == key_id_str);
+        let key_name = matched_key.map(|k| k.name.clone());
+        let key_value = matched_key.map(|k| k.key.clone());
+
+        // Fetch current config to preserve auto_switch / last_switched_at
         let existing = self.db.get_active_config()?;
 
         let config = ActiveConfig {
             gateway_id: Some(gw_id_str),
             key_id: Some(key_id_str),
-            key_name: existing.key_name,
-            key_value: existing.key_value,
+            key_name,
+            key_value,
             claude_model: models.claude.clone(),
             claude_small_model: models.claude_small.clone(),
             codex_model: models.codex.clone(),
@@ -217,18 +237,26 @@ impl Service {
         };
         self.db.set_active_config(&config)?;
 
-        // Persist per-gateway model preferences
-        self.db.update_gateway_models(
+        // Persist per-gateway model preferences + key
+        self.db.update_gateway_config(
             &gateway_id.to_string(),
+            Some(&key_id.to_string()),
             models.claude.as_deref(),
             models.claude_small.as_deref(),
             models.codex.as_deref(),
             models.gemini.as_deref(),
         )?;
 
-        // Apply CLI config files if we have a key value
-        // TODO wire apply_active: retrieve key_value from keychain and call apply_all_configs
-        // For now, emit the event so the GUI can react.
+        // Apply CLI config files so claude/codex/gemini CLIs use the proxy.
+        let proxy_url = crate::proxy_server::proxy_base_url();
+        crate::config_writer::apply_all_configs(
+            &proxy_url,
+            crate::proxy_server::PLACEHOLDER_KEY,
+            models.claude.as_deref(),
+            models.claude_small.as_deref(),
+            models.codex.as_deref(),
+            models.gemini.as_deref(),
+        )?;
 
         crate::events::emit_typed(
             &*self.sink,
@@ -313,6 +341,7 @@ impl Service {
             .map(|k| KeyInfo {
                 id: Uuid::parse_str(&k.id).unwrap_or_default(),
                 name: k.name,
+                key: k.key,
             })
             .collect())
     }
@@ -465,13 +494,26 @@ impl Service {
     }
 
     /// Return per-gateway, per-model usage rows for the TUI Usage tab.
-    ///
-    /// Not yet wired to the DB. Returns `NotImplemented` so the TUI can show a
-    /// banner instead of an empty table that misleadingly looks "successful".
-    pub async fn get_usage_rows(&self, _range: UsageRange) -> Result<Vec<UsageRowDetail>, AppError> {
-        Err(AppError::NotImplemented(
-            "usage rows not yet wired to DB".into(),
-        ))
+    pub async fn get_usage_rows(&self, range: UsageRange) -> Result<Vec<UsageRowDetail>, AppError> {
+        let period = match range {
+            UsageRange::Today => "today",
+            UsageRange::Last7Days => "7d",
+            UsageRange::Last30Days => "30d",
+            UsageRange::AllTime => "all",
+        };
+        let stats = self.db.get_usage_stats_by_gateway(period)?;
+        Ok(stats
+            .into_iter()
+            .map(|s| UsageRowDetail {
+                gateway_id: uuid::Uuid::parse_str(&s.gateway_id).unwrap_or_default(),
+                gateway_name: s.gateway_name,
+                model: s.model,
+                requests: s.requests as u64,
+                input_tokens: s.input_tokens as u64,
+                output_tokens: s.output_tokens as u64,
+                cost_usd: 0.0,
+            })
+            .collect())
     }
 
     /// Return recent error rows for the TUI Errors tab.
@@ -479,10 +521,23 @@ impl Service {
     /// Not yet wired to a real `error_log` table. Returns `NotImplemented` so
     /// the TUI surfaces the gap rather than presenting an empty (and untrue)
     /// "no errors" view.
-    pub async fn get_errors(&self, _limit: u32) -> Result<Vec<ErrorRow>, AppError> {
-        Err(AppError::NotImplemented(
-            "error rows not yet wired to DB".into(),
-        ))
+    pub async fn get_errors(&self, limit: u32) -> Result<Vec<ErrorRow>, AppError> {
+        let entries = self.db.get_traffic_log(None, limit as usize)?;
+        Ok(entries
+            .into_iter()
+            .filter(|e| e.status >= 400 || e.error_detail.is_some())
+            .map(|e| {
+                let kind = if e.status == 401 { "auth" }
+                    else if e.status >= 500 { "proxy" }
+                    else { "error" };
+                ErrorRow {
+                    timestamp_iso: e.logged_at,
+                    gateway_name: e.gateway_name.unwrap_or_default(),
+                    kind: kind.to_string(),
+                    message: e.error_detail.unwrap_or_else(|| format!("HTTP {}", e.status)),
+                }
+            })
+            .collect())
     }
 
     /// Return a TuiSettings snapshot for the Settings tab.
@@ -502,6 +557,7 @@ impl Service {
         // user intent, not actual OS state.
         log::warn!("auto_launch not yet implemented: returning DB-stored intent only");
         let auto_launch = self.db.get_setting("auto_launch")?.as_deref() == Some("true");
+        let auto_failover = self.db.get_setting("auto_failover")?.as_deref() == Some("true");
         let keystore_str = match keystore_kind {
             KeystoreKind::System => "system".to_string(),
             KeystoreKind::EncryptedFile => "encrypted-file".to_string(),
@@ -514,6 +570,7 @@ impl Service {
             proxy_port,
             log_path,
             auto_launch,
+            auto_failover,
         })
     }
 
@@ -547,6 +604,46 @@ impl Service {
             auth_key: None,
         })
         .await
+    }
+
+    /// Persist session_token after a successful device-code login.
+    pub async fn save_login_session(
+        &self,
+        gateway_id: Uuid,
+        session_token: String,
+        _user_id: Option<String>,
+        _user_name: Option<String>,
+    ) -> Result<(), AppError> {
+        let id_str = gateway_id.to_string();
+        self.db.update_gateway_session(&id_str, false, Some(&session_token))?;
+        Ok(())
+    }
+
+    /// Get the active key_id and model preferences for a gateway.
+    pub async fn get_gateway_config(&self, gateway_id: Uuid) -> Result<(Option<Uuid>, Option<String>, Option<String>, Option<String>, Option<String>), AppError> {
+        let id_str = gateway_id.to_string();
+        let gw = self.db.get_gateway(&id_str)?
+            .ok_or_else(|| AppError::Config(format!("gateway {gateway_id} not found")))?;
+        let preferred = gw.preferred_key_id.and_then(|k| Uuid::parse_str(&k).ok());
+        Ok((preferred, gw.claude_model, gw.claude_small_model, gw.codex_model, gw.gemini_model))
+    }
+
+    /// Save key + model config for a gateway without activating it.
+    pub async fn save_gateway_config(
+        &self,
+        gateway_id: Uuid,
+        key_id: Uuid,
+        models: ModelSelection,
+    ) -> Result<(), AppError> {
+        self.db.update_gateway_config(
+            &gateway_id.to_string(),
+            Some(&key_id.to_string()),
+            models.claude.as_deref(),
+            models.claude_small.as_deref(),
+            models.codex.as_deref(),
+            models.gemini.as_deref(),
+        )?;
+        Ok(())
     }
 }
 

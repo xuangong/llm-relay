@@ -29,8 +29,8 @@ pub enum Request {
     DeleteGateway { id: Uuid },
     SetActive { gateway_id: Uuid, key_id: Uuid, models: ModelSelection },
     ClearActive,
-    SetAutoFailover(bool),
-    Reorder(Vec<Uuid>),
+    SetAutoFailover { enabled: bool },
+    Reorder { ids: Vec<Uuid> },
     GetUsage { range: TimeRange, gateway_id: Option<Uuid> },
     GetTrafficLog { gateway_id: Option<Uuid> },
     StartLogin { gateway_id: Uuid },
@@ -53,6 +53,10 @@ pub enum Request {
     AddGatewaySimple { name: String, url: String },
     /// TUI: update a gateway's name and url.
     UpdateGatewaySimple { id: Uuid, name: String, url: String },
+    /// TUI: get the active key_id + model preferences for a gateway.
+    GetGatewayConfig { gateway_id: Uuid },
+    /// TUI: save key + model config for a gateway without activating it.
+    SaveGatewayConfig { gateway_id: Uuid, key_id: Uuid, models: ModelSelection },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,11 +73,11 @@ pub enum Response {
         expires_in_secs: u64,
     },
     LoginCancelled { gateway_id: Uuid },
-    Keys(Vec<KeyInfo>),
-    Models(ModelCatalog),
+    Keys { keys: Vec<KeyInfo> },
+    Models { catalog: ModelCatalog },
     Settings(Settings),
     Usage(UsageReport),
-    TrafficLog(Vec<TrafficEntry>),
+    TrafficLog { entries: Vec<TrafficEntry> },
     GatewayList { gateways: Vec<GatewaySummary> },
     /// TUI: per-gateway usage rows (see `UsageRowDetail`).
     UsageRows { rows: Vec<UsageRowDetail> },
@@ -87,6 +91,14 @@ pub enum Response {
     GatewayCreated { id: Uuid },
     /// TUI: gateway updated.
     GatewayUpdated { id: Uuid },
+    /// TUI: active key + model config for a gateway.
+    GatewayConfig {
+        active_key_id: Option<Uuid>,
+        claude: Option<String>,
+        claude_small: Option<String>,
+        codex: Option<String>,
+        gemini: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +239,8 @@ pub struct TrafficEntry {
 pub struct KeyInfo {
     pub id: Uuid,
     pub name: String,
+    /// The actual API key value, needed for proxy forwarding.
+    pub key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,11 +251,20 @@ pub struct GatewaySummary {
     pub starred: bool,
     pub healthy: Option<bool>,
     pub latency_ms: Option<i64>,
-    /// True when neither the gateway's stored `auth_key` nor the active
-    /// config's `key_value` is populated. Proxy traffic in this state will be
-    /// rejected with 401 by the proxy server, so the TUI surfaces a 🔒 hint.
     #[serde(default)]
     pub needs_login: bool,
+    #[serde(default)]
+    pub active_key_name: Option<String>,
+    #[serde(default)]
+    pub claude_model: Option<String>,
+    #[serde(default)]
+    pub claude_small_model: Option<String>,
+    #[serde(default)]
+    pub codex_model: Option<String>,
+    #[serde(default)]
+    pub gemini_model: Option<String>,
+    #[serde(default)]
+    pub user_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -278,6 +301,6 @@ pub struct TuiSettings {
     pub socket_path: String,
     pub proxy_port: u16,
     pub log_path: String,
-    /// TODO: wire to a real persistent setting.
     pub auto_launch: bool,
+    pub auto_failover: bool,
 }

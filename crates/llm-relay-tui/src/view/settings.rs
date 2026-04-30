@@ -22,7 +22,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             kv_owned(
                 "Auto-launch on boot",
                 if s.auto_launch { "ON".to_string() } else { "OFF".to_string() },
-                if s.auto_launch { Color::Green } else { Color::DarkGray },
+                if s.auto_launch { Color::Green } else { Color::Gray },
+            ),
+            kv_owned(
+                "Auto-failover",
+                if s.auto_failover { "ON".to_string() } else { "OFF".to_string() },
+                if s.auto_failover { Color::Green } else { Color::Gray },
             ),
         ],
     };
@@ -30,7 +35,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         .block(Block::default().borders(Borders::ALL).title("Settings"));
     frame.render_widget(p, chunks[0]);
 
-    let hint = Paragraph::new("a toggle auto-launch  r refresh  Tab next  q quit")
+    let hint = Paragraph::new("a toggle auto-launch  f toggle failover  S shutdown agent  r refresh  Tab next  q quit")
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hint, chunks[1]);
 }

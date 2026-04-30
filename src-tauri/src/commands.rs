@@ -287,8 +287,9 @@ pub async fn apply_config(
     // switching to another gateway and back.
     state
         .db
-        .update_gateway_models(
+        .update_gateway_config(
             &gateway_id,
+            None, // GUI doesn't set preferred_key_id here
             config.claude_model.as_deref(),
             config.claude_small_model.as_deref(),
             config.codex_model.as_deref(),
