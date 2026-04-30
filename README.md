@@ -49,7 +49,7 @@ LLM Relay 在本地启动一个 HTTP 代理（`127.0.0.1:18080`），CLI 工具�
 
 - **Claude Code** → `ANTHROPIC_BASE_URL=http://127.0.0.1:18080`
 - **Codex CLI** → `base_url=http://127.0.0.1:18080/`
-- **Gemini CLI** → `GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:18080`
+- **Gemini CLI** → `GEMINI_API_BASE_URL` + `GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:18080`（同时写入两个变量名以兼容新旧 Gemini CLI）
 
 ### 🎯 核心功能
 
@@ -155,7 +155,7 @@ claude "hello"
 # Codex：~/.codex/config.toml 已写入 base_url
 codex
 
-# Gemini：~/.gemini/.env 已写入 GOOGLE_GEMINI_BASE_URL
+# Gemini：~/.gemini/.env 已写入 GEMINI_API_BASE_URL + GOOGLE_GEMINI_BASE_URL（兼容新旧 CLI）
 gemini
 ```
 

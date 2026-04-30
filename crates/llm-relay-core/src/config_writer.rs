@@ -366,9 +366,12 @@ pub fn write_gemini_config(base_url: &str, api_key: &str) -> Result<(), AppError
         HashMap::new()
     };
 
-    // Check if update needed
+    // Check if update needed. Write both the legacy (GEMINI_API_BASE_URL) and
+    // the new (GOOGLE_GEMINI_BASE_URL) variable names so older and newer Gemini
+    // CLI versions both pick up the relay base URL.
     let needs_update = env_map.get("GEMINI_API_KEY") != Some(&api_key.to_string())
-        || env_map.get("GOOGLE_GEMINI_BASE_URL") != Some(&base_url.to_string());
+        || env_map.get("GOOGLE_GEMINI_BASE_URL") != Some(&base_url.to_string())
+        || env_map.get("GEMINI_API_BASE_URL") != Some(&base_url.to_string());
 
     if !needs_update {
         // Config already correct, skip write
@@ -377,6 +380,7 @@ pub fn write_gemini_config(base_url: &str, api_key: &str) -> Result<(), AppError
 
     env_map.insert("GEMINI_API_KEY".to_string(), api_key.to_string());
     env_map.insert("GOOGLE_GEMINI_BASE_URL".to_string(), base_url.to_string());
+    env_map.insert("GEMINI_API_BASE_URL".to_string(), base_url.to_string());
 
     let content = serialize_env_file(&env_map);
     atomic_write(&env_path, content.as_bytes())?;
@@ -429,6 +433,7 @@ pub fn clear_gemini_config() -> Result<(), AppError> {
     let mut env_map = parse_env_file(&content);
     env_map.remove("GEMINI_API_KEY");
     env_map.remove("GOOGLE_GEMINI_BASE_URL");
+    env_map.remove("GEMINI_API_BASE_URL");
 
     let content = serialize_env_file(&env_map);
     atomic_write(&env_path, content.as_bytes())

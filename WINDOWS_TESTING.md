@@ -160,7 +160,7 @@ type C:\Users\%USERNAME%\.gemini\settings.json
 
 验证：
 - [ ] 配置文件成功创建/更新
-- [ ] `ANTHROPIC_BASE_URL` / `base_url` / `GOOGLE_GEMINI_BASE_URL` 指向 `http://127.0.0.1:18080`
+- [ ] `ANTHROPIC_BASE_URL` / `base_url` / `GEMINI_API_BASE_URL` + `GOOGLE_GEMINI_BASE_URL` 指向 `http://127.0.0.1:18080`（Gemini 同时写入两个变量名以兼容新旧 CLI）
 - [ ] API Key 设置为 `llm-relay-local`（placeholder）
 
 #### 6. 测试 CLI 工具实际使用
