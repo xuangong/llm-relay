@@ -149,6 +149,12 @@ impl AppState {
                         f.state = LoginUiState::Completed;
                     }
                 }
+                // Clear needs_login flag on the gateway row.
+                if let Some(&idx) = self.gateway_index.get(&gateway_id) {
+                    if let Some(row) = self.gateways.get_mut(idx) {
+                        row.needs_login = false;
+                    }
+                }
             }
             IpcEvent::LoginFailed { gateway_id, message } => {
                 use crate::app::modal::LoginUiState;

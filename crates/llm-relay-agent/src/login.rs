@@ -154,7 +154,7 @@ async fn poll_until_done(
         tokio::time::sleep(interval).await;
         match gateway::poll_device_code(url, device_code).await {
             Ok(resp) => match resp.status.as_str() {
-                "approved" | "completed" | "ok" => {
+                "approved" | "complete" | "completed" | "ok" => {
                     return LoginOutcome::Completed {
                         session_token: resp.session_token.unwrap_or_default(),
                         user_id: resp.user_id,

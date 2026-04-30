@@ -26,12 +26,7 @@ pub enum ClientError {
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
 
-#[cfg(unix)]
-type Stream = tokio::net::UnixStream;
-#[cfg(windows)]
-type Stream = interprocess::os::windows::named_pipe::tokio::DuplexPipeStream<
-    interprocess::os::windows::named_pipe::pipe_mode::Bytes,
->;
+type Stream = interprocess::local_socket::tokio::Stream;
 
 pub struct IpcClient {
     writer: Arc<Mutex<tokio::io::WriteHalf<Stream>>>,
@@ -42,15 +37,7 @@ pub struct IpcClient {
 
 impl IpcClient {
     pub async fn connect(socket: &Path) -> Result<Arc<Self>, ClientError> {
-        #[cfg(unix)]
-        let stream = tokio::net::UnixStream::connect(socket).await?;
-        #[cfg(windows)]
-        let stream = {
-            let s = socket.to_string_lossy().to_string();
-            interprocess::os::windows::named_pipe::tokio::DuplexPipeStream::<
-                interprocess::os::windows::named_pipe::pipe_mode::Bytes,
-            >::connect(s).await?
-        };
+        let stream = llm_relay_core::ipc::transport::connect(socket).await?;
 
         let (read_half, write_half) = tokio::io::split(stream);
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));

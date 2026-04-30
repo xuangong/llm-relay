@@ -64,13 +64,17 @@ pub async fn ensure_agent(
     socket: &Path,
     mode: EnsureMode,
 ) -> Result<AgentHandle, BootstrapError> {
-    if socket.exists() {
+    // On Unix, check if the socket file exists before attempting connect.
+    // On Windows, named pipes live in kernel namespace — always try connect.
+    let should_try_attach = if cfg!(unix) { socket.exists() } else { true };
+    if should_try_attach {
         if let Ok(client) = IpcClient::connect(socket).await {
             if client.request(Request::Ping).await.is_ok() {
                 return Ok(AgentHandle::Attached(client));
             }
         }
         // Stale socket: remove and fall through to spawn (or error if AttachOnly).
+        #[cfg(unix)]
         let _ = std::fs::remove_file(socket);
     }
 
@@ -111,6 +115,10 @@ pub async fn ensure_agent(
                     return Err(BootstrapError::Timeout);
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
+                // On Unix the socket is a filesystem entry we can probe cheaply;
+                // on Windows the IPC transport uses a named pipe in the kernel
+                // namespace — there is no file to stat, so skip the exists() guard.
+                #[cfg(unix)]
                 if !socket.exists() {
                     continue;
                 }

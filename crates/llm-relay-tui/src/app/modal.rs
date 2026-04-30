@@ -180,6 +180,7 @@ fn login_handle(event: &AppEvent) -> ModalOutcome {
     match event {
         AppEvent::Esc => ModalOutcome::Close,
         AppEvent::Char('c') => ModalOutcome::Consumed, // copy handled in loop_ — needs IO
+        AppEvent::Ipc(_) => ModalOutcome::PassThrough, // let IPC events reach state.apply_ipc
         _ => ModalOutcome::Consumed,
     }
 }

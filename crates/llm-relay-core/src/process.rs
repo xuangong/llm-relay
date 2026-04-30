@@ -19,6 +19,6 @@ pub fn is_alive(pid: u32) -> bool {
         let mut code: u32 = 0;
         let ok = GetExitCodeProcess(h, &mut code) != 0;
         CloseHandle(h);
-        ok && code as i32 == STILL_ACTIVE.0
+        ok && code as i32 == STILL_ACTIVE
     }
 }

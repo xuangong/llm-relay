@@ -1,3 +1,7 @@
+// These tests use tokio::net::UnixListener to mock the agent side;
+// on Windows the IPC transport uses named pipes — see ipc/transport.rs.
+#![cfg(unix)]
+
 use llm_relay_tui::bootstrap::{ensure_agent, EnsureMode};
 
 #[tokio::test]
