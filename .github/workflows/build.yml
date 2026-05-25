@@ -10,7 +10,31 @@ permissions:
   contents: write
 
 jobs:
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    name: Create draft release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --title "LLM Relay ${{ github.ref_name }}" \
+            --notes-file RELEASE_NOTES.md \
+            --draft \
+            --verify-tag || \
+          gh release edit ${{ github.ref_name }} \
+            --title "LLM Relay ${{ github.ref_name }}" \
+            --notes-file RELEASE_NOTES.md \
+            --draft=true
+
   gui:
+    needs: create-release
+    if: startsWith(github.ref, 'refs/tags/')
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +93,8 @@ jobs:
           args: --target ${{ matrix.target }}
 
   cli:
+    needs: create-release
+    if: startsWith(github.ref, 'refs/tags/')
     strategy:
       fail-fast: false
       matrix:
