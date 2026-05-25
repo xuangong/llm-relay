@@ -250,7 +250,7 @@ src-tauri/target/release/bundle/
 ├── rpm/
 │   └── llm-relay-0.3.0-1.x86_64.rpm   # Fedora/RHEL 包
 └── appimage/
-    └── llm-relay_0.3.0_amd64.AppImage # AppImage（通用）
+    └── llm-relay_0.3.0_amd64.AppImage # AppImage
 ```
 
 ### 选择打包格式
