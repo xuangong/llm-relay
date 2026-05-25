@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -87,7 +86,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'LLM Relay ${{ github.ref_name }}'
-          releaseBody: 'See RELEASE_NOTES.md and the assets to download and install this version.'
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
