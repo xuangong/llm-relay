@@ -1,6 +1,6 @@
 # 构建指南
 
-本文档说明如何为 macOS、Windows、Linux 构建 LLM Relay 安装包（v0.3.0+）。
+本文档说明如何构建 LLM Relay（v0.3.0+）。官方 release 发布 GUI：macOS Universal + Windows x64；发布 TUI/agent：Linux x64 + macOS Apple Silicon + macOS Intel。
 
 ## 目录
 
@@ -101,13 +101,14 @@ pnpm tauri build
 
 ### 构建产物位置
 
-```
-src-tauri/target/release/bundle/
+官方 release 使用 Universal DMG，同时支持 Apple Silicon 和 Intel：
+
+```text
+src-tauri/target/universal-apple-darwin/release/bundle/
 ├── macos/
-│   └── LLM Relay.app          # 应用程序包
+│   └── LLM Relay.app
 └── dmg/
-    └── LLM Relay_0.3.0_aarch64.dmg    # Apple Silicon (M1/M2/M3)
-    └── LLM Relay_0.3.0_x64.dmg        # Intel (如果在 Intel Mac 上构建)
+    └── LLM Relay_0.3.0_universal.dmg
 ```
 
 ### 为不同架构构建
@@ -128,9 +129,10 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm tauri build --target universal-apple-darwin
 ```
 
-两个 DMG 会分别落在：
-- `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_aarch64.dmg`
-- `src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_x64.dmg`
+Universal DMG 会落在：
+- `src-tauri/target/universal-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_universal.dmg`
+
+如需本地调试单架构包，也可以分别使用 `aarch64-apple-darwin` 或 `x86_64-apple-darwin` 目标构建；这些单架构 DMG 不是官方 release 资产。
 
 ### 代码签名（可选）
 
@@ -214,7 +216,9 @@ pnpm tauri build
 
 ---
 
-## Linux 构建
+## Linux GUI 源码构建（非官方 release 资产）
+
+Linux GUI 包可从源码构建用于自用或调试，但官方 release 暂不发布 Linux GUI `.deb` / `.rpm` / `.AppImage`。Linux 服务器场景请使用 TUI + 无头 agent release 二进制。
 
 ### 在 Linux 上构建
 
@@ -357,7 +361,7 @@ gh auth login
 
 ### macOS 本地构建 + 上传
 
-在 Apple Silicon Mac 上一次出两个架构：
+在 Apple Silicon Mac 上构建 Universal DMG：
 
 ```bash
 cd llm-relay
@@ -366,36 +370,33 @@ cd llm-relay
 git tag v0.3.0        # 已打过就跳过
 git push origin v0.3.0
 
-# 2. 本地构建两个架构
+# 2. 本地构建 Universal GUI
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm install
-pnpm tauri build --target aarch64-apple-darwin
-pnpm tauri build --target x86_64-apple-darwin
+pnpm tauri build --target universal-apple-darwin
 
 # 3. 把 DMG 传到 release（release 不存在时会自动创建）
 gh release create v0.3.0 \
   --title "v0.3.0" \
   --notes-file RELEASE_NOTES.md \
   --draft \
-  "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_aarch64.dmg" \
-  "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_x64.dmg"
+  "src-tauri/target/universal-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_universal.dmg"
 
 # release 已存在时追加资产
 gh release upload v0.3.0 \
-  "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_aarch64.dmg" \
-  "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_x64.dmg" \
+  "src-tauri/target/universal-apple-darwin/release/bundle/dmg/LLM Relay_0.3.0_universal.dmg" \
   --clobber
 ```
 
-### Linux（用 WSL2 或原生 Ubuntu）
+### Linux TUI/agent（用 WSL2 或原生 Ubuntu）
 
 ```bash
-pnpm tauri build
+cargo build --release --target x86_64-unknown-linux-gnu -p llm-relay-agent -p llm-relay-tui
+mkdir -p release-assets
+cp target/x86_64-unknown-linux-gnu/release/llm-relay-agent release-assets/llm-relay-agent-x86_64-unknown-linux-gnu
+cp target/x86_64-unknown-linux-gnu/release/llm-relay-tui release-assets/llm-relay-tui-x86_64-unknown-linux-gnu
 
-gh release upload v0.3.0 \
-  src-tauri/target/release/bundle/deb/llm-relay_0.3.0_amd64.deb \
-  src-tauri/target/release/bundle/appimage/llm-relay_0.3.0_amd64.AppImage \
-  --clobber
+gh release upload v0.3.0 release-assets/* --clobber
 ```
 
 ### Windows 本地构建 + 上传
@@ -406,6 +407,21 @@ pnpm tauri build
 gh release upload v0.3.0 `
   "src-tauri\target\release\bundle\nsis\LLM Relay_0.3.0_x64-setup.exe" `
   --clobber
+```
+
+### macOS TUI/agent 本地构建 + 上传
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+cargo build --release --target aarch64-apple-darwin -p llm-relay-agent -p llm-relay-tui
+cargo build --release --target x86_64-apple-darwin -p llm-relay-agent -p llm-relay-tui
+mkdir -p release-assets
+cp target/aarch64-apple-darwin/release/llm-relay-agent release-assets/llm-relay-agent-aarch64-apple-darwin
+cp target/aarch64-apple-darwin/release/llm-relay-tui release-assets/llm-relay-tui-aarch64-apple-darwin
+cp target/x86_64-apple-darwin/release/llm-relay-agent release-assets/llm-relay-agent-x86_64-apple-darwin
+cp target/x86_64-apple-darwin/release/llm-relay-tui release-assets/llm-relay-tui-x86_64-apple-darwin
+
+gh release upload v0.3.0 release-assets/* --clobber
 ```
 
 ### 发布前 smoke test
@@ -425,11 +441,10 @@ gh release upload v0.3.0 `
 - [ ] `cargo test --workspace` 全绿
 - [ ] README / CHANGELOG 更新
 - [ ] `git tag vX.Y.Z && git push origin vX.Y.Z`
-- [ ] macOS aarch64 DMG 上传
-- [ ] macOS x64 DMG 上传
+- [ ] macOS Universal DMG 上传
 - [ ] Windows NSIS exe 上传
-- [ ] Linux deb + AppImage 上传
-- [ ] TUI/agent 各平台二进制上传
+- [ ] Linux x64 TUI/agent 二进制上传
+- [ ] macOS Apple Silicon + Intel TUI/agent 二进制上传
 - [ ] draft → publish（在 GitHub web UI 或 `gh release edit v0.3.0 --draft=false`）
 
 ---
