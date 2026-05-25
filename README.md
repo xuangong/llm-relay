@@ -93,10 +93,13 @@ LLM Relay 在本地启动一个 HTTP 代理（`127.0.0.1:18080`），CLI 工具�
 
 从 [Releases](https://github.com/xuangong/llm-relay/releases) 页面下载适合你平台的安装包：
 
-- **macOS**: `LLM Relay_0.3.0_aarch64.dmg`（Apple Silicon）或 `_x64.dmg`（Intel）
-- **Windows**: `LLM Relay_0.3.0_x64-setup.exe`（NSIS 安装器）
-- **Linux**: `.deb`（Debian/Ubuntu）、`.rpm`（Fedora/RHEL）或 `.AppImage`（通用）
-- **纯 TUI 服务器部署**：下载 `llm-relay-agent-<platform>` + `llm-relay-tui-<platform>`，例如 `llm-relay-agent-x86_64-unknown-linux-gnu` 和 `llm-relay-tui-x86_64-unknown-linux-gnu`（见 [packaging/systemd/](packaging/systemd/)）
+- **macOS GUI**: `LLM Relay_0.3.0_universal.dmg`（Universal，支持 Apple Silicon + Intel）
+- **Windows GUI**: `LLM Relay_0.3.0_x64-setup.exe`（NSIS 安装器）
+- **纯 TUI / 服务器部署**：按平台下载下面列出的 agent + TUI 二进制：
+  - Linux x64: `llm-relay-agent-x86_64-unknown-linux-gnu` + `llm-relay-tui-x86_64-unknown-linux-gnu`
+  - macOS Apple Silicon: `llm-relay-agent-aarch64-apple-darwin` + `llm-relay-tui-aarch64-apple-darwin`
+  - macOS Intel: `llm-relay-agent-x86_64-apple-darwin` + `llm-relay-tui-x86_64-apple-darwin`
+  - systemd 部署见 [packaging/systemd/](packaging/systemd/)
 
 ### 从源码构建
 
