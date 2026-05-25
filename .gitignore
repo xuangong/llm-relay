@@ -17,3 +17,6 @@ Thumbs.db
 
 # Tauri
 src-tauri/target/
+
+# Worktrees
+.worktrees/
