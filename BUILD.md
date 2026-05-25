@@ -164,7 +164,7 @@ winget install OpenJS.NodeJS
 npm install -g pnpm
 
 # 3. 克隆项目并安装依赖
-git clone <your-repo-url>
+git clone https://github.com/xuangong/llm-relay.git
 cd llm-relay
 pnpm install
 
@@ -231,7 +231,7 @@ sudo apt install -y nodejs
 npm install -g pnpm
 
 # 4. 克隆项目并构建
-git clone <your-repo-url>
+git clone https://github.com/xuangong/llm-relay.git
 cd llm-relay
 pnpm install
 pnpm run tauri build
@@ -408,6 +408,17 @@ gh release upload v0.3.0 `
   --clobber
 ```
 
+### 发布前 smoke test
+
+- [ ] 首次启动窗口显示正常
+- [ ] 添加 Gateway 成功，健康检查返回状态
+- [ ] 点击 Use 后 Claude / Codex / Gemini 配置文件写入本地代理地址
+- [ ] `127.0.0.1:18080` 代理可接收请求
+- [ ] 托盘 Quit 能完全退出 GUI
+- [ ] `llm-relay-agent` 能在 headless 环境启动
+- [ ] `llm-relay-tui` 能连接 agent
+- [ ] GUI 检测到 agent 时能一键接管
+
 ### 发布 checklist
 
 - [ ] `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处 version 一致
@@ -418,6 +429,7 @@ gh release upload v0.3.0 `
 - [ ] macOS x64 DMG 上传
 - [ ] Windows NSIS exe 上传
 - [ ] Linux deb + AppImage 上传
+- [ ] TUI/agent 各平台二进制上传
 - [ ] draft → publish（在 GitHub web UI 或 `gh release edit v0.3.0 --draft=false`）
 
 ---
@@ -534,6 +546,10 @@ pnpm tauri build --target x86_64-pc-windows-msvc
 {
   "version": "0.3.0"
 }
+
+// Cargo.toml
+[workspace.package]
+version = "0.3.0"
 
 // src-tauri/Cargo.toml
 [package]
@@ -845,6 +861,6 @@ pnpm tauri icon path/to/source-image.png
 
 ## 需要帮助？
 
-- [Tauri 官方文档](https://tauri.app/v1/guides/)
+- [Tauri 官方文档](https://tauri.app/start/)
 - [Tauri Discord 社区](https://discord.gg/tauri)
 - [项目 Issues](https://github.com/xuangong/llm-relay/issues)

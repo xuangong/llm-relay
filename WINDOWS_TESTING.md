@@ -16,8 +16,8 @@ pnpm run tauri build
 ```
 
 构建产物位置：
-- NSIS 安装器：`src-tauri\target\release\bundle\nsis\LLM Relay_0.2.4_x64-setup.exe`
-- MSI 安装器：`src-tauri\target\release\bundle\msi\LLM Relay_0.2.4_x64_en-US.msi`
+- NSIS 安装器：`src-tauri\target\release\bundle\nsis\LLM Relay_0.3.0_x64-setup.exe`
+- MSI 安装器：`src-tauri\target\release\bundle\msi\LLM Relay_0.3.0_x64_en-US.msi`
 
 ### 交叉编译（从 macOS/Linux）
 

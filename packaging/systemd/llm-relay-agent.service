@@ -1,6 +1,6 @@
 [Unit]
 Description=LLM Relay agent (headless gateway proxy)
-Documentation=https://github.com/<org>/llm-relay
+Documentation=https://github.com/xuangong/llm-relay
 After=network-online.target
 Wants=network-online.target
 
@@ -10,6 +10,7 @@ Type=simple
 # systemd we want it to stay foreground so journald captures stdout/stderr.
 Environment=LLM_RELAY_FOREGROUND=1
 Environment=LLM_RELAY_RUNTIME_DIR=%h/.local/state/llm-relay
+EnvironmentFile=%h/.config/llm-relay/agent.env
 ExecStart=/usr/local/bin/llm-relay-agent
 Restart=on-failure
 RestartSec=5s
@@ -18,7 +19,7 @@ RestartSec=5s
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.local/state/llm-relay %h/.local/share/llm-relay
+ReadWritePaths=%h/.llm-relay %h/.local/state/llm-relay %h/.local/share/llm-relay
 PrivateTmp=true
 
 [Install]

@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -21,6 +24,9 @@ jobs:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             label: Windows-x64
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            label: Linux-x64
 
     runs-on: ${{ matrix.platform }}
     name: Build (${{ matrix.label }})
@@ -39,6 +45,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Check release version consistency
+        run: pnpm check:release-version
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -47,10 +56,18 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> target
+          workspaces: |
+            . -> target
+            src-tauri -> src-tauri/target
 
-      # macOS 需要安装系统依赖
-      # Windows 不需要额外依赖
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt update
+          sudo apt install -y libwebkit2gtk-4.1-dev \
+            build-essential curl wget file \
+            libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev pkg-config
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
@@ -59,7 +76,30 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'LLM Relay ${{ github.ref_name }}'
-          releaseBody: 'See the assets to download and install this version.'
+          releaseBody: 'See RELEASE_NOTES.md and the assets to download and install this version.'
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
+
+      - name: Build TUI and agent
+        run: cargo build --release --target ${{ matrix.target }} -p llm-relay-agent -p llm-relay-tui
+
+      - name: Prepare TUI and agent assets (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p release-assets
+          cp "target/${{ matrix.target }}/release/llm-relay-agent" "release-assets/llm-relay-agent-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/llm-relay-tui" "release-assets/llm-relay-tui-${{ matrix.target }}"
+
+      - name: Prepare TUI and agent assets (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\llm-relay-agent.exe" "release-assets\llm-relay-agent-${{ matrix.target }}.exe"
+          Copy-Item "target\${{ matrix.target }}\release\llm-relay-tui.exe" "release-assets\llm-relay-tui-${{ matrix.target }}.exe"
+
+      - name: Upload TUI and agent assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.ref_name }} release-assets/* --clobber

@@ -8,22 +8,16 @@ fn make_state(n: usize) -> AppState {
         id: Uuid::new_v4(),
         name: format!("gw-{i}"),
         url: format!("http://example.com/{i}"),
-        healthy: None,
-        latency_ms: None,
-        starred: false,
-        expanded: false,
-        needs_login: false,
+        ..GatewayRow::default()
     }).collect();
     s.replace_gateways(rows);
     s
 }
 
 #[test]
-fn pressing_s_toggles_star_on_selected_row() {
+fn pressing_s_does_not_mutate_star_in_state_layer() {
     let mut s = make_state(3);
     assert!(!s.gateways[0].starred);
-    s.handle(AppEvent::Char('s'));
-    assert!(s.gateways[0].starred);
     s.handle(AppEvent::Char('s'));
     assert!(!s.gateways[0].starred);
 }

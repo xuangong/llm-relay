@@ -34,6 +34,7 @@ pub async fn add_gateway(
         claude_small_model: None,
         codex_model: None,
         gemini_model: None,
+        preferred_key_id: None,
     };
     state.db.add_gateway(&gw).map_err(|e| e.to_string())?;
 

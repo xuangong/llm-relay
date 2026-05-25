@@ -96,14 +96,14 @@ LLM Relay 在本地启动一个 HTTP 代理（`127.0.0.1:18080`），CLI 工具�
 - **macOS**: `LLM Relay_0.3.0_aarch64.dmg`（Apple Silicon）或 `_x64.dmg`（Intel）
 - **Windows**: `LLM Relay_0.3.0_x64-setup.exe`（NSIS 安装器）
 - **Linux**: `.deb`（Debian/Ubuntu）、`.rpm`（Fedora/RHEL）或 `.AppImage`（通用）
-- **纯 TUI 服务器部署**：下载 `llm-relay-agent` + `llm-relay-tui` 二进制（见 [packaging/systemd/](packaging/systemd/)）
+- **纯 TUI 服务器部署**：下载 `llm-relay-agent-<platform>` + `llm-relay-tui-<platform>`，例如 `llm-relay-agent-x86_64-unknown-linux-gnu` 和 `llm-relay-tui-x86_64-unknown-linux-gnu`（见 [packaging/systemd/](packaging/systemd/)）
 
 ### 从源码构建
 
 详细的构建说明请查看 **[BUILD.md](./BUILD.md)**。
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/xuangong/llm-relay.git
 cd llm-relay
 ./setup.sh   # 安装 Rust、pnpm 及项目依赖
 ./dev.sh     # 启动开发服务器（热重载）
@@ -199,8 +199,12 @@ export LLM_RELAY_MASTER_KEY="生成的 base64 字符串"
 # 手动
 ./llm-relay-agent &
 
-# systemd（推荐）— 复制 packaging/systemd/llm-relay-agent.service 到 /etc/systemd/system/
-sudo systemctl enable --now llm-relay-agent
+# systemd user service（推荐）
+mkdir -p ~/.config/systemd/user
+cp packaging/systemd/llm-relay-agent.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now llm-relay-agent.service
+sudo loginctl enable-linger "$USER"
 ```
 
 ### 3. 连上 TUI

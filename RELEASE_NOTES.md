@@ -29,7 +29,11 @@
 - BUILD.md 新增：WSL2 构建 Linux 版本、手动本地构建 + 上传发布流程、TUI / agent 构建
 
 ## 测试
-- 41 个单元测试 + 7 个 `--ignored` 集成测试（互斥锁、daemon 接管、env keystore、生命周期）全绿
+- `pnpm typecheck`、`pnpm build:renderer`、`pnpm check:release-version` 全绿
+- `cargo test --workspace` 全绿（41 个非 ignored 测试）
+- `cargo test -p llm-relay-agent --test lifecycle_integration -- --ignored --test-threads=1` 全绿（4 个集成测试）
+- `cargo test -p llm-relay-agent --test mutual_exclusion -- --ignored --test-threads=1` 全绿（1 个集成测试）
+- `pnpm tauri build --target aarch64-apple-darwin` 成功生成 macOS Apple Silicon DMG
 
 ## 下载
 
@@ -40,5 +44,9 @@
 | Windows | `LLM Relay_0.3.0_x64-setup.exe` |
 | Linux (Debian/Ubuntu) | `llm-relay_0.3.0_amd64.deb` |
 | Linux (通用) | `llm-relay_0.3.0_amd64.AppImage` |
+| TUI/agent Linux x64 | `llm-relay-agent-x86_64-unknown-linux-gnu`, `llm-relay-tui-x86_64-unknown-linux-gnu` |
+| TUI/agent macOS Apple Silicon | `llm-relay-agent-aarch64-apple-darwin`, `llm-relay-tui-aarch64-apple-darwin` |
+| TUI/agent macOS Intel | `llm-relay-agent-x86_64-apple-darwin`, `llm-relay-tui-x86_64-apple-darwin` |
+| TUI/agent Windows | `llm-relay-agent-x86_64-pc-windows-msvc.exe`, `llm-relay-tui-x86_64-pc-windows-msvc.exe` |
 
 > ⚠️ 本版本的部分包由本地手动构建 + 上传（CI 临时不可用）。未签名 — macOS 首次打开时右键选 "打开" 绕过 Gatekeeper。
