@@ -67,6 +67,33 @@ fn claude_settings_path() -> PathBuf {
     home_dir().join(".claude").join("settings.json")
 }
 
+/// Split a Copilot composite Claude id into (baseId, effort, context1m).
+/// Mirrors `parseCompositeModelId` in copilot-api-gateway/src/services/copilot/variants.ts:
+/// strips up to two known suffixes (`-high|-xhigh` → effort, `-1m` → context1m)
+/// from the tail in any order. Non-Claude ids pass through unchanged.
+fn decompose_claude_id(id: &str) -> (String, Option<String>, bool) {
+    if !id.starts_with("claude-") {
+        return (id.to_string(), None, false);
+    }
+    let mut rest = id.to_string();
+    let mut effort: Option<String> = None;
+    let mut context1m = false;
+    for _ in 0..2 {
+        let Some(dash) = rest.rfind('-') else { break };
+        let suffix = &rest[dash + 1..];
+        if suffix == "1m" && !context1m {
+            context1m = true;
+            rest.truncate(dash);
+        } else if (suffix == "high" || suffix == "xhigh") && effort.is_none() {
+            effort = Some(suffix.to_string());
+            rest.truncate(dash);
+        } else {
+            break;
+        }
+    }
+    (rest, effort, context1m)
+}
+
 pub fn write_claude_config(
     base_url: &str,
     api_key: &str,
@@ -74,6 +101,12 @@ pub fn write_claude_config(
     small_model: Option<&str>,
 ) -> Result<(), AppError> {
     let path = claude_settings_path();
+
+    // ANTHROPIC_MODEL must be the bare base id; any -xhigh / -1m suffix is an
+    // internal selection signal the relay applies per-request on the wire
+    // (see proxy_server), not user-facing config. Small model is written
+    // as-is (it never needs modifiers).
+    let big_base: Option<String> = model.map(|m| decompose_claude_id(m).0);
 
     // Read existing settings or start fresh
     let mut settings: Value = if path.exists() {
@@ -90,12 +123,36 @@ pub fn write_claude_config(
         .entry("env")
         .or_insert_with(|| serde_json::json!({}));
 
+    // ANTHROPIC_AUTH_TOKEN policy: the relay does NOT manage this secret. If
+    // the user already set it (any value), leave it alone — Claude Code reads
+    // it before invoking the proxy and the relay rewrites x-api-key on the
+    // wire anyway. If it's missing, drop in a harmless placeholder so Claude
+    // Code's "token must be set" preflight passes; the placeholder never
+    // reaches upstream.
+    let token_already_present = env
+        .as_object()
+        .and_then(|o| o.get("ANTHROPIC_AUTH_TOKEN"))
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let token_to_write: Option<&str> = if token_already_present {
+        None
+    } else {
+        Some(api_key)
+    };
+
     // Check if the current config already matches
     let needs_update = if let Some(env_obj) = env.as_object() {
-        env_obj.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) != Some(api_key)
-            || env_obj.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) != Some(base_url)
-            || (model.is_some() && env_obj.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()) != model)
-            || (small_model.is_some() && env_obj.get("ANTHROPIC_SMALL_FAST_MODEL").and_then(|v| v.as_str()) != small_model)
+        let token_match = match token_to_write {
+            Some(t) => env_obj.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) == Some(t),
+            None => true,
+        };
+        !(token_match
+            && env_obj.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) == Some(base_url)
+            && (big_base.is_none()
+                || env_obj.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()) == big_base.as_deref())
+            && (small_model.is_none()
+                || env_obj.get("ANTHROPIC_SMALL_FAST_MODEL").and_then(|v| v.as_str()) == small_model))
     } else {
         true
     };
@@ -106,16 +163,18 @@ pub fn write_claude_config(
     }
 
     if let Some(env_obj) = env.as_object_mut() {
-        env_obj.insert(
-            "ANTHROPIC_AUTH_TOKEN".to_string(),
-            Value::String(api_key.to_string()),
-        );
+        if let Some(t) = token_to_write {
+            env_obj.insert(
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                Value::String(t.to_string()),
+            );
+        }
         env_obj.insert(
             "ANTHROPIC_BASE_URL".to_string(),
             Value::String(base_url.to_string()),
         );
-        if let Some(m) = model {
-            env_obj.insert("ANTHROPIC_MODEL".to_string(), Value::String(m.to_string()));
+        if let Some(b) = big_base.as_deref() {
+            env_obj.insert("ANTHROPIC_MODEL".to_string(), Value::String(b.to_string()));
         }
         if let Some(m) = small_model {
             env_obj.insert(
@@ -123,6 +182,11 @@ pub fn write_claude_config(
                 Value::String(m.to_string()),
             );
         }
+        // ANTHROPIC_CUSTOM_HEADERS is left untouched on purpose. If the user
+        // already configured it (advanced setup), the relay must not clobber
+        // their override; if they didn't, we don't introduce an unfamiliar
+        // var — the relay injects the equivalent headers on the wire when the
+        // active model has -xhigh / -1m suffixes (see proxy_server).
     }
 
     let json_str = serde_json::to_string_pretty(&settings)?;
@@ -149,7 +213,10 @@ pub fn clear_claude_config() -> Result<(), AppError> {
         serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
 
     if let Some(env) = settings.get_mut("env").and_then(|v| v.as_object_mut()) {
-        env.remove("ANTHROPIC_AUTH_TOKEN");
+        // Only clear vars the relay actually owns. ANTHROPIC_AUTH_TOKEN and
+        // ANTHROPIC_CUSTOM_HEADERS are user-managed (or only written as a
+        // placeholder when missing) — leaving them lets people unhook the
+        // relay without losing pre-existing config.
         env.remove("ANTHROPIC_BASE_URL");
         env.remove("ANTHROPIC_MODEL");
         env.remove("ANTHROPIC_SMALL_FAST_MODEL");

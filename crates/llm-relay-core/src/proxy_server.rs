@@ -206,6 +206,15 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
     }
     forward_headers.insert("x-api-key", reqwest::header::HeaderValue::from_str(&api_key).unwrap());
 
+    // Apply Copilot variant modifiers from the active claude_model composite id
+    // (e.g. `claude-opus-4.7-xhigh-1m`). The CLI config only ever stores the
+    // bare base id; the suffixes live here on the wire so users never see
+    // ANTHROPIC_CUSTOM_HEADERS in their settings.json. Only Anthropic-shaped
+    // requests carry these headers — OpenAI/Gemini paths are untouched.
+    if path.contains("/messages") {
+        apply_anthropic_variant_headers(&mut forward_headers, config.claude_model.as_deref());
+    }
+
     // Send with one retry on network error
     let mut last_err = String::new();
     let mut resp_result = None;
@@ -415,6 +424,94 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                 .into_response()
         }
     }
+}
+
+/// Apply Copilot variant modifiers derived from the composite active model id.
+///
+/// The relay's source-of-truth for "which variant" is the `claude_model` saved
+/// in `active_config` (e.g. `claude-opus-4.7-xhigh-1m`). The CLI config files
+/// only ever hold the bare base id — these headers replace the role
+/// `ANTHROPIC_CUSTOM_HEADERS` would play, but kept off-disk because it's an
+/// advanced var most users shouldn't see.
+///
+/// Behavior:
+/// - `-1m` suffix appends/merges `context-1m-2025-08-07` into `anthropic-beta`
+/// - `-high|-xhigh` suffix sets `x-copilot-reasoning-effort`
+/// - No suffix → strip any client-supplied stale modifiers so they can't
+///   pin requests to a variant the user didn't pick
+fn apply_anthropic_variant_headers(
+    headers: &mut reqwest::header::HeaderMap,
+    active_model: Option<&str>,
+) {
+    const BETA_HEADER: &str = "anthropic-beta";
+    const EFFORT_HEADER: &str = "x-copilot-reasoning-effort";
+    const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
+
+    let (effort, context1m) = match active_model {
+        Some(m) if m.starts_with("claude-") => {
+            let (_, e, c) = decompose_claude_id(m);
+            (e, c)
+        }
+        _ => (None, false),
+    };
+
+    // Effort: always overwrite so a downgrade (e.g. switching from -xhigh back
+    // to the base model) reliably clears the variant on the wire.
+    headers.remove(EFFORT_HEADER);
+    if let Some(e) = effort {
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(&e) {
+            headers.insert(EFFORT_HEADER, v);
+        }
+    }
+
+    // Beta: merge with whatever betas the client sent (it may have its own
+    // entries like `interleaved-thinking-2025-05-14`). Strip a stale 1m entry
+    // if the active model doesn't want it; add it if it does.
+    let existing: Vec<String> = headers
+        .get_all(BETA_HEADER)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(',').map(|p| p.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut merged: Vec<String> = Vec::new();
+    for b in existing {
+        if b == CONTEXT_1M_BETA { continue; } // dedupe; re-added below if needed
+        if !merged.contains(&b) { merged.push(b); }
+    }
+    if context1m { merged.push(CONTEXT_1M_BETA.to_string()); }
+    headers.remove(BETA_HEADER);
+    if !merged.is_empty() {
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(&merged.join(",")) {
+            headers.insert(BETA_HEADER, v);
+        }
+    }
+}
+
+/// Mirror of copilot-api-gateway's `parseCompositeModelId` (variants.ts):
+/// strips up to two known suffixes (`-high|-xhigh` → effort, `-1m` → context1m)
+/// from the tail in any order. Non-Claude ids pass through unchanged.
+fn decompose_claude_id(id: &str) -> (String, Option<String>, bool) {
+    if !id.starts_with("claude-") {
+        return (id.to_string(), None, false);
+    }
+    let mut rest = id.to_string();
+    let mut effort: Option<String> = None;
+    let mut context1m = false;
+    for _ in 0..2 {
+        let Some(dash) = rest.rfind('-') else { break };
+        let suffix = rest[dash + 1..].to_string();
+        if suffix == "1m" && !context1m {
+            context1m = true;
+            rest.truncate(dash);
+        } else if (suffix == "high" || suffix == "xhigh") && effort.is_none() {
+            effort = Some(suffix);
+            rest.truncate(dash);
+        } else {
+            break;
+        }
+    }
+    (rest, effort, context1m)
 }
 
 /// Extract the `model` field from a JSON request body.
