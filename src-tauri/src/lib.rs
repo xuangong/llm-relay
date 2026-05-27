@@ -21,19 +21,12 @@ pub fn run() {
     let config_dir = get_app_config_dir();
     setup_panic_hook(&config_dir);
 
-    // Acquire the shared LLM Relay lifecycle guard BEFORE building Tauri.
-    // This atomically:
-    //   * grabs the global file lock at ~/.llm-relay/agent.lock
-    //   * binds 127.0.0.1:18080
-    //   * cleans stale pidfile / socket from prior unclean exits
-    //   * writes a fresh pidfile
-    // If another LLM Relay process (GUI or headless agent) is running, we
-    // surface a modal dialog and exit cleanly — no half-built window flash,
-    // no silent shutdown.
-    let lifecycle_guard = match acquire_with_daemon_takeover() {
-        Ok(g) => g,
-        Err(()) => std::process::exit(1),
-    };
+    // NOTE: The shared lifecycle guard (file lock + port bind) is acquired
+    // inside `.setup()`, NOT here. `tauri_plugin_single_instance` must get
+    // first crack at duplicate-GUI launches so it can focus the existing
+    // window and exit the second process silently. If we acquired the guard
+    // up front, the second GUI would hit the "AlreadyRunning" branch and
+    // surface an error dialog before the plugin ever ran.
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -61,9 +54,20 @@ pub fn run() {
             }
         })
         .setup(move |app| {
-            // Take the pre-bound listener out of the lifecycle guard for
-            // hand-off to the proxy server (no second bind, no TOCTOU).
-            let mut lifecycle_guard = lifecycle_guard;
+            // Acquire the shared LLM Relay lifecycle guard here, AFTER the
+            // single-instance plugin has filtered out duplicate GUI launches.
+            // This atomically:
+            //   * grabs the global file lock at ~/.llm-relay/agent.lock
+            //   * binds 127.0.0.1:18080
+            //   * cleans stale pidfile / socket from prior unclean exits
+            //   * writes a fresh pidfile
+            // Reaching this point means we're the only GUI; any failure now
+            // is a real conflict with the headless agent (or unrelated port
+            // usage), so the daemon-takeover dialog is meaningful.
+            let mut lifecycle_guard = match acquire_with_daemon_takeover() {
+                Ok(g) => g,
+                Err(()) => std::process::exit(1),
+            };
             let proxy_listener = lifecycle_guard.take_listener();
             // Keep the guard alive for the lifetime of the app by leaking
             // it. Drop on process exit isn't reached anyway because Tauri
