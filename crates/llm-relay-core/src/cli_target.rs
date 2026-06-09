@@ -176,3 +176,63 @@ mod tests {
         assert_eq!(b.read(&[".claude", "settings.json"]).unwrap(), None);
     }
 }
+
+/// Backend that reads/writes via `wsl.exe` inside a specific distro.
+/// `home` is the probed `$HOME`; relative paths are joined under it.
+pub struct WslBackend {
+    pub distro: String,
+    pub home: String,
+}
+
+impl WslBackend {
+    fn full_path(&self, rel: &[&str]) -> String {
+        let mut s = self.home.clone();
+        for seg in rel {
+            if !s.ends_with('/') {
+                s.push('/');
+            }
+            s.push_str(seg);
+        }
+        s
+    }
+}
+
+impl CliBackend for WslBackend {
+    fn read(&self, rel: &[&str]) -> Result<Option<String>, AppError> {
+        crate::wsl::fs::wsl_read(&self.distro, &self.full_path(rel))
+    }
+    fn write_atomic(&self, rel: &[&str], bytes: &[u8]) -> Result<(), AppError> {
+        crate::wsl::fs::wsl_atomic_write(&self.distro, &self.full_path(rel), bytes)
+    }
+    fn remove(&self, rel: &[&str]) -> Result<(), AppError> {
+        crate::wsl::fs::wsl_remove(&self.distro, &self.full_path(rel))
+    }
+    fn exists(&self, rel: &[&str]) -> Result<bool, AppError> {
+        crate::wsl::fs::wsl_exists(&self.distro, &self.full_path(rel))
+    }
+}
+
+#[cfg(test)]
+mod wsl_tests {
+    use super::*;
+
+    #[test]
+    fn wsl_backend_path_join() {
+        let b = WslBackend {
+            distro: "Ubuntu".into(),
+            home: "/home/x".into(),
+        };
+        assert_eq!(
+            b.full_path(&[".claude", "settings.json"]),
+            "/home/x/.claude/settings.json"
+        );
+        let b2 = WslBackend {
+            distro: "Ubuntu".into(),
+            home: "/home/x/".into(),
+        };
+        assert_eq!(
+            b2.full_path(&[".claude", "settings.json"]),
+            "/home/x/.claude/settings.json"
+        );
+    }
+}
