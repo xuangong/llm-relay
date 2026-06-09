@@ -55,18 +55,24 @@ apply 时（不是 Relay 启动时）对每个勾选的 distro 跑一次探测�
 
 ```rust
 async fn relay_ping() -> &'static str { "ok" }
+async fn relay_reserved() -> (StatusCode, &'static str) {
+    (StatusCode::NOT_FOUND, "unknown relay endpoint")
+}
 
 let app = Router::new()
-    .route("/_relay/ping", get(relay_ping))   // 显式 route，必须在 fallback 之前
-    .fallback(forward)                         // 现有逻辑：所有其他路径转发到 gateway
+    .route("/_relay/ping", get(relay_ping))
+    // 兜底所有 _relay/* 路径，**必须**显式注册 — 否则未知的 _relay/* 会落到
+    // .fallback(forward) 被当成上游请求转给 gateway，违背 "reserved namespace" 约定
+    .route("/_relay/{*rest}", any(relay_reserved))
+    .fallback(forward)
     .with_state(state);
 ```
 
-- 必须**先** route 再 fallback，否则会被吞进 `forward` 转发到上游 gateway（会 404）
-- `_relay/` 前缀作为 reserved namespace，永不转发上游
-- 不进 `traffic_log` / `usage_log` / `consecutive_errors` 计数——由路由分流天然实现（这些计数在 `forward` 内部，`relay_ping` handler 跟它们物理上无交集）
+- 必须**先** route 再 fallback，否则会被吞进 `forward` 转发到上游 gateway（会 404 或更糟，被上游记错请求）
+- `_relay/*` 兜底返回本地 404，永不转发上游
+- 不进 `traffic_log` / `usage_log` / `consecutive_errors` 计数——由路由分流天然实现（这些计数在 `forward` 内部，`_relay/*` handler 跟它们物理上无交集）
 - 响应纯字符串，不做鉴权（local-only 监听，没有威胁）
-- 后续若加 `/_relay/version` 等也走同一规则
+- 后续若加 `/_relay/version` 等：在 `relay_reserved` 兜底前显式注册即可
 
 每个候选 URL **都跑一次真实 HTTP probe**。最小 distro 可能既没 curl 也没 wget，所以显式 fallback，二者全无时跳到最后一招用 `/dev/tcp`（bash builtin，几乎所有 distro 都有）：
 
@@ -99,9 +105,13 @@ wsl -d <D> -e sh -c '
 
 选择规则（**严格按返回顺序**）：
 
-1. 第一个返回 200 的 URL 即为该 distro 的 `resolved_url`。`host.docker.internal` 优先于 `127.0.0.1`（前者在两种模式都通，是 NAT 模式的唯一选择；mirror 模式下两者都通，前者也能正常工作，不需要区分模式）
-2. 都不通 → `resolved_url = NULL`，UI 标红 "Unreachable"，apply 时该 distro 被跳过，warning 进 events
-3. 探测失败的常见原因：WSL <0.65 且 `generateHosts=false`、用户改了 `/etc/hosts`、Windows 防火墙拦了 WSL adapter（罕见，因为是 loopback 类接口）
+1. 第一个 probe 返回成功的 URL 即为该 distro 的 `resolved_url`。"成功" 定义：
+   - curl / wget 路径：HTTP 200
+   - `/dev/tcp` fallback 路径：TCP 三次握手成功（无 HTTP 验证）
+2. `host.docker.internal` 优先于 `127.0.0.1`（前者在两种模式都通；mirror 模式下两者都通，前者仍然正常工作，不需要区分模式）
+3. 都不通 → `resolved_url = NULL`，UI 标红 "Unreachable"，apply 时该 distro 被跳过，warning 进 events
+4. 探测失败的常见原因：WSL <0.65 且 `generateHosts=false`、用户改了 `/etc/hosts`、Windows 防火墙拦了 WSL adapter（罕见，因为是 loopback 类接口）
+5. `/dev/tcp` 路径的退化风险：若本机 18080 被无关进程占用，会被误判为 reachable。Relay 启动时已独占 18080（lifecycle 锁），所以实操中只有"Relay 没启动却跑了 distro probe"这种顺序错误才会触发——属于调用方 bug 而非数据风险
 
 不再用 `getent hosts` 或 `/proc/sys/kernel/osrelease` 做间接推断——它们只能证明"名字存在"或"是 WSL2"，不能证明"我能 HTTP 打到 Windows"。Mirror 模式的判定也归约成 "127.0.0.1 能 HTTP 通"，不再查内核版本。
 
@@ -124,15 +134,27 @@ wsl -d <D> -e sh -c '
 // proxy_server.rs
 pub struct ProxyHandle {
     primary_token: CancellationToken,         // 127.0.0.1 — 关 Relay 时一并 cancel
-    wsl_listener: Mutex<Option<WslBound>>,    // 可热替换
-    state: Arc<ProxyState>,                   // spawn 新 listener 时复用
+    primary_join:  JoinHandle<()>,            // shutdown 时 await，确保 serve task 真正退出
+    wsl_listener:  Mutex<Option<WslBound>>,   // 可热替换
+    state:         Arc<ProxyState>,           // spawn 新 listener 时复用
 }
 
 struct WslBound {
-    ip: IpAddr,
+    ip:    IpAddr,
     token: CancellationToken,
-    join: JoinHandle<()>,
+    join:  JoinHandle<()>,
 }
+
+// 每个 listener spawn 时的标准模式：
+async fn run_listener(listener: TcpListener, state: Arc<ProxyState>, token: CancellationToken) {
+    let app = build_router(state);  // 见 §"/_relay/* 路由"
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { token.cancelled().await })
+        .await
+        .ok();  // serve 退出（正常 shutdown 或 listener accept 失败）→ task 自然结束
+}
+// CancellationToken 单独 cancel 不会停 serve；必须配合 with_graceful_shutdown 才能让
+// serve 在 token 触发时停止 accept 新连接并优雅退出。
 
 impl ProxyHandle {
     /// new_ip = None → 仅取消 WSL listener；Some → 取消旧的（如有）+ bind 新 IP + spawn
@@ -158,7 +180,10 @@ pub async fn start_with_listeners(
    - `proxy_server::start_with_listeners(Arc::new(ProxyState::from(ctx.clone())), primary, wsl)` → `Arc<ProxyHandle>`
    - 用 `ctx.clone()` 和刚拿到的 `proxy` 一起组装 `Service { ctx, proxy: Arc<ProxyHandle> }`
 3. 状态机后台 task 拿 `service.proxy.clone()`；Tauri/TUI 命令同样
-4. 关 Relay：`Service::shutdown` → `proxy.shutdown()` → 释放最后一份 `Arc<CoreContext>`
+4. 关 Relay：`Service::shutdown` → `proxy.shutdown()`：
+   - cancel `primary_token` + WSL token（若有）→ axum::serve 在下一次 accept 前观察到 cancellation 退出
+   - await `primary_join` + WSL `join`，确保 serve task 真正结束（不只是 cancel 信号发出）
+   - 释放最后一份 `Arc<CoreContext>`
 
 这种"先 ctx，后 proxy，后 service"的线性构造，比 `OnceCell<Arc<ProxyHandle>>` 干净：Service 一旦存在 `proxy` 字段就已是非 None，调用方不用处理"还没初始化"分支。
 
