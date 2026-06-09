@@ -226,3 +226,55 @@ mod probe_tests {
         assert!(!r.has_claude);
     }
 }
+
+/// Re-discover distros from `wsl.exe`, run `probe_distro` for each, and
+/// reconcile into the `wsl_distros` table:
+/// - new distro → insert with `selected = is_default`
+/// - existing distro → refresh home/user/installed/probed_at, preserve
+///   user-set `selected` flag and existing `resolved_url` (URL probing
+///   is a separate step done by `wsl::probe`)
+/// - distro removed from discovery → delete row
+///
+/// Probe failures for an individual distro do NOT abort reconciliation;
+/// the row is still upserted so the UI can show "found, not probed".
+pub fn refresh_distros_in_db(db: &crate::Database) -> Result<Vec<DistroRow>, AppError> {
+    let discovered = discover_distros()?;
+    let existing = db.list_wsl_distros()?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    use std::collections::HashSet;
+    let discovered_names: HashSet<&str> = discovered.iter().map(|d| d.name.as_str()).collect();
+    for ex in &existing {
+        if !discovered_names.contains(ex.name.as_str()) {
+            log::info!("WSL distro removed: {}", ex.name);
+            db.delete_wsl_distro(&ex.name)?;
+        }
+    }
+
+    let mut out = Vec::with_capacity(discovered.len());
+    for d in discovered {
+        let prior = existing.iter().find(|e| e.name == d.name);
+        let probe = match probe_distro(&d.name) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("probe_distro({}) failed: {e}", d.name);
+                ProbeResult::default()
+            }
+        };
+        let row = DistroRow {
+            name: d.name.clone(),
+            is_default: d.is_default,
+            selected: prior.map(|p| p.selected).unwrap_or(d.is_default),
+            home: probe.home.or_else(|| prior.and_then(|p| p.home.clone())),
+            user: probe.user.or_else(|| prior.and_then(|p| p.user.clone())),
+            has_claude: probe.has_claude,
+            has_codex: probe.has_codex,
+            has_gemini: probe.has_gemini,
+            resolved_url: prior.and_then(|p| p.resolved_url.clone()),
+            probed_at: Some(now.clone()),
+        };
+        db.upsert_wsl_distro(&row)?;
+        out.push(row);
+    }
+    Ok(out)
+}
