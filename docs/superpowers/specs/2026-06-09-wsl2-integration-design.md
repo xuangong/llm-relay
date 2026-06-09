@@ -35,17 +35,57 @@ WSL2 网关 IP 是 Windows 上虚拟网卡 `vEthernet (WSL)` 的 IPv4，通常�
 
 写入 CLI 配置的 URL：
 
-| Target | URL |
-|---|---|
-| Windows | `http://127.0.0.1:18080` |
-| WSL2 | `http://host.docker.internal:18080` |
+| Target | URL（默认） | 备选 |
+|---|---|---|
+| Windows | `http://127.0.0.1:18080` | — |
+| WSL2 | `http://host.docker.internal:18080` | `http://127.0.0.1:18080`（mirror 模式下） |
 
-`host.docker.internal` 由 WSL 0.65+ 自动注入 `/etc/hosts`，指向 WSL2 网关 IP。在 NAT 和 mirror 两种模式下都解析正确，所以 WSL 端不需要按模式切 URL。
+**重要约束**：CLI 配置是 **write-once**（apply 时写入，gateway 切换不会重写）。因此 WSL 端 URL **必须使用稳定标识符**——不能写裸 IP（Windows / WSL 重启时 WSL 网关 IP 会变，已写入的配置会失效）。可选稳定标识符只有两个：
 
-#### 网关 IP 发现与重 bind
-- 启动时：用 Windows IP Helper API（如 `ipconfig` crate）枚举 adapter，找名字含 "WSL" 的，取它的 IPv4
-- 探测不到（用户没装 WSL / WSL 网卡未启用）→ 只 bind `127.0.0.1`，跳过 WSL 相关功能
-- 周期性检测：每 60 秒（健康检查 tick 上搭车）重新探测；IP 变化 → 重 bind 新 IP，drop 旧 listener
+1. **`host.docker.internal`** — WSL 0.65+ 默认在 `/etc/hosts` 注入；NAT 模式下解析到 WSL 网关 IP，mirror 模式下解析到 `127.0.0.1`；用户若关掉了 `[network] generateHosts` 则不存在
+2. **`127.0.0.1`** — 仅在 mirror 模式下能到达 Windows
+
+#### Per-distro URL 探测
+
+apply 时（不是 Relay 启动时）对每个勾选的 distro 跑一次探测，选定该 distro 的 URL：
+
+```
+1. wsl -d <D> -e getent hosts host.docker.internal
+   → 成功 → 候选 URL = host.docker.internal:18080
+2. 否则 wsl -d <D> -e cat /proc/sys/kernel/osrelease
+   → 包含 "WSL2" 且能解析到 127.0.0.1（mirror 模式）
+   → 候选 URL = 127.0.0.1:18080
+   注：实际验证连通性可在选定后用 curl --max-time 2 一次性确认
+3. 都不行 → warning：该 distro 跳过 apply，UI 标红"Unreachable: 请启用 mirror 模式或开启 /etc/hosts 自动注入"，但 checkbox 仍可勾选（不禁用——用户可能就是想点 Refresh 重试）
+```
+
+探测结果（resolved URL）随 distro 缓存到 `wsl_distros.resolved_url` 字段。Refresh 按钮重跑探测。
+
+#### Relay listener bind
+
+无论 distro 探测结果如何，Relay 启动时按以下规则 bind：
+
+- 必选：`127.0.0.1:18080`（Windows target + mirror 模式 WSL target）
+- 可选：WSL2 网关 IP `<172.x.x.1>:18080`（NAT 模式 WSL target 通过 `host.docker.internal` 来）
+- 启动时枚举 Windows 网卡找 `vEthernet (WSL)`，找到 → bind；找不到 → 跳过
+- 周期重检测（见 §3.5 状态机）：网关 IP 变化 → cancel 旧 WSL listener task，spawn 新的；`127.0.0.1` listener task 永不动
+
+#### Listener 生命周期
+
+`proxy_server::start` 接收一个 `Vec<TcpListener>`（lifecycle 层已 bind 好），为每个 listener spawn 一个 tokio task 跑 `axum::serve`，每个 task 持有自己的 `CancellationToken`。`ProxyState` 暴露：
+
+```rust
+pub struct ProxyHandle {
+    primary_token: CancellationToken,  // 127.0.0.1 — 关 Relay 时一并 cancel
+    wsl_listener: Mutex<Option<(IpAddr, CancellationToken, JoinHandle<()>)>>,
+}
+
+impl ProxyHandle {
+    pub async fn rebind_wsl(&self, new_ip: Option<IpAddr>);  // cancel + 可选 spawn
+}
+```
+
+WSL bind 失败（端口已被占 / IP 已消失）→ warning 进 events，`127.0.0.1` listener 不受影响，Relay 继续可用。
 
 #### 物理网卡上完全没有 listener
 - 同 WiFi/办公网的别人 SYN 不会被接受 → 0 LAN 暴露
@@ -61,7 +101,13 @@ WSL2 网关 IP 是 Windows 上虚拟网卡 `vEthernet (WSL)` 的 IPv4，通常�
 对每个 distro 拉取：
 - `home` ← `wsl -d <D> -e sh -c 'echo $HOME'`
 - `user` ← `wsl -d <D> -e whoami`
-- `has_claude` / `has_codex` / `has_gemini` ← `wsl -d <D> -e sh -c 'command -v claude && command -v codex && command -v gemini'`（一次 shell 调用拿三个结果）
+- `has_claude` / `has_codex` / `has_gemini` ← 一次 shell 调用，独立检查每个 binary（不能用 `&&` 串接——会短路）：
+  ```sh
+  for c in claude codex gemini; do
+    if command -v "$c" >/dev/null 2>&1; then echo "$c=1"; else echo "$c=0"; fi
+  done
+  ```
+- `resolved_url` ← 见 §2.1 per-distro URL 探测
 
 结果写入 SQLite。新增表：
 
@@ -75,6 +121,7 @@ CREATE TABLE wsl_distros (
   has_claude    INTEGER NOT NULL DEFAULT 0,
   has_codex     INTEGER NOT NULL DEFAULT 0,
   has_gemini    INTEGER NOT NULL DEFAULT 0,
+  resolved_url  TEXT,                         -- §2.1 探测出的可用 URL，NULL=未探测/不可达
   probed_at     TEXT
 );
 ```
@@ -168,11 +215,31 @@ struct WslBackend { distro: String, home: String }  // 用 wsl::fs::*
 ```
 ~/.llm-relay/cli-config-backup/
   windows.json              ← Windows 本机
-  wsl-Ubuntu.json           ← per-distro，按 sanitized 名
-  wsl-Ubuntu-22.04.json
+  wsl-<opaque-id>.json      ← per-distro，文件名是不透明 id
+  wsl-<opaque-id>.json
 ```
 
-Sanitize 规则：只保留 `[A-Za-z0-9._-]`，其他换 `_`。
+**文件名是不透明 id**（避免 distro 名带空格/特殊字符引发碰撞，例如 `Ubuntu 22.04` vs `Ubuntu_22.04`）：
+
+```
+opaque_id = base32(sha256(utf8(distro_name)))[:16].lower()
+```
+
+restore 时**不依赖文件名解析 distro 名**，而是从 JSON 内容里读：
+
+```jsonc
+{
+  "target_type": "wsl",           // "windows" | "wsl"
+  "distro_name": "Ubuntu 22.04",  // 原始名，restore 时直接传给 wsl -d
+  "home": "/home/dev",            // probe 时的 home，避免 restore 时再 probe 一次
+  "captured_at": "2026-06-09T...",
+  "claude": { ... },
+  "codex":  { ... },
+  "gemini": { ... }
+}
+```
+
+`windows.json` 同样有 `target_type: "windows"`（迁移时补上）。
 
 #### `apply_all_configs` 改写
 
@@ -180,16 +247,18 @@ Sanitize 规则：只保留 `[A-Za-z0-9._-]`，其他换 `_`。
 targets = [Windows]
         + 每个 selected distro 的 WslBackend
 
-prev_targets = snapshot 目录里现存 *.json 对应的 backend
+# index: distro_name → snapshot 文件路径
+# 启动时扫一遍 snapshot 目录，读每个文件的 distro_name 字段建索引
+prev_index = build_index(snapshot_dir)
 
-新加入的 target（snapshot 不存在）→ 先 capture_snapshot，再写入
-保留的 target（snapshot 已存在）→ 直接写入（不重新 capture）
-被剔除的 target（在 prev 不在 current）→ 用 snapshot restore，删除 snapshot 文件
+新加入的 target（distro_name 不在 prev_index）→ 先 capture_snapshot，再写入
+保留的 target（在 prev_index）→ 直接写入（不重新 capture）
+被剔除的 target（在 prev_index 不在 current）→ 用 snapshot restore，删除 snapshot 文件
 ```
 
 #### `clear_all_configs`（Disable）
 - 遍历 snapshot 目录所有 `*.json`
-- 每个文件解析出对应 backend（`windows.json` → `WindowsFsBackend`，`wsl-X.json` → `WslBackend{distro="X"}`）
+- 读每个文件的 `target_type` + `distro_name`，构造对应 backend（`windows` → `WindowsFsBackend`，`wsl` → `WslBackend{distro: <原始名>, home: <snapshot.home>}`）
 - 对每个 backend 执行 restore
 - 删除整个目录
 
@@ -249,7 +318,7 @@ Windows 可能根本没装 WSL2、装了但没装任何 distro、或装了但被
 ### 网络层
 - `find_wsl_gateway_ip()` 枚举 adapter 找不到 `vEthernet (WSL)` → 返回 `None`
 - proxy 只 bind `127.0.0.1:18080`，与现状完全一致
-- 周期重检测继续跑；用户事后启用了 WSL → 自动加上 WSL 网关 IP 的 listener，无需重启 Relay
+- 周期重检测的频率取决于 §3.5 末尾的状态机（Active 模式 60s；Lazy 模式仅手动 Refresh）
 
 ### Distro 发现
 `wsl.exe -l -v` 在不同场景下的失败形式：
@@ -283,14 +352,21 @@ install it via Microsoft Store or `wsl --install`.
 - 没有 selected distro → `apply_all_configs` 只迭代 `[Windows]` target
 - snapshot 目录里只有 `windows.json`，行为与今天一致
 
-### 后台检测频率自适应
-为避免没装 WSL 的用户被 60s 一次的 `wsl.exe -l -v` 调用扰动：
+### 检测状态机（gateway IP + distro 列表共用）
 
-- 启动时检测一次
-- 检测结果为 "WSL 可用且有 distro" → 60s 周期重检测（与健康检查 tick 搭车）
-- 检测结果为 "WSL 不可用 / 无 distro" → 切换到**惰性模式**：不再周期检测，仅在用户点 🔄 Re-check 或重启应用时再试
+唯一的 WSL 检测 cadence 状态机，避免 §2.1 / §3.5 之间的不一致：
 
-这保证零 WSL 用户的资源开销几乎为 0（启动时一次 ~50ms 的 `wsl.exe -l -v`）。
+- **启动时**：跑一次完整检测（`wsl -l -v` + `find_wsl_gateway_ip`）
+- 若 "WSL 可用且有 distro" → **Active** 模式：每 60s 重跑（与健康检查 tick 搭车）
+  - distro 列表变化 → 更新 UI；新 distro 自动 probe
+  - gateway IP 变化 → 通过 `ProxyHandle::rebind_wsl` 重 bind
+- 否则 → **Lazy** 模式：不再周期检测，仅在以下时机重跑：
+  - 用户点 🔄 Re-check
+  - 应用重启
+  - 用户在 Settings 里点了任何 WSL 相关操作（implicit refresh）
+- Lazy → Active 的转换：用户事后启用 WSL 后点 Refresh，检测成功 → 切到 Active
+
+这保证零 WSL 用户的开销近 0（仅启动时一次 ~50ms 的 `wsl.exe -l -v`），同时启用 WSL 后无需重启 Relay（点一次 Refresh 即可）。
 
 ---
 
@@ -300,7 +376,7 @@ install it via Microsoft Store or `wsl --install`.
 - **远程 WSL**（SSH 到另一台机器的 WSL）：完全不在范围
 - **写入 distro 内部的 shell rc**（如 `~/.bashrc` 加 `OPENAI_API_KEY=dummy`）：第一版不做，仅写 `~/.codex/auth.json`；如果 Codex CLI 在 WSL 里报缺 env，再加
 - **多用户 distro**：probe 用 `whoami`，只支持当前 wsl 启动的默认用户；多用户切换不处理
-- **检测 WSL 是否启用 mirror 模式**：不需要，统一走 `host.docker.internal`
+- **强制 mirror 模式**：不强制，§2.1 探测会自动选可用 URL；mirror 模式下 `127.0.0.1` 仅作为 fallback
 
 ---
 
@@ -308,11 +384,11 @@ install it via Microsoft Store or `wsl --install`.
 
 | 风险 | 缓解 |
 |---|---|
-| `host.docker.internal` 在 WSL 0.65 以下不存在 | Probe 时 `wsl -d <D> -e getent hosts host.docker.internal`，解析失败给出"请升级 WSL"的提示，并禁用该 distro 的勾选 |
-| WSL 网关 IP 变更未及时检测 → WSL 端请求超时 | 60s 重检测；可在 Settings 加 "Reconnect WSL" 按钮立即触发 |
+| `host.docker.internal` 在 WSL 0.65 以下不存在 / 用户关掉了 `generateHosts` | §2.1 per-distro URL 探测会自动 fallback 到 mirror 模式的 `127.0.0.1`。两者都不可达 → UI 标红"Unreachable"但 checkbox 不禁用，用户可改配置后 Refresh |
+| WSL 网关 IP 变更未及时检测 → WSL 端请求超时 | Active 模式 60s 重检测自动 rebind；Settings 加 "Reconnect WSL" 按钮立即触发 |
 | `wsl.exe -e cat` 启动冷 distro 慢（1-3s） | apply 整体异步；UI 显示 per-target 状态 |
 | 用户在 WSL 里手动改了配置后 Disable 会被覆盖 | snapshot 保的是"首次 apply 前"状态。文档说明：手动改过的 WSL 配置请在 Disable 前自行备份 |
-| Distro 名含奇怪字符（中文、空格） | snapshot 文件名 sanitize；`wsl -d <D>` 仍传原始名 |
+| Distro 名含奇怪字符（中文、空格、`/`） | snapshot 文件名走 sha256 不透明 id；原始名存 JSON 内，`wsl -d <D>` 用原始名 |
 | Tauri 安装包不附带 WSL 二进制依赖 | 完全不依赖，`wsl.exe` 是 Windows 自带 |
 
 ---
