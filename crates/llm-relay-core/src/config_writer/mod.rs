@@ -6,6 +6,8 @@ use std::fs;
 use std::path::PathBuf;
 use toml_edit::DocumentMut;
 
+pub mod snapshot;
+
 fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
@@ -726,7 +728,7 @@ fn gemini_dir() -> PathBuf {
     home_dir().join(".gemini")
 }
 
-fn parse_env_file(content: &str) -> HashMap<String, String> {
+pub(crate) fn parse_env_file(content: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for line in content.lines() {
         let line = line.trim();
@@ -744,7 +746,7 @@ fn parse_env_file(content: &str) -> HashMap<String, String> {
     map
 }
 
-fn serialize_env_file(map: &HashMap<String, String>) -> String {
+pub(crate) fn serialize_env_file(map: &HashMap<String, String>) -> String {
     let mut keys: Vec<_> = map.keys().collect();
     keys.sort();
     keys.iter()
