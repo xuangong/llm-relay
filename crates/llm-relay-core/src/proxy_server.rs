@@ -34,6 +34,25 @@ pub struct ProxyState {
     consecutive_errors: Arc<AtomicU32>,
 }
 
+impl ProxyState {
+    /// Construct from the same three Arcs that `Service` owns. Used by
+    /// `start_with_listeners` so the proxy can be brought up *before* the
+    /// `Service { proxy }` field is filled in (resolves the would-be cycle:
+    /// Service.proxy is set via `with_proxy(handle)` once start returns).
+    pub fn new(
+        db: Arc<Database>,
+        switch_lock: Arc<tokio::sync::Mutex<()>>,
+        sink: SharedEventSink,
+    ) -> Self {
+        Self {
+            db,
+            switch_lock,
+            sink,
+            consecutive_errors: Arc::new(AtomicU32::new(0)),
+        }
+    }
+}
+
 async fn relay_ping() -> &'static str {
     "ok"
 }
@@ -103,6 +122,156 @@ pub async fn start_with_listener(service: crate::Service, listener: Option<std::
     if let Err(e) = axum::serve(tokio_listener, app).await {
         log::error!("Proxy server stopped: {}", e);
     }
+}
+
+// ─── Multi-listener proxy with hot-swappable WSL gateway listener ───
+//
+// `start_with_listeners` is the new entry point used by lifecycle. It binds
+// the mandatory 127.0.0.1 listener plus, optionally, the WSL2 gateway-IP
+// listener, and returns an `Arc<ProxyHandle>` so callers can:
+//   - rebind the WSL listener when the gateway IP changes
+//   - cleanly shut both listener tasks down on app exit
+//
+// The single-listener `start_with_listener` above remains as a shim for any
+// caller that doesn't need multi-bind / shutdown control yet.
+
+use std::net::IpAddr;
+use std::sync::Mutex as StdMutex;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+/// Owns the running proxy. Drop alone does NOT stop the server — call
+/// `shutdown()` and `.await` it.
+pub struct ProxyHandle {
+    primary_token: CancellationToken,
+    primary_join: StdMutex<Option<JoinHandle<()>>>,
+    wsl: StdMutex<Option<WslBound>>,
+    state: ProxyState,
+}
+
+struct WslBound {
+    ip: IpAddr,
+    token: CancellationToken,
+    join: JoinHandle<()>,
+}
+
+impl ProxyHandle {
+    /// Cancel `127.0.0.1` + WSL (if any), then await both serve tasks so
+    /// they really exit before this returns.
+    pub async fn shutdown(self: Arc<Self>) {
+        self.primary_token.cancel();
+        let wsl = self.wsl.lock().unwrap().take();
+        if let Some(wsl) = wsl {
+            wsl.token.cancel();
+            let _ = wsl.join.await;
+        }
+        let primary = self.primary_join.lock().unwrap().take();
+        if let Some(j) = primary {
+            let _ = j.await;
+        }
+    }
+
+    /// Cancel any existing WSL listener; if `new_ip` is Some, bind it and
+    /// spawn a new serve task. Returns Err on bind failure; the primary
+    /// listener is never touched.
+    pub async fn rebind_wsl(self: &Arc<Self>, new_ip: Option<IpAddr>) -> Result<(), crate::AppError> {
+        let old = self.wsl.lock().unwrap().take();
+        if let Some(old) = old {
+            old.token.cancel();
+            let _ = old.join.await;
+        }
+        let Some(ip) = new_ip else { return Ok(()); };
+        let port = crate::paths::proxy_port();
+        let std_listener = std::net::TcpListener::bind((ip, port))
+            .map_err(|e| crate::AppError::Config(format!("WSL bind {ip}:{port} failed: {e}")))?;
+        std_listener
+            .set_nonblocking(true)
+            .map_err(|e| crate::AppError::Config(format!("WSL nonblocking: {e}")))?;
+        let tokio_listener = tokio::net::TcpListener::from_std(std_listener)
+            .map_err(|e| crate::AppError::Config(format!("WSL wrap: {e}")))?;
+        let token = CancellationToken::new();
+        let state = self.state.clone();
+        let tok = token.clone();
+        let join = tokio::spawn(async move {
+            let app = build_router(state);
+            let _ = axum::serve(tokio_listener, app)
+                .with_graceful_shutdown(async move { tok.cancelled().await })
+                .await;
+        });
+        *self.wsl.lock().unwrap() = Some(WslBound { ip, token, join });
+        log::info!("WSL listener bound on {ip}:{port}");
+        Ok(())
+    }
+
+    /// Current WSL listener IP, if any.
+    pub fn wsl_ip(&self) -> Option<IpAddr> {
+        self.wsl.lock().unwrap().as_ref().map(|w| w.ip)
+    }
+}
+
+/// Multi-listener proxy startup.
+///
+/// `primary` is the pre-bound 127.0.0.1 listener (mandatory, from
+/// `LifecycleGuard`). `initial_wsl` is the pre-bound WSL gateway-IP
+/// listener and the IP it's on; pass `None` when the WSL adapter isn't
+/// present.
+pub async fn start_with_listeners(
+    state: ProxyState,
+    primary: std::net::TcpListener,
+    initial_wsl: Option<(IpAddr, std::net::TcpListener)>,
+) -> Arc<ProxyHandle> {
+    primary
+        .set_nonblocking(true)
+        .expect("primary listener nonblocking");
+    let primary_tokio =
+        tokio::net::TcpListener::from_std(primary).expect("wrap primary listener");
+    let primary_token = CancellationToken::new();
+    let state_for_task = state.clone();
+    let tok = primary_token.clone();
+    let primary_join = tokio::spawn(async move {
+        let app = build_router(state_for_task);
+        let _ = axum::serve(primary_tokio, app)
+            .with_graceful_shutdown(async move { tok.cancelled().await })
+            .await;
+    });
+    let handle = Arc::new(ProxyHandle {
+        primary_token,
+        primary_join: StdMutex::new(Some(primary_join)),
+        wsl: StdMutex::new(None),
+        state,
+    });
+    log::info!(
+        "Local proxy started on 127.0.0.1:{}",
+        crate::paths::proxy_port()
+    );
+
+    if let Some((ip, listener)) = initial_wsl {
+        if let Err(e) = listener.set_nonblocking(true) {
+            log::warn!("WSL listener nonblocking failed: {e}");
+        } else {
+            match tokio::net::TcpListener::from_std(listener) {
+                Ok(tokio_l) => {
+                    let token = CancellationToken::new();
+                    let st = handle.state.clone();
+                    let tk = token.clone();
+                    let join = tokio::spawn(async move {
+                        let app = build_router(st);
+                        let _ = axum::serve(tokio_l, app)
+                            .with_graceful_shutdown(async move { tk.cancelled().await })
+                            .await;
+                    });
+                    *handle.wsl.lock().unwrap() = Some(WslBound { ip, token, join });
+                    log::info!(
+                        "WSL listener bound on {ip}:{}",
+                        crate::paths::proxy_port()
+                    );
+                }
+                Err(e) => log::warn!("WSL wrap failed: {e}"),
+            }
+        }
+    }
+
+    handle
 }
 
 async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Response {

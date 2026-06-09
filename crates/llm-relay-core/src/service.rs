@@ -19,6 +19,11 @@ pub struct Service {
     pub db: Arc<Database>,
     pub switch_lock: Arc<Mutex<()>>,
     pub sink: SharedEventSink,
+    /// Set once the proxy is up via `with_proxy(handle)`. None during the
+    /// brief window between Service construction and proxy startup, and
+    /// in tests. Long-running tasks (WSL state machine, Tauri commands)
+    /// that need rebind/shutdown clone this Arc.
+    pub proxy: Option<Arc<crate::proxy_server::ProxyHandle>>,
 }
 
 impl Service {
@@ -27,7 +32,16 @@ impl Service {
             db,
             sink,
             switch_lock: Arc::new(Mutex::new(())),
+            proxy: None,
         }
+    }
+
+    /// Attach the running proxy handle so callers can reach rebind/shutdown
+    /// through the service. Idempotent in test code; production callers
+    /// invoke once during startup.
+    pub fn with_proxy(mut self, proxy: Arc<crate::proxy_server::ProxyHandle>) -> Self {
+        self.proxy = Some(proxy);
+        self
     }
 
     /// Build the full Snapshot returned by `Request::GetSnapshot`.
