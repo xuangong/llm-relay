@@ -31,3 +31,16 @@ pub fn proxy_port() -> u16 {
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(PROXY_PORT)
 }
+
+/// Per-target CLI snapshot directory. Each file inside is a snapshot for
+/// either the Windows host or one WSL2 distro. Pre-WSL2 versions stored a
+/// single file at `legacy_cli_config_backup_file()`.
+pub fn cli_config_backup_dir() -> PathBuf {
+    config_dir().join("cli-config-backup")
+}
+
+/// Pre-WSL2 single-file snapshot path. Read once on startup by the legacy
+/// migration in `config_writer::snapshot::migrate_legacy_if_needed()`.
+pub fn legacy_cli_config_backup_file() -> PathBuf {
+    config_dir().join("cli-config-backup.json")
+}
