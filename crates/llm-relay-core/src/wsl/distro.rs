@@ -154,3 +154,75 @@ mod tests {
         assert_eq!(decode_wsl_output(&bytes), "hello");
     }
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct ProbeResult {
+    pub home: Option<String>,
+    pub user: Option<String>,
+    pub has_claude: bool,
+    pub has_codex: bool,
+    pub has_gemini: bool,
+}
+
+/// Probe a single distro for $HOME, whoami, and presence of the three CLI
+/// binaries. Single `wsl.exe -e sh -c` invocation to amortize cold-start
+/// cost. The per-binary loop avoids `&&` short-circuiting (a missing
+/// claude would otherwise mask later codex/gemini results).
+#[cfg(target_os = "windows")]
+pub fn probe_distro(name: &str) -> Result<ProbeResult, AppError> {
+    let script = r#"echo "home=$HOME"
+echo "user=$(whoami)"
+for c in claude codex gemini; do
+  if command -v "$c" >/dev/null 2>&1; then
+    echo "$c=1"
+  else
+    echo "$c=0"
+  fi
+done"#;
+    let out = crate::wsl::fs::__wsl_run_script(name, script)?;
+    Ok(parse_probe_output(&out))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn probe_distro(_name: &str) -> Result<ProbeResult, AppError> {
+    Err(AppError::Config("probe_distro: Windows only".into()))
+}
+
+fn parse_probe_output(text: &str) -> ProbeResult {
+    let mut r = ProbeResult::default();
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        match k.trim() {
+            "home" => r.home = Some(v.trim().to_string()).filter(|s| !s.is_empty()),
+            "user" => r.user = Some(v.trim().to_string()).filter(|s| !s.is_empty()),
+            "claude" => r.has_claude = v.trim() == "1",
+            "codex" => r.has_codex = v.trim() == "1",
+            "gemini" => r.has_gemini = v.trim() == "1",
+            _ => {}
+        }
+    }
+    r
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn parses_complete_output() {
+        let text = "home=/home/xanzh\nuser=xanzh\nclaude=1\ncodex=0\ngemini=1\n";
+        let r = parse_probe_output(text);
+        assert_eq!(r.home.as_deref(), Some("/home/xanzh"));
+        assert_eq!(r.user.as_deref(), Some("xanzh"));
+        assert!(r.has_claude);
+        assert!(!r.has_codex);
+        assert!(r.has_gemini);
+    }
+
+    #[test]
+    fn missing_values_default_to_false_none() {
+        let r = parse_probe_output("");
+        assert!(r.home.is_none());
+        assert!(!r.has_claude);
+    }
+}
