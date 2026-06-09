@@ -51,20 +51,51 @@ apply 时（不是 Relay 启动时）对每个勾选的 distro 跑一次探测�
 
 前置条件：本步骤跑之前，§2.1 末尾的 `/_relay/ping` 路由（轻量 200 OK，无副作用）必须已挂在 proxy 上，且 Relay 已 bind `127.0.0.1:18080` + `<WSL gateway IP>:18080`（若有）。
 
-每个候选 URL **都跑一次真实 HTTP probe**：
+**`/_relay/ping` 路由实现要点**（在 `proxy_server.rs` 的 `Router` 上）：
+
+```rust
+async fn relay_ping() -> &'static str { "ok" }
+
+let app = Router::new()
+    .route("/_relay/ping", get(relay_ping))   // 显式 route，必须在 fallback 之前
+    .fallback(forward)                         // 现有逻辑：所有其他路径转发到 gateway
+    .with_state(state);
+```
+
+- 必须**先** route 再 fallback，否则会被吞进 `forward` 转发到上游 gateway（会 404）
+- `_relay/` 前缀作为 reserved namespace，永不转发上游
+- 不进 `traffic_log` / `usage_log` / `consecutive_errors` 计数——由路由分流天然实现（这些计数在 `forward` 内部，`relay_ping` handler 跟它们物理上无交集）
+- 响应纯字符串，不做鉴权（local-only 监听，没有威胁）
+- 后续若加 `/_relay/version` 等也走同一规则
+
+每个候选 URL **都跑一次真实 HTTP probe**。最小 distro 可能既没 curl 也没 wget，所以显式 fallback，二者全无时跳到最后一招用 `/dev/tcp`（bash builtin，几乎所有 distro 都有）：
 
 ```sh
 # 从 distro 内部探测，验证 Windows 上的 Relay 监听确实可达
 wsl -d <D> -e sh -c '
+  probe() {
+    url="$1"
+    if command -v curl >/dev/null 2>&1; then
+      code=$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 2 "$url/_relay/ping" 2>/dev/null)
+      [ "$code" = "200" ]
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q -O /dev/null --timeout=2 --tries=1 "$url/_relay/ping" 2>/dev/null
+    else
+      # bash /dev/tcp fallback — 只验 TCP 通，不验 200，但比误判 unreachable 强
+      host=$(echo "$url" | sed -E "s|http://([^:/]+).*|\\1|")
+      port=$(echo "$url" | sed -E "s|http://[^:]+:([0-9]+).*|\\1|")
+      timeout 2 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null
+    fi
+  }
   for url in "http://host.docker.internal:18080" "http://127.0.0.1:18080"; do
-    # 用 wget 或 curl，取 distro 里哪个存在；连接 + 200 双重确认
-    code=$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 2 "$url/_relay/ping" 2>/dev/null)
-    if [ "$code" = "200" ]; then echo "ok $url"; exit 0; fi
+    if probe "$url"; then echo "ok $url"; exit 0; fi
   done
   echo "unreachable"
   exit 1
 '
 ```
+
+不把 curl 当依赖文档化——某些 server-oriented distro（Alpine、distroless 衍生品）真的没装。`/dev/tcp` 路径只能验 TCP 不能验 200，可能把"监听了但不是 Relay"的情况判通；考虑到本机 18080 端口被无关进程占用的概率极低，这个 trade-off 可接受。
 
 选择规则（**严格按返回顺序**）：
 
@@ -110,17 +141,26 @@ impl ProxyHandle {
 }
 
 pub async fn start_with_listeners(
-    service: Service,
-    primary: TcpListener,           // 127.0.0.1，必选
+    state: Arc<ProxyState>,           // 解耦 Service 依赖：直接传 state，不传 Service
+    primary: TcpListener,             // 127.0.0.1，必选
     initial_wsl: Option<(IpAddr, TcpListener)>,  // 可选，启动时若 WSL 网卡可用就传
-) -> ProxyHandle;
+) -> Arc<ProxyHandle>;
 ```
 
-**所有权链**：
-- `Service`（`crates/llm-relay-core/src/service.rs`）新增字段 `proxy: Arc<ProxyHandle>`，由 `lifecycle.rs` 在启动时 bind listeners 后调用 `start_with_listeners` 拿到，塞进 Service
-- 状态机（§3.5）跑在一个 Service 持有的后台 task 里，task 拿 `service.proxy.clone()`，gateway IP 变化时调 `proxy.rebind_wsl(Some(new_ip))`
-- 关 Relay 时（`Service::shutdown` / lifecycle drop）调 `proxy.shutdown()`，cancel 所有 token，await 所有 join
-- Tauri 命令 / TUI 命令需要触发 rebind（例如 Settings 里点 "Reconnect WSL"）→ 通过 `Service` 暴露 `pub async fn reconnect_wsl(&self)` 包装一层（重新探测 IP + 调 rebind）
+**所有权链**（避免 Service ↔ ProxyHandle 构造循环）：
+
+`ProxyState` 持有 `db / sink / switch_lock`——这些今天就在 `Service` 内，但可独立构造。改造：
+
+1. **拆分构造**：把 `ProxyState` 字段抽成一个 `CoreContext { db, sink, switch_lock }` 结构，`Service` 和 `ProxyState` 都通过 `Arc<CoreContext>` 引用相同数据，不互相 own
+2. **启动顺序**：
+   - lifecycle 先建 `Arc<CoreContext>`
+   - bind listeners
+   - `proxy_server::start_with_listeners(Arc::new(ProxyState::from(ctx.clone())), primary, wsl)` → `Arc<ProxyHandle>`
+   - 用 `ctx.clone()` 和刚拿到的 `proxy` 一起组装 `Service { ctx, proxy: Arc<ProxyHandle> }`
+3. 状态机后台 task 拿 `service.proxy.clone()`；Tauri/TUI 命令同样
+4. 关 Relay：`Service::shutdown` → `proxy.shutdown()` → 释放最后一份 `Arc<CoreContext>`
+
+这种"先 ctx，后 proxy，后 service"的线性构造，比 `OnceCell<Arc<ProxyHandle>>` 干净：Service 一旦存在 `proxy` 字段就已是非 None，调用方不用处理"还没初始化"分支。
 
 **WSL bind 失败处理**：`rebind_wsl(Some(ip))` 内部 bind 报错（端口已占 / IP 已消失）→ `wsl_listener` 保持 `None` + 返回 `Err`，调用方记 warning 进 events；`primary_token` 不受影响，Relay 仍为 Windows target 可用。
 
@@ -230,7 +270,9 @@ Command::new("wsl.exe")
   // ... 写 bytes 到 stdin
 ```
 
-#### Backend trait（重构 `config_writer.rs`）
+#### Backend trait + Target 抽象（重构 `config_writer.rs`）
+
+文件读写和 base_url 是两个独立维度：Windows 和 WSL backend 各自定义"配置文件在哪个文件系统、按什么路径写"，而 base_url 由探测决定且 per-target 不同（Windows = `127.0.0.1:18080`，每个 WSL distro 用自己的 `resolved_url`）。因此拆成两层：
 
 ```rust
 trait CliBackend {
@@ -238,14 +280,32 @@ trait CliBackend {
     fn write_atomic(&self, rel_path: &[&str], bytes: &[u8]) -> Result<(), AppError>;
     fn remove(&self, rel_path: &[&str]) -> Result<(), AppError>;
     fn exists(&self, rel_path: &[&str]) -> Result<bool, AppError>;
-    fn label(&self) -> &str;  // "windows" / "wsl-Ubuntu"
 }
 
-struct WindowsFsBackend;   // 用 std::fs + dirs::home_dir()
-struct WslBackend { distro: String, home: String }  // 用 wsl::fs::*
+struct WindowsFsBackend;
+struct WslBackend { distro: String, home: String }
+
+pub struct CliTarget {
+    pub backend: Box<dyn CliBackend + Send + Sync>,
+    pub base_url: String,                    // 探测出的可用 URL
+    pub installed: InstalledTools,           // { claude, codex, gemini } booleans
+    pub label: String,                       // "windows" / "wsl:Ubuntu" — 日志、snapshot inner field
+    pub snapshot_meta: SnapshotMeta,         // { target_type, distro_name } — 写入 snapshot JSON
+}
+
+pub struct InstalledTools { pub claude: bool, pub codex: bool, pub gemini: bool }
 ```
 
-`write_claude_config` / `write_codex_config` / `write_gemini_config` / `clear_*` / 所有 snapshot 函数全部改成接收 `&dyn CliBackend`。Windows 端逻辑零行为变化（现有代码 = 默认走 `WindowsFsBackend`）。
+`apply_all_configs` 改成接收 `&[CliTarget]`，对每个 target 跑：
+- `if target.installed.claude { write_claude_config(&*target.backend, &target.base_url, api_key, claude_model, claude_small_model)?; }`
+- 三个 `write_*_config` 函数签名改成 `fn write_xxx(backend: &dyn CliBackend, base_url: &str, api_key: &str, ...)`，把 `base_url` 显式传入（今天是全局函数从 `proxy_base_url()` 隐式取）
+- `installed.* = false` 的 CLI 自动跳过——Windows target 三个全 true，WSL target 按 probe 结果决定
+
+构造 target 的逻辑（在 `Service::build_apply_targets()` 里）：
+- Windows target：`base_url = "http://127.0.0.1:18080"`，`installed = {true, true, true}`（Windows 端没装 CLI 也照写，与今天行为一致）
+- 每个 selected distro：`base_url = wsl_distros.resolved_url`（NULL → 跳过该 distro），`installed` 来自 `has_claude / has_codex / has_gemini`
+
+这样彻底解决"WSL 端被写成 127.0.0.1"的问题——`base_url` 跟着 target 走，不再是全局值。
 
 ### 2.4 Apply / Clear / Snapshot
 
