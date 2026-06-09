@@ -242,6 +242,58 @@ README 新增一节 "在 WSL2 中使用"，说明：
 
 ---
 
+## 3.5 WSL2 未安装/未启用时的行为
+
+Windows 可能根本没装 WSL2、装了但没装任何 distro、或装了但被禁用。所有这些场景下 LLM Relay 必须**静默降级**到今天的纯 Windows 行为，不阻塞、不报错、不弹窗。
+
+### 网络层
+- `find_wsl_gateway_ip()` 枚举 adapter 找不到 `vEthernet (WSL)` → 返回 `None`
+- proxy 只 bind `127.0.0.1:18080`，与现状完全一致
+- 周期重检测继续跑；用户事后启用了 WSL → 自动加上 WSL 网关 IP 的 listener，无需重启 Relay
+
+### Distro 发现
+`wsl.exe -l -v` 在不同场景下的失败形式：
+
+| 场景 | 表现 |
+|---|---|
+| 完全没装 WSL（连 `wsl.exe` 都没） | `Command::new("wsl.exe")` 报 `ENOENT` / "program not found" |
+| 装了 WSL 但没装 distro | 命令成功，stdout 是 "Windows Subsystem for Linux has no installed distributions" |
+| 装了但被禁用（Windows feature 关了） | 返回非零退出码 + 特定错误信息 |
+| `wsl.exe` 超时（罕见） | 5s 超时主动 kill |
+
+**所有失败统一视为 "no available distros"**：distro 列表为空，不报错，不区分子类型。
+
+### UI
+WSL2 板块在 distro 列表为空时显示：
+
+```
+WSL2 Distros
+─────────────────────────────────────────────
+No WSL2 distros detected.
+
+If you use Claude/Codex/Gemini CLI inside WSL2,
+install it via Microsoft Store or `wsl --install`.
+
+[ 🔄 Re-check ]
+```
+
+不弹错误对话框、不阻塞 apply、不影响 Windows 端任何功能。
+
+### Apply / Clear
+- 没有 selected distro → `apply_all_configs` 只迭代 `[Windows]` target
+- snapshot 目录里只有 `windows.json`，行为与今天一致
+
+### 后台检测频率自适应
+为避免没装 WSL 的用户被 60s 一次的 `wsl.exe -l -v` 调用扰动：
+
+- 启动时检测一次
+- 检测结果为 "WSL 可用且有 distro" → 60s 周期重检测（与健康检查 tick 搭车）
+- 检测结果为 "WSL 不可用 / 无 distro" → 切换到**惰性模式**：不再周期检测，仅在用户点 🔄 Re-check 或重启应用时再试
+
+这保证零 WSL 用户的资源开销几乎为 0（启动时一次 ~50ms 的 `wsl.exe -l -v`）。
+
+---
+
 ## 4. 不在范围内
 
 - **WSL1**：不支持。`wsl -l -v` 区分版本号，version=1 的 distro 直接过滤掉
@@ -278,3 +330,5 @@ README 新增一节 "在 WSL2 中使用"，说明：
 7. **WSL 卸载**：unregister 一个已勾选 distro，apply/clear 时该 target 报 warning 但流程继续
 8. **老用户迁移**：mock 一个 `cli-config-backup.json`，启动后确认自动迁移到 `cli-config-backup/windows.json`
 9. **mac/Linux 回归**：在非 Windows 平台跑一遍，确认 Settings 不渲染 WSL 板块、apply/clear 行为零变化
+10. **无 WSL 的 Windows**：在没装 WSL 的 Windows 上跑，确认 Settings 显示 "No WSL2 distros detected" + 安装指引，无任何报错，Windows 端 apply/clear 完全正常
+11. **WSL 事后启用**：从无 WSL 状态启动 Relay → 安装 WSL + distro → 点 🔄 Re-check 后 distro 出现在列表里，可勾选可 apply
