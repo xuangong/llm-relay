@@ -1049,3 +1049,273 @@ pub fn read_all_configs() -> Result<CurrentCliConfig, AppError> {
         gemini,
     })
 }
+
+// ─── Backend-typed variants ───
+//
+// New CliBackend-aware writers/clearers used by `apply_to_targets`. They
+// accept any `&dyn CliBackend` and an explicit `base_url`, so a single
+// codepath serves Windows + every selected WSL distro. The legacy
+// path-based functions above still exist as direct callers used during
+// the rollout; once `apply_to_targets` replaces `apply_all_configs`,
+// they can be removed.
+//
+// The logic is a deliberate copy-and-adapt of the path-based versions
+// — same JSON/TOML manipulation, no behavioral drift. Diffing against
+// the legacy fns is the right way to spot any unintentional change.
+
+use crate::cli_target::CliBackend;
+
+pub fn write_claude_config_with(
+    backend: &dyn CliBackend,
+    base_url: &str,
+    api_key: &str,
+    model: Option<&str>,
+    small_model: Option<&str>,
+) -> Result<(), AppError> {
+    let rel: &[&str] = &[".claude", "settings.json"];
+    let big_base: Option<String> = model.map(|m| decompose_claude_id(m).0);
+
+    let existing = backend.read(rel)?;
+    let mut settings: Value = match existing.as_deref() {
+        Some(s) => serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({})),
+        None => serde_json::json!({}),
+    };
+
+    let env = settings
+        .as_object_mut()
+        .unwrap()
+        .entry("env")
+        .or_insert_with(|| serde_json::json!({}));
+
+    let token_already_present = env
+        .as_object()
+        .and_then(|o| o.get("ANTHROPIC_AUTH_TOKEN"))
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let token_to_write: Option<&str> = if token_already_present { None } else { Some(api_key) };
+
+    let needs_update = if let Some(env_obj) = env.as_object() {
+        let token_match = match token_to_write {
+            Some(t) => env_obj.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) == Some(t),
+            None => true,
+        };
+        !(token_match
+            && env_obj.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) == Some(base_url)
+            && (big_base.is_none()
+                || env_obj.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()) == big_base.as_deref())
+            && (small_model.is_none()
+                || env_obj.get("ANTHROPIC_SMALL_FAST_MODEL").and_then(|v| v.as_str()) == small_model))
+    } else {
+        true
+    };
+
+    if !needs_update {
+        return Ok(());
+    }
+
+    if let Some(env_obj) = env.as_object_mut() {
+        if let Some(t) = token_to_write {
+            env_obj.insert("ANTHROPIC_AUTH_TOKEN".to_string(), Value::String(t.to_string()));
+        }
+        env_obj.insert("ANTHROPIC_BASE_URL".to_string(), Value::String(base_url.to_string()));
+        if let Some(b) = big_base.as_deref() {
+            env_obj.insert("ANTHROPIC_MODEL".to_string(), Value::String(b.to_string()));
+        }
+        if let Some(m) = small_model {
+            env_obj.insert("ANTHROPIC_SMALL_FAST_MODEL".to_string(), Value::String(m.to_string()));
+        }
+    }
+
+    let json_str = serde_json::to_string_pretty(&settings)?;
+    backend.write_atomic(rel, json_str.as_bytes())
+}
+
+pub fn clear_claude_config_with(backend: &dyn CliBackend) -> Result<(), AppError> {
+    let rel: &[&str] = &[".claude", "settings.json"];
+    let Some(content) = backend.read(rel)? else { return Ok(()); };
+    let mut settings: Value = serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(env) = settings.get_mut("env").and_then(|v| v.as_object_mut()) {
+        env.remove("ANTHROPIC_BASE_URL");
+        env.remove("ANTHROPIC_MODEL");
+        env.remove("ANTHROPIC_SMALL_FAST_MODEL");
+    }
+    backend.write_atomic(rel, serde_json::to_string_pretty(&settings)?.as_bytes())
+}
+
+pub fn write_codex_config_with(
+    backend: &dyn CliBackend,
+    base_url: &str,
+    api_key: &str,
+    model: Option<&str>,
+) -> Result<(), AppError> {
+    let auth_rel: &[&str] = &[".codex", "auth.json"];
+    let cfg_rel: &[&str] = &[".codex", "config.toml"];
+
+    // auth.json
+    let existing_auth = backend.read(auth_rel)?;
+    let needs_auth_update = match existing_auth.as_deref() {
+        Some(s) => match serde_json::from_str::<Value>(s) {
+            Ok(v) => v.get("OPENAI_API_KEY").and_then(|x| x.as_str()) != Some(api_key),
+            Err(_) => true,
+        },
+        None => true,
+    };
+    if needs_auth_update {
+        let auth = serde_json::json!({ "OPENAI_API_KEY": api_key });
+        backend.write_atomic(auth_rel, serde_json::to_string_pretty(&auth)?.as_bytes())?;
+    }
+
+    // config.toml
+    let url_with_slash = if base_url.ends_with('/') {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/")
+    };
+    let existing_cfg = backend.read(cfg_rel)?;
+    let mut doc: DocumentMut = match existing_cfg.as_deref() {
+        Some(s) => s.parse::<DocumentMut>().unwrap_or_else(|_| "".parse().unwrap()),
+        None => "".parse().unwrap(),
+    };
+
+    let needs_cfg_update = doc.get("model_provider").and_then(|v| v.as_str()) != Some("copilot_gateway")
+        || (model.is_some() && doc.get("model").and_then(|v| v.as_str()) != model)
+        || doc
+            .get("model_providers")
+            .and_then(|mp| mp.get("copilot_gateway"))
+            .and_then(|gw| gw.get("base_url"))
+            .and_then(|u| u.as_str())
+            != Some(&url_with_slash);
+
+    if !needs_cfg_update {
+        return Ok(());
+    }
+
+    if let Some(m) = model {
+        doc["model"] = toml_edit::value(m);
+    }
+    doc["model_provider"] = toml_edit::value("copilot_gateway");
+    if doc.get("model_providers").is_none() {
+        doc["model_providers"] = toml_edit::table();
+    }
+    if let Some(providers) = doc["model_providers"].as_table_mut() {
+        if !providers.contains_key("copilot_gateway") {
+            providers["copilot_gateway"] = toml_edit::table();
+        }
+        if let Some(gw) = providers["copilot_gateway"].as_table_mut() {
+            gw["name"] = toml_edit::value("Copilot Gateway");
+            gw["base_url"] = toml_edit::value(&url_with_slash);
+            gw["env_key"] = toml_edit::value("OPENAI_API_KEY");
+            gw["wire_api"] = toml_edit::value("responses");
+        }
+    }
+    backend.write_atomic(cfg_rel, doc.to_string().as_bytes())
+}
+
+pub fn clear_codex_config_with(backend: &dyn CliBackend) -> Result<(), AppError> {
+    let auth_rel: &[&str] = &[".codex", "auth.json"];
+    let cfg_rel: &[&str] = &[".codex", "config.toml"];
+
+    if let Some(content) = backend.read(auth_rel)? {
+        let mut auth: Value = serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = auth.as_object_mut() {
+            obj.remove("OPENAI_API_KEY");
+        }
+        backend.write_atomic(auth_rel, serde_json::to_string_pretty(&auth)?.as_bytes())?;
+    }
+    if let Some(content) = backend.read(cfg_rel)? {
+        if let Ok(mut doc) = content.parse::<DocumentMut>() {
+            if let Some(providers) = doc.get_mut("model_providers").and_then(|v| v.as_table_mut()) {
+                if let Some(gw) = providers.get_mut("copilot_gateway").and_then(|v| v.as_table_mut()) {
+                    gw.remove("base_url");
+                }
+            }
+            backend.write_atomic(cfg_rel, doc.to_string().as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+pub fn write_gemini_config_with(
+    backend: &dyn CliBackend,
+    base_url: &str,
+    api_key: &str,
+) -> Result<(), AppError> {
+    let env_rel: &[&str] = &[".gemini", ".env"];
+    let settings_rel: &[&str] = &[".gemini", "settings.json"];
+
+    let mut env_map = match backend.read(env_rel)? {
+        Some(s) => parse_env_file(&s),
+        None => HashMap::new(),
+    };
+    let needs_update = env_map.get("GEMINI_API_KEY") != Some(&api_key.to_string())
+        || env_map.get("GOOGLE_GEMINI_BASE_URL") != Some(&base_url.to_string())
+        || env_map.get("GEMINI_API_BASE_URL") != Some(&base_url.to_string());
+    if needs_update {
+        env_map.insert("GEMINI_API_KEY".into(), api_key.into());
+        env_map.insert("GOOGLE_GEMINI_BASE_URL".into(), base_url.into());
+        env_map.insert("GEMINI_API_BASE_URL".into(), base_url.into());
+        backend.write_atomic(env_rel, serialize_env_file(&env_map).as_bytes())?;
+    }
+
+    let mut settings: Value = match backend.read(settings_rel)? {
+        Some(s) => serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({})),
+        None => serde_json::json!({}),
+    };
+    if let Some(obj) = settings.as_object_mut() {
+        let security = obj.entry("security").or_insert_with(|| serde_json::json!({}));
+        if let Some(sec_obj) = security.as_object_mut() {
+            let auth = sec_obj.entry("auth").or_insert_with(|| serde_json::json!({}));
+            if let Some(auth_obj) = auth.as_object_mut() {
+                auth_obj.insert("selectedType".into(), Value::String("gemini-api-key".into()));
+            }
+        }
+    }
+    backend.write_atomic(settings_rel, serde_json::to_string_pretty(&settings)?.as_bytes())
+}
+
+pub fn clear_gemini_config_with(backend: &dyn CliBackend) -> Result<(), AppError> {
+    let env_rel: &[&str] = &[".gemini", ".env"];
+    let Some(content) = backend.read(env_rel)? else { return Ok(()); };
+    let mut env_map = parse_env_file(&content);
+    env_map.remove("GEMINI_API_KEY");
+    env_map.remove("GOOGLE_GEMINI_BASE_URL");
+    env_map.remove("GEMINI_API_BASE_URL");
+    backend.write_atomic(env_rel, serialize_env_file(&env_map).as_bytes())
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::*;
+    use crate::cli_target::WindowsFsBackend;
+    use tempfile::TempDir;
+
+    fn fake_home(tmp: &TempDir) -> WindowsFsBackend {
+        WindowsFsBackend { home: tmp.path().to_path_buf() }
+    }
+
+    #[test]
+    fn claude_round_trip_via_backend() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        write_claude_config_with(&b, "http://127.0.0.1:18080", "kk", Some("claude-sonnet-4-6"), None).unwrap();
+        let content = b.read(&[".claude", "settings.json"]).unwrap().unwrap();
+        assert!(content.contains("ANTHROPIC_BASE_URL"));
+        assert!(content.contains("http://127.0.0.1:18080"));
+        clear_claude_config_with(&b).unwrap();
+        let content = b.read(&[".claude", "settings.json"]).unwrap().unwrap();
+        assert!(!content.contains("ANTHROPIC_BASE_URL"));
+    }
+
+    #[test]
+    fn gemini_round_trip_via_backend() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        write_gemini_config_with(&b, "http://host.docker.internal:18080", "kk").unwrap();
+        let env = b.read(&[".gemini", ".env"]).unwrap().unwrap();
+        assert!(env.contains("GEMINI_API_BASE_URL=http://host.docker.internal:18080"));
+        clear_gemini_config_with(&b).unwrap();
+        let env = b.read(&[".gemini", ".env"]).unwrap().unwrap();
+        assert!(!env.contains("GEMINI_API_BASE_URL"));
+    }
+}
