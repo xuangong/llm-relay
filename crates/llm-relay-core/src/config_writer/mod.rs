@@ -887,7 +887,7 @@ pub fn clear_all_configs() -> Result<(), AppError> {
 /// Ensure OPENAI_API_KEY is set in the user's environment.
 /// Codex CLI requires this env var to exist; we set a dummy placeholder
 /// since the local proxy injects the real key.
-fn ensure_openai_api_key_in_shell_rc() -> Result<(), AppError> {
+pub(crate) fn ensure_openai_api_key_in_shell_rc() -> Result<(), AppError> {
     // Set in current process so child processes inherit immediately
     if std::env::var("OPENAI_API_KEY").is_err() {
         std::env::set_var("OPENAI_API_KEY", "dummy");
@@ -1320,4 +1320,164 @@ mod backend_tests {
         let env = b.read(&[".gemini", ".env"]).unwrap().unwrap();
         assert!(!env.contains("GEMINI_API_BASE_URL"));
     }
+}
+
+// ─── Multi-target apply / clear ───
+//
+// `apply_to_targets` and `clear_targets_from_snapshots` are the new
+// entry points used by `Service::set_active` / `Service::clear_active`.
+// They iterate over a slice of `CliTarget` (Windows + each selected
+// WSL distro) so each gets its own base_url + installed-tools mask
+// + per-target snapshot.
+
+pub fn apply_to_targets(
+    targets: &[crate::cli_target::CliTarget],
+    api_key: &str,
+    claude_model: Option<&str>,
+    claude_small_model: Option<&str>,
+    codex_model: Option<&str>,
+    _gemini_model: Option<&str>,
+) -> Result<(), AppError> {
+    use crate::cli_target::TargetType;
+
+    let prev_index = snapshot::build_index()?;
+    let current_keys: std::collections::HashSet<String> = targets
+        .iter()
+        .map(|t| {
+            t.snapshot_meta
+                .distro_name
+                .clone()
+                .unwrap_or_else(|| "windows".to_string())
+        })
+        .collect();
+
+    // 1. Restore + delete snapshots for targets removed since last apply.
+    for (key, meta) in &prev_index {
+        if current_keys.contains(key) {
+            continue;
+        }
+        log::info!("dropping target {key} — restoring previous state");
+        if let Some(snap) = snapshot::read(meta)? {
+            let backend: Box<dyn CliBackend> = match meta.target_type {
+                TargetType::Windows => Box::new(crate::cli_target::WindowsFsBackend::new()),
+                TargetType::Wsl => Box::new(crate::cli_target::WslBackend {
+                    distro: meta.distro_name.clone().unwrap_or_default(),
+                    home: meta.home.clone().unwrap_or_default(),
+                }),
+            };
+            if let Err(e) = snapshot::restore(&snap, &*backend) {
+                log::warn!("restore failed for dropped target {key}: {e}");
+            }
+        }
+        let _ = snapshot::delete(meta);
+    }
+
+    // 2. For each current target: capture snapshot if new, then write.
+    let mut at_least_one_success = false;
+    let mut windows_failed = false;
+    for target in targets {
+        let key = target
+            .snapshot_meta
+            .distro_name
+            .clone()
+            .unwrap_or_else(|| "windows".to_string());
+        let is_windows = matches!(target.snapshot_meta.target_type, TargetType::Windows);
+        if !prev_index.contains_key(&key) {
+            if let Err(e) = snapshot::capture(target) {
+                log::warn!("snapshot capture failed for {key}: {e}");
+                if is_windows {
+                    windows_failed = true;
+                }
+                continue;
+            }
+        }
+        match write_one_target(target, api_key, claude_model, claude_small_model, codex_model) {
+            Ok(()) => {
+                at_least_one_success = true;
+            }
+            Err(e) => {
+                log::warn!("apply failed for {key}: {e}");
+                if is_windows {
+                    windows_failed = true;
+                }
+            }
+        }
+    }
+
+    if windows_failed {
+        return Err(AppError::Config("apply: Windows target failed".into()));
+    }
+    if !at_least_one_success && !targets.is_empty() {
+        return Err(AppError::Config("apply: no target succeeded".into()));
+    }
+    Ok(())
+}
+
+fn write_one_target(
+    target: &crate::cli_target::CliTarget,
+    api_key: &str,
+    claude_model: Option<&str>,
+    claude_small_model: Option<&str>,
+    codex_model: Option<&str>,
+) -> Result<(), AppError> {
+    let b = &*target.backend;
+    if target.installed.claude {
+        write_claude_config_with(b, &target.base_url, api_key, claude_model, claude_small_model)?;
+    }
+    if target.installed.codex {
+        write_codex_config_with(b, &target.base_url, api_key, codex_model)?;
+    }
+    if target.installed.gemini {
+        write_gemini_config_with(b, &target.base_url, api_key)?;
+    }
+    Ok(())
+}
+
+/// Disable: walk the snapshot directory and restore every target it
+/// covers, then delete the directory. Replaces `clear_all_configs` for
+/// callers that want the multi-target behavior.
+pub fn clear_targets_from_snapshots() -> Result<(), AppError> {
+    use crate::cli_target::TargetType;
+    let dir = crate::paths::cli_config_backup_dir();
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("clear: read {} failed: {e}", path.display());
+                continue;
+            }
+        };
+        let snap: snapshot::TargetSnapshot = match serde_json::from_slice(&bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("malformed snapshot {}: {e}", path.display());
+                continue;
+            }
+        };
+        let target_type = if snap.target_type == "wsl" {
+            TargetType::Wsl
+        } else {
+            TargetType::Windows
+        };
+        let backend: Box<dyn CliBackend> = match target_type {
+            TargetType::Windows => Box::new(crate::cli_target::WindowsFsBackend::new()),
+            TargetType::Wsl => Box::new(crate::cli_target::WslBackend {
+                distro: snap.distro_name.clone().unwrap_or_default(),
+                home: snap.home.clone().unwrap_or_default(),
+            }),
+        };
+        if let Err(e) = snapshot::restore(&snap, &*backend) {
+            log::warn!("clear restore failed for {}: {e}", path.display());
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
 }
