@@ -3043,6 +3043,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml_edit 0.22.27",
+ "tower",
  "uuid",
  "windows-sys 0.52.0",
 ]

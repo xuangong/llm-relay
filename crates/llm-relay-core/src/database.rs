@@ -114,7 +114,119 @@ impl Database {
     pub fn init(config_dir: &Path) -> Result<Self, AppError> {
         let db_path = config_dir.join("config.db");
         let conn = Connection::open(db_path)?;
+        Self::apply_schema_and_migrations(&conn)?;
+        Ok(Database { conn: Mutex::new(conn) })
+    }
 
+    /// Test-only constructor: in-memory SQLite with full schema and
+    /// `user_version` pinned at the latest. Migrations are skipped because
+    /// they touch the OS keystore (v6/v7) and would force every test to
+    /// call `keystore::init()` first. Tests use fresh schemas, never the
+    /// migration path, so this is safe.
+    #[cfg(test)]
+    pub fn open_in_memory() -> Result<Self, AppError> {
+        let conn = Connection::open_in_memory()?;
+        // Base schema (idempotent) — copy of the block in
+        // apply_schema_and_migrations to avoid pulling in keystore work.
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS gateways (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL,
+                auth_key TEXT NOT NULL,
+                is_admin INTEGER DEFAULT 0,
+                session_token TEXT,
+                sort_order INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                user_id TEXT,
+                user_name TEXT,
+                claude_model TEXT,
+                claude_small_model TEXT,
+                codex_model TEXT,
+                gemini_model TEXT,
+                preferred_key_id TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS active_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                gateway_id TEXT,
+                key_id TEXT,
+                key_name TEXT,
+                key_value TEXT,
+                claude_model TEXT,
+                claude_small_model TEXT,
+                codex_model TEXT,
+                gemini_model TEXT,
+                auto_switch INTEGER DEFAULT 1,
+                applied_at TEXT,
+                last_switched_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS health_cache (
+                gateway_id TEXT PRIMARY KEY,
+                is_healthy INTEGER DEFAULT 0,
+                latency_ms INTEGER,
+                model_count INTEGER,
+                last_checked TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS health_check_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gateway_id TEXT NOT NULL,
+                is_healthy INTEGER NOT NULL,
+                latency_ms INTEGER,
+                checked_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS traffic_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gateway_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                status INTEGER NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                error_detail TEXT,
+                logged_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS usage_log (
+                gateway_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                hour TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                requests INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (gateway_id, model, hour)
+            );
+
+            CREATE TABLE IF NOT EXISTS wsl_distros (
+                name          TEXT PRIMARY KEY,
+                is_default    INTEGER NOT NULL DEFAULT 0,
+                selected      INTEGER NOT NULL DEFAULT 0,
+                home          TEXT,
+                user          TEXT,
+                has_claude    INTEGER NOT NULL DEFAULT 0,
+                has_codex     INTEGER NOT NULL DEFAULT 0,
+                has_gemini    INTEGER NOT NULL DEFAULT 0,
+                resolved_url  TEXT,
+                probed_at     TEXT
+            );
+
+            INSERT OR IGNORE INTO active_config (id, auto_switch) VALUES (1, 1);
+            PRAGMA user_version = 10;
+            ",
+        )?;
+        Ok(Database { conn: Mutex::new(conn) })
+    }
+
+    fn apply_schema_and_migrations(conn: &Connection) -> Result<(), AppError> {
         // Base schema (idempotent)
         conn.execute_batch(
             "
@@ -363,9 +475,7 @@ impl Database {
             conn.execute_batch("PRAGMA user_version = 10")?;
         }
 
-        Ok(Database {
-            conn: Mutex::new(conn),
-        })
+        Ok(())
     }
 
     // ─── Gateway CRUD ───

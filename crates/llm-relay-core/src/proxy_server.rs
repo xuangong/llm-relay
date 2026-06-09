@@ -7,6 +7,7 @@ use axum::{
     extract::State,
     http::{HeaderName, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
+    routing::{any, get},
 };
 use futures_util::StreamExt;
 
@@ -33,6 +34,28 @@ pub struct ProxyState {
     consecutive_errors: Arc<AtomicU32>,
 }
 
+async fn relay_ping() -> &'static str {
+    "ok"
+}
+
+async fn relay_reserved() -> (StatusCode, &'static str) {
+    (StatusCode::NOT_FOUND, "unknown relay endpoint")
+}
+
+/// Build the axum Router shared by every listener.
+///
+/// `/_relay/*` routes are local — registered explicitly before
+/// `.fallback(forward)` so unknown reserved-namespace paths return a
+/// local 404 instead of leaking to the upstream gateway. New
+/// `/_relay/*` endpoints register before the `{*rest}` wildcard.
+pub fn build_router(state: ProxyState) -> Router {
+    Router::new()
+        .route("/_relay/ping", get(relay_ping))
+        .route("/_relay/{*rest}", any(relay_reserved))
+        .fallback(forward)
+        .with_state(state)
+}
+
 pub async fn start(service: crate::Service) {
     start_with_listener(service, None).await
 }
@@ -51,9 +74,7 @@ pub async fn start_with_listener(service: crate::Service, listener: Option<std::
         consecutive_errors: Arc::new(AtomicU32::new(0)),
     };
 
-    let app = Router::new()
-        .fallback(forward)
-        .with_state(state);
+    let app = build_router(state);
 
     let addr = format!("127.0.0.1:{}", crate::paths::proxy_port());
     let tokio_listener = if let Some(std_l) = listener {
@@ -752,5 +773,48 @@ async fn try_proxy_failover(state: &ProxyState, current_gateway_id: &str, error_
             "Proxy failover: no healthy alternative to {} (status={})",
             current_gateway_id, error_status
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state() -> ProxyState {
+        let db = Database::open_in_memory().expect("open_in_memory");
+        ProxyState {
+            db: Arc::new(db),
+            switch_lock: Arc::new(tokio::sync::Mutex::new(())),
+            sink: Arc::new(crate::events::NullSink),
+            consecutive_errors: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_ping_returns_200_ok() {
+        let app = build_router(test_state());
+        let resp = app
+            .oneshot(Request::builder().uri("/_relay/ping").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn relay_reserved_namespace_returns_404_locally() {
+        let app = build_router(test_state());
+        let resp = app
+            .oneshot(Request::builder().uri("/_relay/unknown").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        // 404 produced by relay_reserved, NOT forwarded upstream (which
+        // would return 503 "No active config" from forward()). The body
+        // proves it.
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"unknown relay endpoint");
     }
 }
