@@ -343,6 +343,26 @@ impl Database {
             conn.execute_batch("PRAGMA user_version = 9")?;
         }
 
+        if version < 10 {
+            // WSL2 distro cache. Table exists on all platforms (harmless when
+            // unused) so SQLite migrations are platform-agnostic.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS wsl_distros (
+                    name          TEXT PRIMARY KEY,
+                    is_default    INTEGER NOT NULL DEFAULT 0,
+                    selected      INTEGER NOT NULL DEFAULT 0,
+                    home          TEXT,
+                    user          TEXT,
+                    has_claude    INTEGER NOT NULL DEFAULT 0,
+                    has_codex     INTEGER NOT NULL DEFAULT 0,
+                    has_gemini    INTEGER NOT NULL DEFAULT 0,
+                    resolved_url  TEXT,
+                    probed_at     TEXT
+                );",
+            )?;
+            conn.execute_batch("PRAGMA user_version = 10")?;
+        }
+
         Ok(Database {
             conn: Mutex::new(conn),
         })
@@ -941,5 +961,75 @@ impl Database {
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    // ─── WSL Distros ───
+
+    pub fn list_wsl_distros(&self) -> Result<Vec<crate::wsl::distro::DistroRow>, AppError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, is_default, selected, home, user, has_claude, has_codex,
+                    has_gemini, resolved_url, probed_at
+             FROM wsl_distros ORDER BY name"
+        )?;
+        let rows = stmt.query_map([], |r| Ok(crate::wsl::distro::DistroRow {
+            name: r.get(0)?,
+            is_default: r.get::<_, i64>(1)? != 0,
+            selected: r.get::<_, i64>(2)? != 0,
+            home: r.get(3)?,
+            user: r.get(4)?,
+            has_claude: r.get::<_, i64>(5)? != 0,
+            has_codex: r.get::<_, i64>(6)? != 0,
+            has_gemini: r.get::<_, i64>(7)? != 0,
+            resolved_url: r.get(8)?,
+            probed_at: r.get(9)?,
+        }))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn upsert_wsl_distro(&self, row: &crate::wsl::distro::DistroRow) -> Result<(), AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO wsl_distros
+             (name, is_default, selected, home, user, has_claude, has_codex, has_gemini, resolved_url, probed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(name) DO UPDATE SET
+                is_default=excluded.is_default,
+                home=excluded.home,
+                user=excluded.user,
+                has_claude=excluded.has_claude,
+                has_codex=excluded.has_codex,
+                has_gemini=excluded.has_gemini,
+                resolved_url=excluded.resolved_url,
+                probed_at=excluded.probed_at",
+            params![
+                row.name,
+                row.is_default as i64,
+                row.selected as i64,
+                row.home,
+                row.user,
+                row.has_claude as i64,
+                row.has_codex as i64,
+                row.has_gemini as i64,
+                row.resolved_url,
+                row.probed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_wsl_distro_selected(&self, name: &str, selected: bool) -> Result<(), AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE wsl_distros SET selected = ?1 WHERE name = ?2",
+            params![selected as i64, name],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_wsl_distro(&self, name: &str) -> Result<(), AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM wsl_distros WHERE name = ?1", params![name])?;
+        Ok(())
     }
 }
