@@ -74,34 +74,50 @@ let app = Router::new()
 - 响应纯字符串，不做鉴权（local-only 监听，没有威胁）
 - 后续若加 `/_relay/version` 等：在 `relay_reserved` 兜底前显式注册即可
 
-每个候选 URL **都跑一次真实 HTTP probe**。最小 distro 可能既没 curl 也没 wget，所以显式 fallback，二者全无时跳到最后一招用 `/dev/tcp`（bash builtin，几乎所有 distro 都有）：
+每个候选 URL **都跑一次真实 HTTP probe**。curl 或 wget 二选一是**自动探测的硬要求**。`/dev/tcp` 仅在 bash + GNU `timeout` 都可用时作为 best-effort 兜底（很多 Alpine 默认只有 busybox 的 ash 和 timeout，没 bash 也没 GNU coreutils）：
 
 ```sh
 # 从 distro 内部探测，验证 Windows 上的 Relay 监听确实可达
 wsl -d <D> -e sh -c '
   probe() {
     url="$1"
+    can_tcp_check="$2"  # "1" 仅当对应 listener bind 成功才允许 TCP-only 兜底
     if command -v curl >/dev/null 2>&1; then
       code=$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 2 "$url/_relay/ping" 2>/dev/null)
-      [ "$code" = "200" ]
+      [ "$code" = "200" ] && return 0
+      return 1
     elif command -v wget >/dev/null 2>&1; then
       wget -q -O /dev/null --timeout=2 --tries=1 "$url/_relay/ping" 2>/dev/null
-    else
-      # bash /dev/tcp fallback — 只验 TCP 通，不验 200，但比误判 unreachable 强
+      return $?
+    elif [ "$can_tcp_check" = "1" ] && command -v bash >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+      # best-effort：只验 TCP 通，不验 HTTP 200
       host=$(echo "$url" | sed -E "s|http://([^:/]+).*|\\1|")
       port=$(echo "$url" | sed -E "s|http://[^:]+:([0-9]+).*|\\1|")
       timeout 2 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null
+      return $?
+    else
+      return 1  # 都没有 → 此 distro 不可自动探测
     fi
   }
-  for url in "http://host.docker.internal:18080" "http://127.0.0.1:18080"; do
-    if probe "$url"; then echo "ok $url"; exit 0; fi
-  done
+  # 调用方根据 listener bind 结果传入 "host_can_tcp" / "loopback_can_tcp"
+  if probe "http://host.docker.internal:18080" "$HDI_TCP_OK"; then echo "ok http://host.docker.internal:18080"; exit 0; fi
+  if probe "http://127.0.0.1:18080"           "$LOOPBACK_TCP_OK"; then echo "ok http://127.0.0.1:18080"; exit 0; fi
   echo "unreachable"
   exit 1
 '
 ```
 
-不把 curl 当依赖文档化——某些 server-oriented distro（Alpine、distroless 衍生品）真的没装。`/dev/tcp` 路径只能验 TCP 不能验 200，可能把"监听了但不是 Relay"的情况判通；考虑到本机 18080 端口被无关进程占用的概率极低，这个 trade-off 可接受。
+Rust 端调用时根据 §2.1 末尾 listener bind 结果设环境变量：
+- `LOOPBACK_TCP_OK=1`（127.0.0.1 listener 必选，bind 永远成功；mirror 模式下 distro 里访问 127.0.0.1 才有意义）
+- `HDI_TCP_OK=1` 仅当 WSL gateway IP listener bind 成功（否则别的进程占了那个端口，TCP-only 探测会误判 reachable）
+
+#### 探测失败的语义
+- 候选 URL 都不通 → 该 distro 标 "Unreachable"。如果原因是"没有 curl 也没有 wget"，UI 进一步提示：
+  ```
+  Auto-probe needs curl or wget inside the distro.
+  Install one (e.g., `sudo apt install curl`) and click 🔄 Refresh.
+  ```
+- 这把"工具链问题"和"网络问题"区分开：前者用户能行动（一行 apt），后者要查 mirror 模式 / `/etc/hosts`
 
 选择规则（**严格按返回顺序**）：
 
@@ -111,7 +127,7 @@ wsl -d <D> -e sh -c '
 2. `host.docker.internal` 优先于 `127.0.0.1`（前者在两种模式都通；mirror 模式下两者都通，前者仍然正常工作，不需要区分模式）
 3. 都不通 → `resolved_url = NULL`，UI 标红 "Unreachable"，apply 时该 distro 被跳过，warning 进 events
 4. 探测失败的常见原因：WSL <0.65 且 `generateHosts=false`、用户改了 `/etc/hosts`、Windows 防火墙拦了 WSL adapter（罕见，因为是 loopback 类接口）
-5. `/dev/tcp` 路径的退化风险：若本机 18080 被无关进程占用，会被误判为 reachable。Relay 启动时已独占 18080（lifecycle 锁），所以实操中只有"Relay 没启动却跑了 distro probe"这种顺序错误才会触发——属于调用方 bug 而非数据风险
+5. `/dev/tcp` 退化路径的风险界定：TCP-only 验证只在**对应 listener bind 成功**的前提下才被允许（见上方 `HDI_TCP_OK` / `LOOPBACK_TCP_OK` 标志）。lifecycle 锁保证 127.0.0.1:18080 永远是 Relay 自己；WSL gateway IP 端口若被别的进程占了，Relay 端 bind 会失败，此时 `HDI_TCP_OK=0`，该候选 URL 跳过 TCP-only 兜底——这样不会"TCP 通了但其实连到不是 Relay 的进程"
 
 不再用 `getent hosts` 或 `/proc/sys/kernel/osrelease` 做间接推断——它们只能证明"名字存在"或"是 WSL2"，不能证明"我能 HTTP 打到 Windows"。Mirror 模式的判定也归约成 "127.0.0.1 能 HTTP 通"，不再查内核版本。
 
