@@ -6,6 +6,7 @@ import { GatewayList } from "@/components/GatewayList";
 import { AddGatewayCard } from "@/components/AddGatewayCard";
 import { TrafficLogPanel } from "@/components/TrafficLogPanel";
 import { UsagePanel } from "@/components/UsagePanel";
+import { DisableRelayDialog } from "@/components/DisableRelayDialog";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
@@ -13,7 +14,7 @@ import * as api from "@/lib/api";
 import type { GatewayWithHealth, ActiveConfig } from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n } from "@/lib/i18n";
-import { RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle } from "lucide-react";
+import { RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle, PowerOff } from "lucide-react";
 
 function App() {
   const { t, lang, toggleLang } = useI18n();
@@ -32,6 +33,7 @@ function App() {
   const [editingClientName, setEditingClientName] = useState(false);
   const [clientNameDraft, setClientNameDraft] = useState("");
   const clientNameInputRef = useRef<HTMLInputElement>(null);
+  const [disableOpen, setDisableOpen] = useState(false);
 
   const loadGateways = useCallback(async () => {
     try {
@@ -250,6 +252,18 @@ function App() {
               <HelpCircle className="h-3.5 w-3.5" />
             </Button>
 
+            {activeConfig?.gatewayId && (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setDisableOpen(true)}
+                className="h-7 w-7 transition-elegant hover:bg-destructive/10 hover:text-destructive"
+                title={t('header.disableRelay')}
+              >
+                <PowerOff className="h-3.5 w-3.5" />
+              </Button>
+            )}
+
             <Button
               variant="ghost"
               size="icon"
@@ -372,6 +386,15 @@ function App() {
           </div>
         )}
       </div>
+
+      <DisableRelayDialog
+        open={disableOpen}
+        onOpenChange={setDisableOpen}
+        onDisabled={() => {
+          setActiveConfig(null);
+          loadAll();
+        }}
+      />
 
     </div>
   );

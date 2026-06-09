@@ -196,6 +196,37 @@ export const readCurrentConfig = () =>
 export const clearConfig = () =>
   invoke<void>("clear_config");
 
+export interface ClaudeSnapshot {
+  anthropicBaseUrl: string | null;
+  anthropicModel: string | null;
+  anthropicSmallFastModel: string | null;
+  anthropicAuthToken: string | null;
+}
+
+export interface CodexSnapshot {
+  openaiApiKey: string | null;
+  model: string | null;
+  modelProvider: string | null;
+  copilotGatewayProviderToml: string | null;
+}
+
+export interface GeminiSnapshot {
+  geminiApiKey: string | null;
+  googleGeminiBaseUrl: string | null;
+  geminiApiBaseUrl: string | null;
+  selectedAuthType: string | null;
+}
+
+export interface CliConfigSnapshot {
+  capturedAt: string;
+  claude: ClaudeSnapshot;
+  codex: CodexSnapshot;
+  gemini: GeminiSnapshot;
+}
+
+export const getConfigSnapshot = () =>
+  invoke<CliConfigSnapshot | null>("get_config_snapshot");
+
 // ─── Settings ───
 
 export const getActiveConfig = () =>

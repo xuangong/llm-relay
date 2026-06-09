@@ -310,6 +310,11 @@ pub fn read_current_config() -> Result<config_writer::CurrentCliConfig, String> 
 }
 
 #[tauri::command]
+pub fn get_config_snapshot() -> Result<Option<config_writer::CliConfigSnapshot>, String> {
+    config_writer::read_snapshot().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn clear_config(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,

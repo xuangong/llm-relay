@@ -149,6 +149,7 @@ pub fn run() {
             commands::apply_config,
             commands::read_current_config,
             commands::clear_config,
+            commands::get_config_snapshot,
             commands::get_active_config_cmd,
             commands::get_settings,
             commands::update_settings,
