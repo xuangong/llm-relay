@@ -47,17 +47,32 @@ WSL2 网关 IP 是 Windows 上虚拟网卡 `vEthernet (WSL)` 的 IPv4，通常�
 
 #### Per-distro URL 探测
 
-apply 时（不是 Relay 启动时）对每个勾选的 distro 跑一次探测，选定该 distro 的 URL：
+apply 时（不是 Relay 启动时）对每个勾选的 distro 跑一次探测，**连通性验证是强制的**——只验证 DNS 解析不够，因为名字解析到一个不可达地址会写出永久坏掉的 URL（配置 write-once）。
 
+前置条件：本步骤跑之前，§2.1 末尾的 `/_relay/ping` 路由（轻量 200 OK，无副作用）必须已挂在 proxy 上，且 Relay 已 bind `127.0.0.1:18080` + `<WSL gateway IP>:18080`（若有）。
+
+每个候选 URL **都跑一次真实 HTTP probe**：
+
+```sh
+# 从 distro 内部探测，验证 Windows 上的 Relay 监听确实可达
+wsl -d <D> -e sh -c '
+  for url in "http://host.docker.internal:18080" "http://127.0.0.1:18080"; do
+    # 用 wget 或 curl，取 distro 里哪个存在；连接 + 200 双重确认
+    code=$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 2 "$url/_relay/ping" 2>/dev/null)
+    if [ "$code" = "200" ]; then echo "ok $url"; exit 0; fi
+  done
+  echo "unreachable"
+  exit 1
+'
 ```
-1. wsl -d <D> -e getent hosts host.docker.internal
-   → 成功 → 候选 URL = host.docker.internal:18080
-2. 否则 wsl -d <D> -e cat /proc/sys/kernel/osrelease
-   → 包含 "WSL2" 且能解析到 127.0.0.1（mirror 模式）
-   → 候选 URL = 127.0.0.1:18080
-   注：实际验证连通性可在选定后用 curl --max-time 2 一次性确认
-3. 都不行 → warning：该 distro 跳过 apply，UI 标红"Unreachable: 请启用 mirror 模式或开启 /etc/hosts 自动注入"，但 checkbox 仍可勾选（不禁用——用户可能就是想点 Refresh 重试）
-```
+
+选择规则（**严格按返回顺序**）：
+
+1. 第一个返回 200 的 URL 即为该 distro 的 `resolved_url`。`host.docker.internal` 优先于 `127.0.0.1`（前者在两种模式都通，是 NAT 模式的唯一选择；mirror 模式下两者都通，前者也能正常工作，不需要区分模式）
+2. 都不通 → `resolved_url = NULL`，UI 标红 "Unreachable"，apply 时该 distro 被跳过，warning 进 events
+3. 探测失败的常见原因：WSL <0.65 且 `generateHosts=false`、用户改了 `/etc/hosts`、Windows 防火墙拦了 WSL adapter（罕见，因为是 loopback 类接口）
+
+不再用 `getent hosts` 或 `/proc/sys/kernel/osrelease` 做间接推断——它们只能证明"名字存在"或"是 WSL2"，不能证明"我能 HTTP 打到 Windows"。Mirror 模式的判定也归约成 "127.0.0.1 能 HTTP 通"，不再查内核版本。
 
 探测结果（resolved URL）随 distro 缓存到 `wsl_distros.resolved_url` 字段。Refresh 按钮重跑探测。
 
@@ -70,20 +85,44 @@ apply 时（不是 Relay 启动时）对每个勾选的 distro 跑一次探测�
 - 启动时枚举 Windows 网卡找 `vEthernet (WSL)`，找到 → bind；找不到 → 跳过
 - 周期重检测（见 §3.5 状态机）：网关 IP 变化 → cancel 旧 WSL listener task，spawn 新的；`127.0.0.1` listener task 永不动
 
-#### Listener 生命周期
+#### Listener 生命周期与 ProxyHandle 所有权
 
-`proxy_server::start` 接收一个 `Vec<TcpListener>`（lifecycle 层已 bind 好），为每个 listener spawn 一个 tokio task 跑 `axum::serve`，每个 task 持有自己的 `CancellationToken`。`ProxyState` 暴露：
+当前 `proxy_server::start` 是一个长期运行的 `axum::serve` 任务，没有外部句柄。新设计要求**多 listener + 可重 bind**，所以重构成"启动返回句柄"模式：
 
 ```rust
+// proxy_server.rs
 pub struct ProxyHandle {
-    primary_token: CancellationToken,  // 127.0.0.1 — 关 Relay 时一并 cancel
-    wsl_listener: Mutex<Option<(IpAddr, CancellationToken, JoinHandle<()>)>>,
+    primary_token: CancellationToken,         // 127.0.0.1 — 关 Relay 时一并 cancel
+    wsl_listener: Mutex<Option<WslBound>>,    // 可热替换
+    state: Arc<ProxyState>,                   // spawn 新 listener 时复用
+}
+
+struct WslBound {
+    ip: IpAddr,
+    token: CancellationToken,
+    join: JoinHandle<()>,
 }
 
 impl ProxyHandle {
-    pub async fn rebind_wsl(&self, new_ip: Option<IpAddr>);  // cancel + 可选 spawn
+    /// new_ip = None → 仅取消 WSL listener；Some → 取消旧的（如有）+ bind 新 IP + spawn
+    pub async fn rebind_wsl(&self, new_ip: Option<IpAddr>) -> Result<(), AppError>;
+    pub async fn shutdown(&self);  // cancel primary + wsl
 }
+
+pub async fn start_with_listeners(
+    service: Service,
+    primary: TcpListener,           // 127.0.0.1，必选
+    initial_wsl: Option<(IpAddr, TcpListener)>,  // 可选，启动时若 WSL 网卡可用就传
+) -> ProxyHandle;
 ```
+
+**所有权链**：
+- `Service`（`crates/llm-relay-core/src/service.rs`）新增字段 `proxy: Arc<ProxyHandle>`，由 `lifecycle.rs` 在启动时 bind listeners 后调用 `start_with_listeners` 拿到，塞进 Service
+- 状态机（§3.5）跑在一个 Service 持有的后台 task 里，task 拿 `service.proxy.clone()`，gateway IP 变化时调 `proxy.rebind_wsl(Some(new_ip))`
+- 关 Relay 时（`Service::shutdown` / lifecycle drop）调 `proxy.shutdown()`，cancel 所有 token，await 所有 join
+- Tauri 命令 / TUI 命令需要触发 rebind（例如 Settings 里点 "Reconnect WSL"）→ 通过 `Service` 暴露 `pub async fn reconnect_wsl(&self)` 包装一层（重新探测 IP + 调 rebind）
+
+**WSL bind 失败处理**：`rebind_wsl(Some(ip))` 内部 bind 报错（端口已占 / IP 已消失）→ `wsl_listener` 保持 `None` + 返回 `Err`，调用方记 warning 进 events；`primary_token` 不受影响，Relay 仍为 Windows target 可用。
 
 WSL bind 失败（端口已被占 / IP 已消失）→ warning 进 events，`127.0.0.1` listener 不受影响，Relay 继续可用。
 
@@ -268,18 +307,36 @@ prev_index = build_index(snapshot_dir)
 
 ### 2.5 老用户迁移
 
-升级到带 WSL2 支持的版本时，启动时一次性：
+升级到带 WSL2 支持的版本时，启动时一次性。**不能只 rename**——新格式要求顶层有 `target_type: "windows"` 字段，老文件没有，clear 路径会拒绝。流程：
 
 ```rust
-if old_path = cli-config-backup.json (file) exists
-   && new_dir = cli-config-backup/ does not exist
-{
-    mkdir new_dir;
-    rename old_path -> new_dir/windows.json;
+let old_path = config_dir().join("cli-config-backup.json");
+let new_dir  = config_dir().join("cli-config-backup");
+let new_path = new_dir.join("windows.json");
+
+if old_path.exists() && !new_path.exists() {
+    fs::create_dir_all(&new_dir)?;
+
+    // 1) 读老 JSON（CliConfigSnapshot 结构，没有 target_type）
+    let old_bytes = fs::read(&old_path)?;
+    let mut v: serde_json::Value = serde_json::from_slice(&old_bytes)?;
+
+    // 2) 补字段：target_type + distro_name（None for windows）
+    let obj = v.as_object_mut()
+        .ok_or_else(|| AppError::Config("legacy snapshot is not a JSON object".into()))?;
+    obj.insert("target_type".into(), json!("windows"));
+    // distro_name 字段留空 / 不存在，反序列化端用 Option
+
+    // 3) 原子写新文件
+    let new_bytes = serde_json::to_vec_pretty(&v)?;
+    atomic_write(&new_path, &new_bytes)?;
+
+    // 4) 删旧文件（成功才删，失败下次启动重试）
+    fs::remove_file(&old_path)?;
 }
 ```
 
-幂等，安全。
+幂等：`new_path` 已存在就不动；老文件不存在就不做事。读旧 JSON 失败（格式损坏）→ rename 旧文件加 `.corrupt` 后缀，记 warning，跳过迁移（避免每次启动重复失败）。
 
 ### 2.6 文档
 
