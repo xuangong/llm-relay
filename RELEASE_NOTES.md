@@ -1,20 +1,23 @@
-# LLM Relay v0.3.2
+# LLM Relay v0.3.3
 
-## 修复
+## 新增
 
-### 🐛 第二次启动 GUI 不再误报 "AlreadyRunning"
-- 把 lifecycle guard（文件锁 + 端口绑定）的获取从 `tauri::Builder` 之前挪到 `.setup()` 内部
-- 之前 guard 抢在 `tauri_plugin_single_instance` 之前执行，重复启动 GUI 会弹错误对话框
-- 现在由 single-instance 插件先静默 focus 已有窗口；guard 失败只在 GUI vs 守护进程的真实冲突时触发，daemon-takeover 对话框才有意义
+### 🔌 一键停用中继 + 自动恢复原始 CLI 配置
+- Header 新增 "Disable Relay" 按钮（仅在已激活时显示）
+- 首次启用中继时自动快照 `~/.claude/settings.json`、`~/.codex/config.toml` + `auth.json`、`~/.gemini/.env` + `settings.json` 里被覆盖的字段
+- 停用时弹出确认框，逐条列出"将恢复为 X"或"将删除（原本未设置）"
+- 有快照：恢复每个字段到原值（Codex `[model_providers.copilot_gateway]` 整段还原）
+- 无快照：等价于旧的 clear 行为，仅清除中继写入的字段，CLI 回退默认（如官方订阅接口）
+- 快照存放在 `~/.llm-relay/cli-config-backup.json`，停用成功后自动删除
+
+之前停用中继得手动改回每个 CLI 的配置文件——现在一键解决。
 
 ## 下载
 
 | 平台 | 文件 |
 |------|------|
-| macOS Universal | `LLM Relay_0.3.2_universal.dmg` |
-| Windows GUI | `LLM Relay_0.3.2_x64-setup.exe` |
+| macOS Universal | `LLM Relay_0.3.3_universal.dmg` |
+| Windows GUI | `LLM Relay_0.3.3_x64-setup.exe` |
 | TUI/agent Linux x64 | `llm-relay-agent-x86_64-unknown-linux-gnu`, `llm-relay-tui-x86_64-unknown-linux-gnu` |
 | TUI/agent macOS Apple Silicon | `llm-relay-agent-aarch64-apple-darwin`, `llm-relay-tui-aarch64-apple-darwin` |
 | TUI/agent macOS Intel | `llm-relay-agent-x86_64-apple-darwin`, `llm-relay-tui-x86_64-apple-darwin` |
-
-完整 v0.3.x 功能说明见 [v0.3.0 release notes](https://github.com/xuangong/llm-relay/releases/tag/v0.3.0)。
