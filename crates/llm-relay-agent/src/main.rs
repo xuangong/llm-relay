@@ -31,11 +31,24 @@ async fn main() -> Result<()> {
     let sink: llm_relay_core::SharedEventSink = Arc::new(ipc_server::BusSink { bus: bus.clone() });
     let service = Service::new(db.clone(), sink);
 
-    // Spawn proxy + health. Hand off the pre-bound listener so we don't re-bind
-    // and risk a TOCTOU race against another process.
-    let proxy_listener = guard.take_listener();
-    let s1 = service.clone();
-    tokio::spawn(async move { llm_relay_core::proxy_server::start_with_listener(s1, proxy_listener).await });
+    // Spawn proxy + health. Hand off the pre-bound listeners so we don't
+    // re-bind and risk a TOCTOU race against another process. The WSL
+    // listener (if present) gets a serve task too, sharing the same
+    // ProxyState.
+    let primary = guard.take_listener().expect("primary listener pre-bound by lifecycle");
+    let initial_wsl = guard.wsl_listener.take();
+    let proxy_state = llm_relay_core::proxy_server::ProxyState::new(
+        service.db.clone(),
+        service.switch_lock.clone(),
+        service.sink.clone(),
+    );
+    let proxy_handle = llm_relay_core::proxy_server::start_with_listeners(
+        proxy_state,
+        primary,
+        initial_wsl,
+    )
+    .await;
+    let service = service.with_proxy(proxy_handle.clone());
     let s2 = service.clone();
     tokio::spawn(async move { llm_relay_core::health::health_check_loop(s2).await });
 

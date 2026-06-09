@@ -69,6 +69,9 @@ pub fn run() {
                 Err(()) => std::process::exit(1),
             };
             let proxy_listener = lifecycle_guard.take_listener();
+            // Take the WSL listener before forget — once the guard is leaked
+            // we can no longer reach the field.
+            let initial_wsl = lifecycle_guard.wsl_listener.take();
             // Keep the guard alive for the lifetime of the app by leaking
             // it. Drop on process exit isn't reached anyway because Tauri
             // calls process::exit, but if we let the guard drop early the
@@ -86,6 +89,29 @@ pub fn run() {
                 std::sync::Arc::new(tauri_sink::TauriSink::new(app.handle().clone()));
 
             let service = std::sync::Arc::new(llm_relay_core::Service::new(db.clone(), sink.clone()));
+
+            // Spawn proxy server with both listeners. ProxyState is built
+            // directly from the same three Arcs Service holds, so the
+            // proxy can come up before we attach its handle back onto
+            // Service via with_proxy (avoiding a Service ↔ ProxyHandle
+            // construction cycle).
+            let proxy_state = llm_relay_core::proxy_server::ProxyState::new(
+                service.db.clone(),
+                service.switch_lock.clone(),
+                service.sink.clone(),
+            );
+            let proxy_handle_fut = llm_relay_core::proxy_server::start_with_listeners(
+                proxy_state,
+                proxy_listener.expect("primary listener pre-bound by lifecycle"),
+                initial_wsl,
+            );
+            // start_with_listeners is async only because it uses the tokio
+            // runtime to spawn serve tasks; it doesn't await them. Drive
+            // it on Tauri's runtime.
+            let proxy_handle = tauri::async_runtime::block_on(proxy_handle_fut);
+            // Stash the proxy handle on the app so future Tauri commands
+            // (Reconnect WSL, etc.) can call rebind_wsl/shutdown.
+            app.manage(proxy_handle.clone());
 
             let state = AppState {
                 db: db.clone(),
@@ -112,18 +138,9 @@ pub fn run() {
                 let _ = window.show();
             }
 
-            // Start local proxy server (http://127.0.0.1:18080) using the
-            // listener that was bound atomically with the lifecycle lock.
-            {
-                let svc_for_proxy = service.clone();
-                tauri::async_runtime::spawn(async move {
-                    llm_relay_core::proxy_server::start_with_listener(
-                        (*svc_for_proxy).clone(),
-                        proxy_listener,
-                    )
-                    .await;
-                });
-            }
+            // Start local proxy server (http://127.0.0.1:18080 + optional
+            // WSL gateway-IP listener) — already done above via
+            // start_with_listeners.
 
             // Start health check loop
             {

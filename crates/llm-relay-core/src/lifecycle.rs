@@ -16,7 +16,7 @@
 use crate::paths;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::net::TcpListener;
+use std::net::{IpAddr, TcpListener};
 
 #[derive(Debug)]
 pub enum AcquireError {
@@ -62,6 +62,11 @@ pub struct LifecycleGuard {
     /// happens atomically with the file lock — no TOCTOU window between
     /// "probe and drop" and "proxy server binds for real".
     pub proxy_listener: Option<TcpListener>,
+    /// Pre-bound listener on the WSL2 virtual NIC IP, when present.
+    /// Best-effort: missing WSL adapter, or some other process holding
+    /// `<wsl_ip>:18080`, leaves this `None` and the agent stays usable
+    /// for Windows-side CLIs.
+    pub wsl_listener: Option<(IpAddr, TcpListener)>,
 }
 
 impl LifecycleGuard {
@@ -101,9 +106,26 @@ impl LifecycleGuard {
         let mut pf = File::create(paths::pid_file())?;
         writeln!(pf, "{pid}")?;
 
+        // 5. Best-effort WSL2 listener bind. Failure here is non-fatal:
+        //    no WSL adapter, port already taken on that IP, etc. all
+        //    leave the agent fully functional for Windows-side CLIs.
+        let wsl_listener = crate::wsl::network::find_wsl_gateway_ip().and_then(|ip| {
+            match TcpListener::bind((ip, paths::proxy_port())) {
+                Ok(l) => Some((ip, l)),
+                Err(e) => {
+                    log::warn!(
+                        "WSL bind {ip}:{} skipped: {e}",
+                        paths::proxy_port()
+                    );
+                    None
+                }
+            }
+        });
+
         Ok(Self {
             _lock: lock,
             proxy_listener: Some(proxy_listener),
+            wsl_listener,
         })
     }
 
