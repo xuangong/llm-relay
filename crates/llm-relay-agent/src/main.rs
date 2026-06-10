@@ -52,6 +52,11 @@ async fn main() -> Result<()> {
     let s2 = service.clone();
     tokio::spawn(async move { llm_relay_core::health::health_check_loop(s2).await });
 
+    // Start the WSL detection state machine. On non-Windows / no-WSL
+    // hosts the first tick finds nothing and the machine settles into
+    // Lazy mode (no periodic work).
+    let _wsl_sm = service.spawn_wsl_state_machine();
+
     let login_registry = Arc::new(login::LoginRegistry::new(bus.0.clone()));
     let shutdown = Arc::new(tokio::sync::Notify::new());
 

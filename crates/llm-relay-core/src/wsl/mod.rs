@@ -4,3 +4,4 @@ pub mod distro;
 pub mod fs;
 pub mod network;
 pub mod probe;
+pub mod state;

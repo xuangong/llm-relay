@@ -150,6 +150,16 @@ pub fn run() {
                 });
             }
 
+            // Start WSL detection state machine. Spawn requires the
+            // proxy handle, which is on Service via with_proxy. Since
+            // `service` here is Arc<Service> we need the proxy field
+            // populated — we attach it on a fresh local Service clone.
+            let svc_for_wsl: llm_relay_core::Service =
+                (*service).clone().with_proxy(proxy_handle.clone());
+            if let Some(sm) = svc_for_wsl.spawn_wsl_state_machine() {
+                app.manage(sm);
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
