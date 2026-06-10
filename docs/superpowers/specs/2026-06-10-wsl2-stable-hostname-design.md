@@ -40,15 +40,22 @@ We need a **distro-local hostname that we control**.
 
 3. Else (NAT + DD-hijacked OR HDI not present)
    ⇒ Inject /etc/hosts via `wsl.exe -d <D> -u root`:
-       <gw_ip> llm-relay.host
-     Probe http://llm-relay.host:<port>/_relay/ping
-     → 200 OK  ⇒ Write base_url = http://llm-relay.host:<port>.
+       <gw_ip> llm-relay-<port>.host
+     Probe http://llm-relay-<port>.host:<port>/_relay/ping
+     → 200 OK  ⇒ Write base_url = http://llm-relay-<port>.host:<port>.
      → fail    ⇒ ProbeOutcome::Unreachable. Surface in UI.
 ```
 
-`llm-relay.host` is our own name, no chance of upstream collision. Hosts file
-manipulation needs root, but WSL's `-u root` flag never prompts (the host has
-already authenticated this distro at registration time — by design).
+The hostname is **port-suffixed** (`llm-relay-18080.host` for the production
+GUI, `llm-relay-18081.host` for a dev session) so multiple Relay instances on
+the same host can coexist without their hosts entries colliding. The state
+machine knows its port via `paths::proxy_port()` and only manages its own
+line; it never touches another instance's entry. On disable / toggle-off, only
+the current instance's hostname is removed.
+
+`llm-relay-<port>.host` is our own name, no chance of upstream collision. Hosts
+file manipulation needs root, but WSL's `-u root` flag never prompts (the host
+has already authenticated this distro at registration time — by design).
 
 **State machine maintenance:**
 
