@@ -103,36 +103,47 @@ impl StateMachine {
 
         // 3. Re-probe URL for each selected distro. Skip unselected to
         //    avoid the wsl.exe cold-start cost on distros the user
-        //    doesn't want to manage.
-        let gw_ip = self.proxy.wsl_ip();
-        let binds = crate::wsl::resolve::ListenerBinds {
-            loopback: true,
-            host_docker_internal: gw_ip.is_some(),
-        };
-        for d in &distros {
-            if !d.selected {
-                continue;
-            }
-            let name = d.name.clone();
-            let resolve_res = tokio::task::spawn_blocking(move || {
-                crate::wsl::resolve::resolve_url_for_distro(&name, binds, gw_ip)
-            })
-            .await;
-            let resolved_url = match resolve_res {
-                Ok(Ok(crate::wsl::resolve::ResolveOutcome::Ok(url))) => Some(url),
-                Ok(Ok(_)) => None,
-                Ok(Err(e)) => {
-                    log::warn!("resolve {}: {e}", d.name);
-                    None
-                }
-                Err(e) => {
-                    log::warn!("resolve join {}: {e}", d.name);
-                    None
-                }
+        //    doesn't want to manage. Also skip the entire loop when no
+        //    gateway is active — otherwise tier-3 hosts injection
+        //    re-writes `/etc/hosts` pointing at a dead gateway after
+        //    Disable Relay (see followups spec #1).
+        let has_active_gateway = self
+            .db
+            .get_active_config()
+            .ok()
+            .and_then(|c| c.gateway_id)
+            .is_some();
+        if has_active_gateway {
+            let gw_ip = self.proxy.wsl_ip();
+            let binds = crate::wsl::resolve::ListenerBinds {
+                loopback: true,
+                host_docker_internal: gw_ip.is_some(),
             };
-            let mut row = d.clone();
-            row.resolved_url = resolved_url;
-            let _ = self.db.upsert_wsl_distro(&row);
+            for d in &distros {
+                if !d.selected {
+                    continue;
+                }
+                let name = d.name.clone();
+                let resolve_res = tokio::task::spawn_blocking(move || {
+                    crate::wsl::resolve::resolve_url_for_distro(&name, binds, gw_ip)
+                })
+                .await;
+                let resolved_url = match resolve_res {
+                    Ok(Ok(crate::wsl::resolve::ResolveOutcome::Ok(url))) => Some(url),
+                    Ok(Ok(_)) => None,
+                    Ok(Err(e)) => {
+                        log::warn!("resolve {}: {e}", d.name);
+                        None
+                    }
+                    Err(e) => {
+                        log::warn!("resolve join {}: {e}", d.name);
+                        None
+                    }
+                };
+                let mut row = d.clone();
+                row.resolved_url = resolved_url;
+                let _ = self.db.upsert_wsl_distro(&row);
+            }
         }
 
         // 4. Update mode based on what we found.

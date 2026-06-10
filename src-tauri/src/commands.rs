@@ -180,11 +180,9 @@ pub async fn fetch_models(
 #[tauri::command]
 pub async fn check_all_health(
     state: State<'_, AppState>,
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
 ) -> Result<Vec<GatewayWithHealth>, String> {
-    let sink: llm_relay_core::SharedEventSink =
-        std::sync::Arc::new(crate::tauri_sink::TauriSink::new(app_handle));
-    llm_relay_core::health::check_and_switch(state.db.clone(), state.switch_lock.clone(), sink).await;
+    llm_relay_core::health::check_and_switch(&state.service).await;
     state
         .db
         .list_gateways_with_health()
@@ -233,7 +231,7 @@ pub async fn apply_config(
     // gateway's key_id is meaningless here.
     let resolved_key_id = key_id
         .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_id.clone()) } else { None })
-        .ok_or("key_id is required (no existing key to re-use)")?;
+        .ok_or("This gateway has no API key yet. Click Login on the gateway row to fetch keys, then try Apply again.")?;
 
     // Model merge priority:
     //   1. UI-passed value

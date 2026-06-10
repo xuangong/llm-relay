@@ -37,11 +37,13 @@ async fn main() -> Result<()> {
     // ProxyState.
     let primary = guard.take_listener().expect("primary listener pre-bound by lifecycle");
     let initial_wsl = guard.wsl_listener.take();
+    let service_arc = Arc::new(service.clone());
     let proxy_state = llm_relay_core::proxy_server::ProxyState::new(
         service.db.clone(),
         service.switch_lock.clone(),
         service.sink.clone(),
-    );
+    )
+    .with_service(service_arc);
     let proxy_handle = llm_relay_core::proxy_server::start_with_listeners(
         proxy_state,
         primary,

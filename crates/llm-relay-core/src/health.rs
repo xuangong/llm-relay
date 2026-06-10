@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::database::{ActiveConfig, HealthCache};
-use crate::events::SharedEventSink;
 use crate::gateway;
+use crate::ipc::protocol::ModelSelection;
 use crate::Database;
 
 /// Minimum seconds between auto-switches to prevent flip-flopping.
@@ -18,18 +18,16 @@ const SWITCH_HYSTERESIS_SECS: i64 = 60;
 pub async fn health_check_loop(service: crate::Service) {
     log::info!("Health check loop started");
     loop {
-        check_and_switch(service.db.clone(), service.switch_lock.clone(), service.sink.clone()).await;
+        check_and_switch(&service).await;
         send_heartbeat(service.db.clone()).await;
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
 }
 
 /// Run a single round of health checks and auto-switch if needed.
-pub async fn check_and_switch(
-    db: Arc<Database>,
-    switch_lock: Arc<tokio::sync::Mutex<()>>,
-    sink: SharedEventSink,
-) {
+pub async fn check_and_switch(service: &crate::Service) {
+    let db = service.db.clone();
+    let sink = service.sink.clone();
     let gateways = match db.list_gateways() {
         Ok(gws) => gws,
         Err(_) => return,
@@ -128,11 +126,11 @@ pub async fn check_and_switch(
                 current_id,
                 best.name
             );
-            do_switch(db, switch_lock, sink, &best.id, &config).await;
+            do_switch(service, &best.id, &config).await;
         }
         (Some(best), None) => {
             log::info!("Auto-switch: none -> {} (first healthy)", best.name);
-            do_switch(db, switch_lock, sink, &best.id, &config).await;
+            do_switch(service, &best.id, &config).await;
         }
         (None, Some(_)) => {
             log::warn!("All gateways are offline");
@@ -154,46 +152,78 @@ fn should_switch_now(config: &ActiveConfig) -> bool {
 }
 
 pub async fn do_switch(
-    db: Arc<Database>,
-    switch_lock: Arc<tokio::sync::Mutex<()>>,
-    sink: SharedEventSink,
+    service: &crate::Service,
     new_gw_id: &str,
     current_config: &ActiveConfig,
 ) {
-    // Hold the switch lock to prevent concurrent switches
-    let _guard = switch_lock.lock().await;
-
-    let gw = match db.get_gateway(new_gw_id) {
+    let gw = match service.db.get_gateway(new_gw_id) {
         Ok(Some(gw)) => gw,
         _ => return,
     };
 
-    // With local proxy mode, no config file rewrite needed —
-    // the proxy reads active_config from DB on each request.
-    let now = chrono::Utc::now().to_rfc3339();
-    let new_config = ActiveConfig {
-        gateway_id: Some(gw.id.clone()),
-        key_id: current_config.key_id.clone(),
-        key_name: current_config.key_name.clone(),
-        key_value: current_config.key_value.clone(),
-        claude_model: current_config.claude_model.clone(),
-        claude_small_model: current_config.claude_small_model.clone(),
-        codex_model: current_config.codex_model.clone(),
-        gemini_model: current_config.gemini_model.clone(),
-        auto_switch: current_config.auto_switch,
-        applied_at: Some(now.clone()),
-        last_switched_at: Some(now),
+    // Pick a key to apply: prefer the gateway's preferred_key_id (set by
+    // a prior login/apply on this gateway); fall back to the current
+    // active key only if we are bouncing between gateways that share a key.
+    // Without a key_id, we cannot run a real apply — log + bail rather than
+    // silently rewriting the DB row to a state that doesn't match disk.
+    let key_id_opt = gw
+        .preferred_key_id
+        .clone()
+        .or_else(|| current_config.key_id.clone());
+    let Some(key_id_str) = key_id_opt else {
+        log::warn!(
+            "Auto-switch to {} skipped: no key_id available (no preferred key on gateway, \
+             no current active key). Active config left unchanged.",
+            gw.name
+        );
+        return;
     };
-    let _ = db.set_active_config(&new_config);
+
+    let gw_uuid = match uuid::Uuid::parse_str(&gw.id) {
+        Ok(u) => u,
+        Err(e) => {
+            log::warn!("Auto-switch: bad gateway uuid {}: {e}", gw.id);
+            return;
+        }
+    };
+    let key_uuid = match uuid::Uuid::parse_str(&key_id_str) {
+        Ok(u) => u,
+        Err(e) => {
+            log::warn!("Auto-switch: bad key uuid {key_id_str}: {e}");
+            return;
+        }
+    };
+
+    // Use per-gateway model preferences captured at last apply.
+    let models = ModelSelection {
+        claude: gw.claude_model.clone(),
+        claude_small: gw.claude_small_model.clone(),
+        codex: gw.codex_model.clone(),
+        gemini: gw.gemini_model.clone(),
+    };
+
+    if let Err(e) = service.set_active(gw_uuid, key_uuid, models).await {
+        log::warn!(
+            "Auto-switch apply failed for {}: {e}. Active config left unchanged.",
+            gw.name
+        );
+        return;
+    }
+
+    // Update last_switched_at so hysteresis works.
+    if let Ok(mut cfg) = service.db.get_active_config() {
+        cfg.last_switched_at = Some(chrono::Utc::now().to_rfc3339());
+        let _ = service.db.set_active_config(&cfg);
+    }
 
     // Signal tray refresh (Tauri sink intercepts this)
-    sink.emit(crate::TRAY_REFRESH_EVENT, serde_json::Value::Null);
+    service.sink.emit(crate::TRAY_REFRESH_EVENT, serde_json::Value::Null);
 
     let event_payload = serde_json::json!({
         "gatewayId": gw.id,
         "gatewayName": gw.name,
     });
-    sink.emit("gateway-switched", event_payload);
+    service.sink.emit("gateway-switched", event_payload);
 }
 
 /// Send a heartbeat to the active gateway so the server knows this client is online.

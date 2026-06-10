@@ -27,8 +27,17 @@ pub fn proxy_base_url() -> String {
 #[derive(Clone)]
 pub struct ProxyState {
     db: Arc<Database>,
+    /// Kept for backwards-compatible `ProxyState::new` signature; not
+    /// read directly — switch coordination is now owned by
+    /// `Service::set_active` via its own lock.
+    #[allow(dead_code)]
     switch_lock: Arc<tokio::sync::Mutex<()>>,
     sink: SharedEventSink,
+    /// Set once `start_with_listener(s)` is given a `Service`. Used by
+    /// `try_proxy_failover` to route auto-switch through the real apply
+    /// pipeline. None only when constructed via `ProxyState::new` (older
+    /// path) — failover degrades to a no-op in that case (logs a warning).
+    service: Option<Arc<crate::Service>>,
     /// Counts consecutive request errors (network failures or 5xx).
     /// Reset to 0 on any successful response.
     consecutive_errors: Arc<AtomicU32>,
@@ -48,8 +57,16 @@ impl ProxyState {
             db,
             switch_lock,
             sink,
+            service: None,
             consecutive_errors: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Attach a Service so failover can run real apply. Call after the
+    /// Service has been constructed.
+    pub fn with_service(mut self, service: Arc<crate::Service>) -> Self {
+        self.service = Some(service);
+        self
     }
 }
 
@@ -90,6 +107,7 @@ pub async fn start_with_listener(service: crate::Service, listener: Option<std::
         db: service.db.clone(),
         switch_lock: service.switch_lock.clone(),
         sink: service.sink.clone(),
+        service: None,
         consecutive_errors: Arc::new(AtomicU32::new(0)),
     };
 
@@ -929,14 +947,14 @@ async fn try_proxy_failover(state: &ProxyState, current_gateway_id: &str, error_
             "Proxy failover: {} → {} after {} consecutive errors (status={})",
             current_gateway_id, next_gw.name, ERROR_FAILOVER_THRESHOLD, error_status
         );
-        crate::health::do_switch(
-            state.db.clone(),
-            state.switch_lock.clone(),
-            state.sink.clone(),
-            &next_gw.id,
-            &config,
-        )
-        .await;
+        let Some(service) = state.service.as_ref() else {
+            log::warn!(
+                "Proxy failover skipped: no Service attached to ProxyState. \
+                 Active config unchanged. Use ProxyState::with_service() to enable."
+            );
+            return;
+        };
+        crate::health::do_switch(service, &next_gw.id, &config).await;
     } else {
         log::warn!(
             "Proxy failover: no healthy alternative to {} (status={})",
@@ -958,6 +976,7 @@ mod tests {
             db: Arc::new(db),
             switch_lock: Arc::new(tokio::sync::Mutex::new(())),
             sink: Arc::new(crate::events::NullSink),
+            service: None,
             consecutive_errors: Arc::new(AtomicU32::new(0)),
         }
     }

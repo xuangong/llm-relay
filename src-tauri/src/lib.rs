@@ -99,7 +99,8 @@ pub fn run() {
                 service.db.clone(),
                 service.switch_lock.clone(),
                 service.sink.clone(),
-            );
+            )
+            .with_service(service.clone());
             let proxy_handle_fut = llm_relay_core::proxy_server::start_with_listeners(
                 proxy_state,
                 proxy_listener.expect("primary listener pre-bound by lifecycle"),
