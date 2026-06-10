@@ -262,15 +262,21 @@ impl Service {
         )?;
 
         // Apply CLI config files so claude/codex/gemini CLIs use the proxy.
-        let proxy_url = crate::proxy_server::proxy_base_url();
-        crate::config_writer::apply_all_configs(
-            &proxy_url,
+        // Iterate over Windows + every selected WSL distro that has a
+        // resolved URL. Distros without resolved_url are skipped here
+        // and surface as "Unreachable" in the UI until Refresh succeeds.
+        let targets = self.build_apply_targets();
+        crate::config_writer::apply_to_targets(
+            &targets,
             crate::proxy_server::PLACEHOLDER_KEY,
             models.claude.as_deref(),
             models.claude_small.as_deref(),
             models.codex.as_deref(),
             models.gemini.as_deref(),
         )?;
+        // Windows-host shell env (OPENAI_API_KEY=dummy in shell rc / registry)
+        // is unrelated to per-target writes — keep this side-effect.
+        crate::config_writer::ensure_openai_api_key_in_shell_rc()?;
 
         crate::events::emit_typed(
             &*self.sink,
@@ -302,7 +308,7 @@ impl Service {
         };
         self.db.set_active_config(&config)?;
 
-        crate::config_writer::clear_all_configs()?;
+        crate::config_writer::clear_targets_from_snapshots()?;
 
         crate::events::emit_typed(
             &*self.sink,
@@ -658,6 +664,72 @@ impl Service {
             models.gemini.as_deref(),
         )?;
         Ok(())
+    }
+
+    /// Build the list of CLI targets to write configs for: Windows is
+    /// always present; each selected WSL distro is included only when it
+    /// has a probed `home` AND a `resolved_url`. Distros missing either
+    /// are logged and skipped (the UI surfaces them as Unreachable /
+    /// Unknown until the user clicks Refresh).
+    pub fn build_apply_targets(&self) -> Vec<crate::cli_target::CliTarget> {
+        use crate::cli_target::{
+            CliTarget, InstalledTools, SnapshotMeta, TargetType, WindowsFsBackend, WslBackend,
+        };
+
+        let mut targets: Vec<CliTarget> = Vec::new();
+
+        targets.push(CliTarget {
+            backend: Box::new(WindowsFsBackend::new()),
+            base_url: crate::proxy_server::proxy_base_url(),
+            installed: InstalledTools::ALL,
+            label: "windows".into(),
+            snapshot_meta: SnapshotMeta {
+                target_type: TargetType::Windows,
+                distro_name: None,
+                home: None,
+            },
+        });
+
+        let rows = self.db.list_wsl_distros().unwrap_or_default();
+        for row in rows {
+            if !row.selected {
+                continue;
+            }
+            let Some(url) = row.resolved_url.clone() else {
+                log::warn!(
+                    "WSL distro {} has no resolved_url — skipping apply",
+                    row.name
+                );
+                continue;
+            };
+            let Some(home) = row.home.clone() else {
+                log::warn!(
+                    "WSL distro {} has no probed home — skipping apply",
+                    row.name
+                );
+                continue;
+            };
+            targets.push(CliTarget {
+                backend: Box::new(WslBackend {
+                    distro: row.name.clone(),
+                    home: home.clone(),
+                }),
+                base_url: url,
+                installed: InstalledTools {
+                    claude: row.has_claude,
+                    codex: row.has_codex,
+                    gemini: row.has_gemini,
+                },
+                label: format!("wsl:{}", row.name),
+                snapshot_meta: SnapshotMeta {
+                    target_type: TargetType::Wsl,
+                    distro_name: Some(row.name),
+                    home: Some(home),
+                },
+            });
+        }
+
+        targets
     }
 }
 
