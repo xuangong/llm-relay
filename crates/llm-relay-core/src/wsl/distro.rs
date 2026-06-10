@@ -165,12 +165,24 @@ pub struct ProbeResult {
 }
 
 /// Probe a single distro for $HOME, whoami, and presence of the three CLI
-/// binaries. Single `wsl.exe -e sh -c` invocation to amortize cold-start
-/// cost. The per-binary loop avoids `&&` short-circuiting (a missing
-/// claude would otherwise mask later codex/gemini results).
+/// binaries. Single `wsl.exe` invocation to amortize cold-start cost. The
+/// per-binary loop avoids `&&` short-circuiting (a missing claude would
+/// otherwise mask later codex/gemini results).
+///
+/// Detection runs under the **user's $SHELL with `-ic`** (interactive shell)
+/// because user-level package managers (linuxbrew, asdf, nvm, npm-global)
+/// add their PATH only via `.bashrc` / `.zshrc`, which a login shell
+/// (`bash -lc`) does NOT source. Interactive shells in non-tty contexts
+/// still source their rc files, which is exactly what we need to see PATH
+/// the way the user actually does. Detection is forgiving — we only look
+/// for `<cli>=1` lines, so stray rc-file output is ignored.
 #[cfg(target_os = "windows")]
 pub fn probe_distro(name: &str) -> Result<ProbeResult, AppError> {
-    let script = r#"echo "home=$HOME"
+    // Outer `sh` runs the user's interactive shell via $SHELL -ic (so .bashrc
+    // / .zshrc are sourced and brew/asdf/nvm/etc PATH adjustments apply).
+    // Single-quoted heredoc to the inner shell so no host-side substitution.
+    let script = r#"$SHELL -ic '
+echo "home=$HOME"
 echo "user=$(whoami)"
 for c in claude codex gemini; do
   if command -v "$c" >/dev/null 2>&1; then
@@ -178,7 +190,7 @@ for c in claude codex gemini; do
   else
     echo "$c=0"
   fi
-done"#;
+done'"#;
     let out = crate::wsl::fs::__wsl_run_script(name, script)?;
     Ok(parse_probe_output(&out))
 }
