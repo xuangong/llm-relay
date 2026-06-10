@@ -1368,6 +1368,15 @@ pub fn apply_to_targets(
             if let Err(e) = snapshot::restore(&snap, &*backend) {
                 log::warn!("restore failed for dropped target {key}: {e}");
             }
+            #[cfg(target_os = "windows")]
+            if let TargetType::Wsl = meta.target_type {
+                if let Some(distro) = meta.distro_name.as_deref() {
+                    let hn = crate::wsl::hosts::relay_hostname();
+                    if let Err(e) = crate::wsl::hosts::clear_hosts_entry(distro, &hn) {
+                        log::warn!("clear hosts entry for dropped {distro}: {e}");
+                    }
+                }
+            }
         }
         let _ = snapshot::delete(meta);
     }
@@ -1476,6 +1485,15 @@ pub fn clear_targets_from_snapshots() -> Result<(), AppError> {
         };
         if let Err(e) = snapshot::restore(&snap, &*backend) {
             log::warn!("clear restore failed for {}: {e}", path.display());
+        }
+        #[cfg(target_os = "windows")]
+        if let TargetType::Wsl = target_type {
+            if let Some(distro) = snap.distro_name.as_deref() {
+                let hn = crate::wsl::hosts::relay_hostname();
+                if let Err(e) = crate::wsl::hosts::clear_hosts_entry(distro, &hn) {
+                    log::warn!("clear hosts entry on disable for {distro}: {e}");
+                }
+            }
         }
     }
     let _ = std::fs::remove_dir_all(&dir);

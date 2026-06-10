@@ -106,12 +106,21 @@ pub(crate) fn __wsl_run_script(distro: &str, script: &str) -> Result<String, App
 }
 
 /// Run a script and return its stdout regardless of exit status. Used by
-/// `probe::probe_url_for_distro`, where the script signals UNREACH/NOTOOL
+/// `probe::probe_url`, where the script signals UNREACH/NOTOOL
 /// via stdout + non-zero exit and we MUST read the stdout. Returns Err
 /// only on real spawn / timeout / IO failures.
 #[cfg(target_os = "windows")]
 pub(crate) fn __wsl_run_script_capture(distro: &str, script: &str) -> Result<String, AppError> {
     let bytes = run_wsl_capture(distro, script)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Run a script as root inside a distro. Used by `wsl::hosts` for
+/// `/etc/hosts` mutations. WSL's `-u root` flag never prompts (the host
+/// has already authenticated this distro at registration time).
+#[cfg(target_os = "windows")]
+pub(crate) fn __wsl_run_script_root(distro: &str, script: &str) -> Result<String, AppError> {
+    let bytes = run_wsl_as(distro, script, None, true)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -153,11 +162,25 @@ fn run_wsl_capture(distro: &str, script: &str) -> Result<Vec<u8>, AppError> {
 
 #[cfg(target_os = "windows")]
 fn run_wsl(distro: &str, script: &str, stdin_bytes: Option<&[u8]>) -> Result<Vec<u8>, AppError> {
+    run_wsl_as(distro, script, stdin_bytes, false)
+}
+
+#[cfg(target_os = "windows")]
+fn run_wsl_as(
+    distro: &str,
+    script: &str,
+    stdin_bytes: Option<&[u8]>,
+    as_root: bool,
+) -> Result<Vec<u8>, AppError> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let mut cmd = Command::new("wsl.exe");
-    cmd.args(["-d", distro, "-e", "sh", "-c", script]);
+    if as_root {
+        cmd.args(["-d", distro, "-u", "root", "-e", "sh", "-c", script]);
+    } else {
+        cmd.args(["-d", distro, "-e", "sh", "-c", script]);
+    }
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

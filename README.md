@@ -249,10 +249,24 @@ LLM Relay 在 Windows GUI 模式下会自动管理 WSL2 里的 Claude / Codex / 
 ### 网络
 
 Relay 在 Windows 的 `127.0.0.1:18080` 和 WSL 虚拟网卡 IP（通常 `172.x.x.1:18080`）上各开一个监听 ——
-**物理网卡（以太网 / WiFi）完全不监听，局域网无法触及**，无需防火墙配置。
+**物理网卡（以太网 / WiFi）完全不监听，局域网无法触及**。
 
-WSL 端写入的 URL 是 `http://host.docker.internal:18080`（NAT 模式）或 `http://127.0.0.1:18080`
-（mirror 模式）。两者皆为稳定 hostname，Windows / WSL 重启不会让配置失效。
+> **首次启动 Windows Defender 防火墙提示**：Windows 会弹一次"是否允许 LLM Relay 接收网络连接"。
+> **必须选 Allow**，否则 WSL 端连不上 `172.x.x.1:18080`。如果一开始误点了 Block，去
+> 「Windows 安全中心 → 防火墙和网络保护 → 允许应用通过防火墙」改成允许专用网络，或者删掉那条
+> 阻止规则后重启 Relay 让它再弹一次。
+
+WSL 端写入 CLI 配置的 URL 按下面优先级挑：
+
+1. `http://127.0.0.1:18080` —— mirror 网络模式下成立（distro loopback 直接是 host loopback），最稳。
+2. `http://host.docker.internal:18080` —— NAT 模式下，且 `host.docker.internal` 没被劫持时成立。
+3. `http://llm-relay-18080.host:18080` —— Relay 在 distro 的 `/etc/hosts` 里注入一条
+   `<gateway_ip> llm-relay-18080.host`，避开 Docker Desktop 把 `host.docker.internal` 解析到
+   局域网 IP 的常见情况。WSL 重启 / `wsl --shutdown` 后 gateway IP 变了，state machine 会自动
+   重写这一行；CLI 配置文件本身永远不变，跑着的 claude/codex/gemini 进程不用重启。
+
+注入 `/etc/hosts` 用 `wsl.exe -d <distro> -u root`，**不会弹 sudo 密码**（host 已经隐式信任 distro，
+WSL 的设计如此）。卸载 / 取消勾选时这一行会被删除。
 
 启动时 Relay 会从 distro 内部跑一次 HTTP probe，挑出可达的 URL 写入配置。
 要求 distro 里装了 `curl` 或 `wget`（极简镜像如裸 Alpine 可能没装；UI 会提示 Unreachable）。

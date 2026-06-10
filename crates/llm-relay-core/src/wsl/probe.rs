@@ -1,9 +1,8 @@
-//! Per-distro URL probe. Decides which `base_url` gets written to the
-//! WSL2 CLI configs:
-//!   - `host.docker.internal:18080` (NAT or mirror, when not hijacked)
-//!   - `<wsl_gateway_ip>:18080` (NAT, fallback when host.docker.internal
-//!     is hijacked by Docker Desktop or similar — common case)
-//!   - `127.0.0.1:18080` (mirror only)
+//! HTTP `/_relay/ping` probe of a single URL inside a WSL2 distro.
+//!
+//! Pure: builds a shell script, runs it via `wsl.exe`, parses stdout.
+//! Multi-candidate decision logic (mirror → HDI → hosts injection) lives
+//! in [`crate::wsl::resolve`].
 //!
 //! curl or wget is required for a real HTTP 200 check. `/dev/tcp` only
 //! gets used as a best-effort fallback when bash + GNU `timeout` are
@@ -12,27 +11,17 @@
 //! holding the port).
 
 use crate::AppError;
-use std::net::IpAddr;
-
-#[derive(Debug, Clone, Copy)]
-pub struct ListenerBinds {
-    /// 127.0.0.1 listener is mandatory and always bound when the proxy
-    /// is up.
-    pub loopback: bool,
-    /// host.docker.internal target: TRUE only if the WSL gateway IP
-    /// listener was bound. Gates the TCP-only fallback for that URL so
-    /// we don't accept "port open by someone else" as Relay reachable.
-    pub host_docker_internal: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    Ok { url: String, method: ProbeMethod },
+    /// The URL responded 200 OK.
+    Ok { method: ProbeMethod },
     /// Distro lacks curl/wget, and TCP fallback wasn't eligible. UI
     /// shows a specific "install curl" hint instead of generic
     /// "unreachable".
     NoProbeTool,
-    /// All candidates failed.
+    /// Probe attempted but did not succeed (timeout / non-200 / TCP
+    /// connect failed).
     Unreachable,
 }
 
@@ -45,61 +34,12 @@ pub enum ProbeMethod {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn probe_url_for_distro(
-    _distro: &str,
-    _binds: ListenerBinds,
-    _gateway_ip: Option<IpAddr>,
-) -> Result<ProbeOutcome, AppError> {
-    Err(AppError::Config(
-        "probe_url_for_distro: Windows only".into(),
-    ))
+pub fn probe_url(_distro: &str, _url: &str, _can_tcp: bool) -> Result<ProbeOutcome, AppError> {
+    Err(AppError::Config("probe_url: Windows only".into()))
 }
 
 #[cfg(target_os = "windows")]
-pub fn probe_url_for_distro(
-    distro: &str,
-    binds: ListenerBinds,
-    gateway_ip: Option<IpAddr>,
-) -> Result<ProbeOutcome, AppError> {
-    let port = crate::paths::proxy_port();
-    // Build candidate list. host.docker.internal is preferred when it
-    // resolves to our gateway (the stable case), but Docker Desktop's
-    // /etc/hosts entry hijacks it to a LAN IP that we deliberately do NOT
-    // bind, so the gateway IP candidate must run too. Order: HDI →
-    // gateway IP → 127.0.0.1.
-    let mut candidates: Vec<(String, &'static str, &'static str)> = Vec::new();
-    candidates.push((
-        format!("http://host.docker.internal:{port}"),
-        if binds.host_docker_internal { "1" } else { "0" },
-        "hdi",
-    ));
-    if let Some(ip) = gateway_ip {
-        candidates.push((
-            format!("http://{ip}:{port}"),
-            if binds.host_docker_internal { "1" } else { "0" },
-            "gw",
-        ));
-    }
-    candidates.push((
-        format!("http://127.0.0.1:{port}"),
-        if binds.loopback { "1" } else { "0" },
-        "lo",
-    ));
-
-    let mut probe_calls = String::new();
-    let mut tail = String::new();
-    for (i, (url, can_tcp, _label)) in candidates.iter().enumerate() {
-        probe_calls.push_str(&format!(
-            "U{i}=\"{url}\"\nif probe \"$U{i}\" \"{can_tcp}\"; then echo \"OK $U{i}\"; exit 0; fi\nrc{i}=$?\n",
-            i = i,
-            url = url,
-            can_tcp = can_tcp,
-        ));
-        if !tail.is_empty() {
-            tail.push_str(" && ");
-        }
-        tail.push_str(&format!("[ \"$rc{i}\" = \"2\" ]", i = i));
-    }
+pub fn probe_url(distro: &str, url: &str, can_tcp: bool) -> Result<ProbeOutcome, AppError> {
     let script = format!(
         r#"probe() {{
   url="$1"
@@ -124,21 +64,19 @@ pub fn probe_url_for_distro(
     return 2
   fi
 }}
-{probe_calls}if {tail}; then echo "NOTOOL"; exit 3; fi
+if probe "{url}" "{can_tcp}"; then exit 0; fi
+rc=$?
+if [ "$rc" = "2" ]; then echo "NOTOOL"; exit 3; fi
 echo "UNREACH"
 exit 1
 "#,
-        probe_calls = probe_calls,
-        tail = tail,
+        url = url,
+        can_tcp = if can_tcp { "1" } else { "0" },
     );
-    // Use _capture so we get stdout even when the script exits non-zero
-    // (UNREACH/NOTOOL are signaled via stdout + non-zero exit). A real
-    // wsl.exe spawn / timeout failure returns Err and we treat as
-    // Unreachable.
     let stdout = match crate::wsl::fs::__wsl_run_script_capture(distro, &script) {
         Ok(s) => s,
         Err(e) => {
-            log::warn!("probe_url_for_distro({distro}): {e}");
+            log::warn!("probe_url({distro}, {url}): {e}");
             return Ok(ProbeOutcome::Unreachable);
         }
     };
@@ -148,24 +86,18 @@ exit 1
 fn parse_probe_outcome(stdout: &str) -> ProbeOutcome {
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
     let last = lines.last().copied().unwrap_or("");
-    if let Some(rest) = last.strip_prefix("OK ") {
-        let url = rest.trim().to_string();
-        let method = lines
-            .iter()
-            .rev()
-            .find_map(|l| match *l {
-                "curl" => Some(ProbeMethod::HttpCurl),
-                "wget" => Some(ProbeMethod::HttpWget),
-                "tcp" => Some(ProbeMethod::TcpOnly),
-                _ => None,
-            })
-            .unwrap_or(ProbeMethod::HttpCurl);
-        return ProbeOutcome::Ok { url, method };
-    }
     if last == "NOTOOL" {
         return ProbeOutcome::NoProbeTool;
     }
-    ProbeOutcome::Unreachable
+    if last == "UNREACH" {
+        return ProbeOutcome::Unreachable;
+    }
+    match last {
+        "curl" => ProbeOutcome::Ok { method: ProbeMethod::HttpCurl },
+        "wget" => ProbeOutcome::Ok { method: ProbeMethod::HttpWget },
+        "tcp" => ProbeOutcome::Ok { method: ProbeMethod::TcpOnly },
+        _ => ProbeOutcome::Unreachable,
+    }
 }
 
 #[cfg(test)]
@@ -173,14 +105,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_ok_with_curl() {
-        let out = "curl\nOK http://host.docker.internal:18080\n";
+    fn parse_ok_curl() {
         assert_eq!(
-            parse_probe_outcome(out),
-            ProbeOutcome::Ok {
-                url: "http://host.docker.internal:18080".into(),
-                method: ProbeMethod::HttpCurl,
-            },
+            parse_probe_outcome("curl\n"),
+            ProbeOutcome::Ok { method: ProbeMethod::HttpCurl },
+        );
+    }
+
+    #[test]
+    fn parse_ok_wget() {
+        assert_eq!(
+            parse_probe_outcome("wget\n"),
+            ProbeOutcome::Ok { method: ProbeMethod::HttpWget },
+        );
+    }
+
+    #[test]
+    fn parse_ok_tcp() {
+        assert_eq!(
+            parse_probe_outcome("tcp\n"),
+            ProbeOutcome::Ok { method: ProbeMethod::TcpOnly },
         );
     }
 
@@ -192,16 +136,5 @@ mod tests {
     #[test]
     fn parse_unreach() {
         assert_eq!(parse_probe_outcome("UNREACH\n"), ProbeOutcome::Unreachable);
-    }
-
-    #[test]
-    fn parse_ok_with_tcp_fallback() {
-        let out = "tcp\nOK http://127.0.0.1:18080\n";
-        let got = parse_probe_outcome(out);
-        if let ProbeOutcome::Ok { method, .. } = got {
-            assert_eq!(method, ProbeMethod::TcpOnly);
-        } else {
-            panic!("expected Ok");
-        }
     }
 }

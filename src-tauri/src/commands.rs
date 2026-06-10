@@ -524,6 +524,7 @@ pub async fn list_wsl_distros(
 #[tauri::command]
 pub async fn toggle_wsl_distro(
     state: State<'_, AppState>,
+    sm: State<'_, std::sync::Arc<llm_relay_core::wsl::state::StateMachine>>,
     name: String,
     selected: bool,
 ) -> Result<(), String> {
@@ -531,7 +532,12 @@ pub async fn toggle_wsl_distro(
         .service
         .toggle_wsl_distro(name, selected)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Wake the state machine so the UI sees a Ready/Unreachable status
+    // for the just-toggled distro within ~one tick instead of waiting
+    // up to 60s.
+    sm.request_refresh();
+    Ok(())
 }
 
 #[tauri::command]

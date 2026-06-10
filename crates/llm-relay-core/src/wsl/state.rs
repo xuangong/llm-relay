@@ -105,7 +105,7 @@ impl StateMachine {
         //    avoid the wsl.exe cold-start cost on distros the user
         //    doesn't want to manage.
         let gw_ip = self.proxy.wsl_ip();
-        let binds = crate::wsl::probe::ListenerBinds {
+        let binds = crate::wsl::resolve::ListenerBinds {
             loopback: true,
             host_docker_internal: gw_ip.is_some(),
         };
@@ -114,19 +114,19 @@ impl StateMachine {
                 continue;
             }
             let name = d.name.clone();
-            let probe_res = tokio::task::spawn_blocking(move || {
-                crate::wsl::probe::probe_url_for_distro(&name, binds, gw_ip)
+            let resolve_res = tokio::task::spawn_blocking(move || {
+                crate::wsl::resolve::resolve_url_for_distro(&name, binds, gw_ip)
             })
             .await;
-            let resolved_url = match probe_res {
-                Ok(Ok(crate::wsl::probe::ProbeOutcome::Ok { url, .. })) => Some(url),
+            let resolved_url = match resolve_res {
+                Ok(Ok(crate::wsl::resolve::ResolveOutcome::Ok(url))) => Some(url),
                 Ok(Ok(_)) => None,
                 Ok(Err(e)) => {
-                    log::warn!("probe {}: {e}", d.name);
+                    log::warn!("resolve {}: {e}", d.name);
                     None
                 }
                 Err(e) => {
-                    log::warn!("probe join {}: {e}", d.name);
+                    log::warn!("resolve join {}: {e}", d.name);
                     None
                 }
             };
