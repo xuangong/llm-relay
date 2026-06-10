@@ -7,6 +7,7 @@ import { AddGatewayCard } from "@/components/AddGatewayCard";
 import { TrafficLogPanel } from "@/components/TrafficLogPanel";
 import { UsagePanel } from "@/components/UsagePanel";
 import { DisableRelayDialog } from "@/components/DisableRelayDialog";
+import { WslDistros } from "@/components/Settings/WslDistros";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
@@ -317,6 +318,8 @@ function App() {
             />
 
             <AddGatewayCard onAdded={loadAll} />
+
+            <WslDistros />
           </div>
         )}
       </main>
