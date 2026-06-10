@@ -217,15 +217,20 @@ export interface GeminiSnapshot {
   selectedAuthType: string | null;
 }
 
-export interface CliConfigSnapshot {
+/// One row per CLI snapshot under cli-config-backup/. `targetType` is
+/// "windows" or "wsl"; `distroName` is set only for wsl targets.
+export interface TargetSnapshot {
+  targetType: "windows" | "wsl";
+  distroName: string | null;
+  home: string | null;
   capturedAt: string;
   claude: ClaudeSnapshot;
   codex: CodexSnapshot;
   gemini: GeminiSnapshot;
 }
 
-export const getConfigSnapshot = () =>
-  invoke<CliConfigSnapshot | null>("get_config_snapshot");
+export const listTargetSnapshots = () =>
+  invoke<TargetSnapshot[]>("list_target_snapshots");
 
 // ─── Settings ───
 

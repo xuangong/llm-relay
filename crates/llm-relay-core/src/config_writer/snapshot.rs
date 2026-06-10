@@ -144,6 +144,43 @@ pub fn build_index() -> Result<std::collections::HashMap<String, SnapshotMeta>, 
     Ok(map)
 }
 
+/// Walk the backup directory and return every snapshot, parsed. Used by
+/// the GUI Disable dialog to show "what will be restored" per target.
+/// Malformed files are skipped (logged).
+pub fn list_all() -> Result<Vec<TargetSnapshot>, AppError> {
+    let dir = crate::paths::cli_config_backup_dir();
+    let mut out = Vec::new();
+    if !dir.exists() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("snapshot read failed {}: {e}", path.display());
+                continue;
+            }
+        };
+        match serde_json::from_slice::<TargetSnapshot>(&bytes) {
+            Ok(s) => out.push(s),
+            Err(e) => log::warn!("ignoring malformed snapshot {}: {e}", path.display()),
+        }
+    }
+    // Stable order: windows first, then wsl by distro name.
+    out.sort_by(|a, b| match (a.target_type.as_str(), b.target_type.as_str()) {
+        ("windows", "windows") => std::cmp::Ordering::Equal,
+        ("windows", _) => std::cmp::Ordering::Less,
+        (_, "windows") => std::cmp::Ordering::Greater,
+        _ => a.distro_name.cmp(&b.distro_name),
+    });
+    Ok(out)
+}
+
 /// One-shot migration of pre-WSL2 single-file snapshot to per-target
 /// directory layout. Old format has no `target_type` field; new clear
 /// path requires one. Idempotent: skips if target file already exists.

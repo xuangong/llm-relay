@@ -276,8 +276,10 @@ pub fn read_current_config() -> Result<config_writer::CurrentCliConfig, String> 
 }
 
 #[tauri::command]
-pub fn get_config_snapshot() -> Result<Option<config_writer::CliConfigSnapshot>, String> {
-    config_writer::read_snapshot().map_err(|e| e.to_string())
+pub fn list_target_snapshots()
+    -> Result<Vec<config_writer::snapshot::TargetSnapshot>, String>
+{
+    config_writer::snapshot::list_all().map_err(|e| e.to_string())
 }
 
 #[tauri::command]

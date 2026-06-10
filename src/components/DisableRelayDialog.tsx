@@ -11,7 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import * as api from "@/lib/api";
-import type { CliConfigSnapshot } from "@/lib/api";
+import type { TargetSnapshot } from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n } from "@/lib/i18n";
 
@@ -21,8 +21,7 @@ interface Props {
   onDisabled: () => void;
 }
 
-// Flattened (label, original) pairs derived from the snapshot, in display order.
-function snapshotRows(snap: CliConfigSnapshot): Array<{ label: string; value: string | null }> {
+function snapshotRows(snap: TargetSnapshot): Array<{ label: string; value: string | null }> {
   return [
     { label: "Claude · ANTHROPIC_BASE_URL", value: snap.claude.anthropicBaseUrl },
     { label: "Claude · ANTHROPIC_MODEL", value: snap.claude.anthropicModel },
@@ -42,7 +41,6 @@ function snapshotRows(snap: CliConfigSnapshot): Array<{ label: string; value: st
   ];
 }
 
-// Truncate long values (tokens, TOML blocks) so the dialog stays readable.
 function truncate(s: string, max = 80): string {
   if (s.length <= max) return s;
   return s.slice(0, max - 1) + "…";
@@ -50,7 +48,7 @@ function truncate(s: string, max = 80): string {
 
 export function DisableRelayDialog({ open, onOpenChange, onDisabled }: Props) {
   const { t } = useI18n();
-  const [snapshot, setSnapshot] = useState<CliConfigSnapshot | null>(null);
+  const [snapshots, setSnapshots] = useState<TargetSnapshot[]>([]);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -58,23 +56,22 @@ export function DisableRelayDialog({ open, onOpenChange, onDisabled }: Props) {
     if (!open) return;
     setLoading(true);
     api
-      .getConfigSnapshot()
-      .then((s) => setSnapshot(s))
+      .listTargetSnapshots()
+      .then((list) => setSnapshots(list))
       .catch((err) => {
-        console.error("Failed to load snapshot:", err);
-        setSnapshot(null);
+        console.error("Failed to list snapshots:", err);
+        setSnapshots([]);
       })
       .finally(() => setLoading(false));
   }, [open]);
 
-  const hasSnapshot = snapshot !== null;
-  const rows = snapshot ? snapshotRows(snapshot) : [];
+  const hasSnapshots = snapshots.length > 0;
 
   const handleConfirm = async () => {
     setSubmitting(true);
     try {
       await api.clearConfig();
-      toast.success(hasSnapshot ? t("disable.success") : t("disable.successCleared"));
+      toast.success(hasSnapshots ? t("disable.success") : t("disable.successCleared"));
       onDisabled();
       onOpenChange(false);
     } catch (err) {
@@ -96,35 +93,63 @@ export function DisableRelayDialog({ open, onOpenChange, onDisabled }: Props) {
           <div className="flex items-center justify-center py-6">
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
           </div>
-        ) : hasSnapshot ? (
-          <div className="space-y-2">
+        ) : hasSnapshots ? (
+          <div className="space-y-3">
             <p className="text-xs font-medium text-muted-foreground">
               {t("disable.restoreHeading")}
             </p>
-            <div className="max-h-64 overflow-y-auto rounded-md border border-border/60 divide-y divide-border/40 text-xs">
-              {rows.map((row) => (
-                <div key={row.label} className="flex flex-col gap-0.5 px-3 py-2">
-                  <span className="font-mono text-[11px] text-foreground/90">{row.label}</span>
-                  {row.value === null ? (
-                    <span className="text-[11px] text-muted-foreground italic">
-                      {t("disable.removed")}
-                    </span>
-                  ) : (
-                    <span className="text-[11px] text-muted-foreground">
-                      <span className="opacity-70">{t("disable.setTo")} </span>
-                      <span className="font-mono break-all">{truncate(row.value)}</span>
-                    </span>
-                  )}
-                </div>
-              ))}
+            <div className="max-h-72 overflow-y-auto space-y-3">
+              {snapshots.map((snap) => {
+                const targetLabel =
+                  snap.targetType === "windows"
+                    ? t("disable.targetWindows")
+                    : t("disable.targetWsl", { distro: snap.distroName ?? "" });
+                const rows = snapshotRows(snap);
+                const key =
+                  snap.targetType === "windows"
+                    ? "windows"
+                    : `wsl:${snap.distroName ?? ""}`;
+                return (
+                  <div
+                    key={key}
+                    className="rounded-md border border-border/60 overflow-hidden"
+                  >
+                    <div className="bg-muted/40 px-3 py-1.5 text-[11px] font-semibold text-foreground/80 flex items-center justify-between">
+                      <span>{targetLabel}</span>
+                      <span className="text-muted-foreground font-normal">
+                        {t("disable.capturedAt", {
+                          time: new Date(snap.capturedAt).toLocaleString(),
+                        })}
+                      </span>
+                    </div>
+                    <div className="divide-y divide-border/40 text-xs">
+                      {rows.map((row) => (
+                        <div
+                          key={row.label}
+                          className="flex flex-col gap-0.5 px-3 py-2"
+                        >
+                          <span className="font-mono text-[11px] text-foreground/90">
+                            {row.label}
+                          </span>
+                          {row.value === null ? (
+                            <span className="text-[11px] text-muted-foreground italic">
+                              {t("disable.removed")}
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-muted-foreground">
+                              <span className="opacity-70">{t("disable.setTo")} </span>
+                              <span className="font-mono break-all">
+                                {truncate(row.value)}
+                              </span>
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-            {snapshot && (
-              <p className="text-[11px] text-muted-foreground">
-                {t("disable.capturedAt", {
-                  time: new Date(snapshot.capturedAt).toLocaleString(),
-                })}
-              </p>
-            )}
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">{t("disable.nothingToRestore")}</p>
