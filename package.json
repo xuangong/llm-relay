@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm tauri dev",
+    "dev:isolated": "node scripts/dev.mjs",
     "build": "pnpm tauri build",
     "tauri": "tauri",
     "dev:renderer": "vite",

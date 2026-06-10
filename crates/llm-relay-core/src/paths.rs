@@ -1,6 +1,15 @@
 use std::path::PathBuf;
 
+/// Application config + runtime directory.
+///
+/// Honors the `LLM_RELAY_HOME` environment variable so dev sessions can
+/// run alongside a real GUI / agent without trampling each other's state
+/// (use a different `LLM_RELAY_HOME` + `LLM_RELAY_PROXY_PORT` in the dev
+/// shell). Falls back to `~/.llm-relay`.
 pub fn config_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("LLM_RELAY_HOME") {
+        return PathBuf::from(p);
+    }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".llm-relay")
 }
 

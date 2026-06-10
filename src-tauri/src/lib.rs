@@ -216,9 +216,7 @@ pub fn run() {
 }
 
 fn get_app_config_dir() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".llm-relay")
+    llm_relay_core::paths::config_dir()
 }
 
 /// Acquire the lifecycle guard. If another LLM Relay process is detected and
