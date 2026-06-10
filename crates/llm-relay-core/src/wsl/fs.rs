@@ -105,6 +105,52 @@ pub(crate) fn __wsl_run_script(distro: &str, script: &str) -> Result<String, App
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Run a script and return its stdout regardless of exit status. Used by
+/// `probe::probe_url_for_distro`, where the script signals UNREACH/NOTOOL
+/// via stdout + non-zero exit and we MUST read the stdout. Returns Err
+/// only on real spawn / timeout / IO failures.
+#[cfg(target_os = "windows")]
+pub(crate) fn __wsl_run_script_capture(distro: &str, script: &str) -> Result<String, AppError> {
+    let bytes = run_wsl_capture(distro, script)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn run_wsl_capture(distro: &str, script: &str) -> Result<Vec<u8>, AppError> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args(["-d", distro, "-e", "sh", "-c", script]);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.stdin(Stdio::null());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::Config(format!("wsl.exe spawn ({distro}): {e}")))?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed().as_secs() >= WSL_TIMEOUT_SECS {
+                    let _ = child.kill();
+                    return Err(AppError::Config(format!(
+                        "wsl.exe -d {distro} timed out after {WSL_TIMEOUT_SECS}s"
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(AppError::Config(format!("wsl wait: {e}"))),
+        }
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| AppError::Config(format!("wsl output: {e}")))?;
+    Ok(out.stdout)
+}
+
 #[cfg(target_os = "windows")]
 fn run_wsl(distro: &str, script: &str, stdin_bytes: Option<&[u8]>) -> Result<Vec<u8>, AppError> {
     use std::os::windows::process::CommandExt;

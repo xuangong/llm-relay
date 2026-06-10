@@ -104,9 +104,10 @@ impl StateMachine {
         // 3. Re-probe URL for each selected distro. Skip unselected to
         //    avoid the wsl.exe cold-start cost on distros the user
         //    doesn't want to manage.
+        let gw_ip = self.proxy.wsl_ip();
         let binds = crate::wsl::probe::ListenerBinds {
             loopback: true,
-            host_docker_internal: self.proxy.wsl_ip().is_some(),
+            host_docker_internal: gw_ip.is_some(),
         };
         for d in &distros {
             if !d.selected {
@@ -114,7 +115,7 @@ impl StateMachine {
             }
             let name = d.name.clone();
             let probe_res = tokio::task::spawn_blocking(move || {
-                crate::wsl::probe::probe_url_for_distro(&name, binds)
+                crate::wsl::probe::probe_url_for_distro(&name, binds, gw_ip)
             })
             .await;
             let resolved_url = match probe_res {

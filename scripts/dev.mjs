@@ -23,5 +23,9 @@ console.log(`[dev] LLM_RELAY_PROXY_PORT=${port}`);
 
 const isWindows = process.platform === "win32";
 const cmd = isWindows ? "pnpm.cmd" : "pnpm";
-const child = spawn(cmd, ["tauri", "dev"], { env, stdio: "inherit", shell: false });
+const child = spawn(
+  cmd,
+  ["tauri", "dev", "--config", "src-tauri/tauri.dev.conf.json"],
+  { env, stdio: "inherit", shell: isWindows },
+);
 child.on("exit", (code) => process.exit(code ?? 0));

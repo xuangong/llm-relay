@@ -1,6 +1,8 @@
 //! Per-distro URL probe. Decides which `base_url` gets written to the
 //! WSL2 CLI configs:
-//!   - `host.docker.internal:18080` (NAT or mirror)
+//!   - `host.docker.internal:18080` (NAT or mirror, when not hijacked)
+//!   - `<wsl_gateway_ip>:18080` (NAT, fallback when host.docker.internal
+//!     is hijacked by Docker Desktop or similar — common case)
 //!   - `127.0.0.1:18080` (mirror only)
 //!
 //! curl or wget is required for a real HTTP 200 check. `/dev/tcp` only
@@ -10,6 +12,7 @@
 //! holding the port).
 
 use crate::AppError;
+use std::net::IpAddr;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ListenerBinds {
@@ -42,15 +45,61 @@ pub enum ProbeMethod {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn probe_url_for_distro(_distro: &str, _binds: ListenerBinds) -> Result<ProbeOutcome, AppError> {
+pub fn probe_url_for_distro(
+    _distro: &str,
+    _binds: ListenerBinds,
+    _gateway_ip: Option<IpAddr>,
+) -> Result<ProbeOutcome, AppError> {
     Err(AppError::Config(
         "probe_url_for_distro: Windows only".into(),
     ))
 }
 
 #[cfg(target_os = "windows")]
-pub fn probe_url_for_distro(distro: &str, binds: ListenerBinds) -> Result<ProbeOutcome, AppError> {
+pub fn probe_url_for_distro(
+    distro: &str,
+    binds: ListenerBinds,
+    gateway_ip: Option<IpAddr>,
+) -> Result<ProbeOutcome, AppError> {
     let port = crate::paths::proxy_port();
+    // Build candidate list. host.docker.internal is preferred when it
+    // resolves to our gateway (the stable case), but Docker Desktop's
+    // /etc/hosts entry hijacks it to a LAN IP that we deliberately do NOT
+    // bind, so the gateway IP candidate must run too. Order: HDI →
+    // gateway IP → 127.0.0.1.
+    let mut candidates: Vec<(String, &'static str, &'static str)> = Vec::new();
+    candidates.push((
+        format!("http://host.docker.internal:{port}"),
+        if binds.host_docker_internal { "1" } else { "0" },
+        "hdi",
+    ));
+    if let Some(ip) = gateway_ip {
+        candidates.push((
+            format!("http://{ip}:{port}"),
+            if binds.host_docker_internal { "1" } else { "0" },
+            "gw",
+        ));
+    }
+    candidates.push((
+        format!("http://127.0.0.1:{port}"),
+        if binds.loopback { "1" } else { "0" },
+        "lo",
+    ));
+
+    let mut probe_calls = String::new();
+    let mut tail = String::new();
+    for (i, (url, can_tcp, _label)) in candidates.iter().enumerate() {
+        probe_calls.push_str(&format!(
+            "U{i}=\"{url}\"\nif probe \"$U{i}\" \"{can_tcp}\"; then echo \"OK $U{i}\"; exit 0; fi\nrc{i}=$?\n",
+            i = i,
+            url = url,
+            can_tcp = can_tcp,
+        ));
+        if !tail.is_empty() {
+            tail.push_str(" && ");
+        }
+        tail.push_str(&format!("[ \"$rc{i}\" = \"2\" ]", i = i));
+    }
     let script = format!(
         r#"probe() {{
   url="$1"
@@ -75,24 +124,18 @@ pub fn probe_url_for_distro(distro: &str, binds: ListenerBinds) -> Result<ProbeO
     return 2
   fi
 }}
-HDI="http://host.docker.internal:{port}"
-LOC="http://127.0.0.1:{port}"
-if probe "$HDI" "{hdi}"; then echo "OK $HDI"; exit 0; fi
-hdi_rc=$?
-if probe "$LOC" "{loc}"; then echo "OK $LOC"; exit 0; fi
-loc_rc=$?
-if [ "$hdi_rc" = "2" ] && [ "$loc_rc" = "2" ]; then echo "NOTOOL"; exit 3; fi
+{probe_calls}if {tail}; then echo "NOTOOL"; exit 3; fi
 echo "UNREACH"
 exit 1
 "#,
-        port = port,
-        hdi = if binds.host_docker_internal { "1" } else { "0" },
-        loc = if binds.loopback { "1" } else { "0" },
+        probe_calls = probe_calls,
+        tail = tail,
     );
-    // Don't bubble distro errors as Err — interpret stdout instead so
-    // we can distinguish NoProbeTool / Unreachable / Ok. A real wsl.exe
-    // failure (distro stopped, etc.) we treat as Unreachable.
-    let stdout = match crate::wsl::fs::__wsl_run_script(distro, &script) {
+    // Use _capture so we get stdout even when the script exits non-zero
+    // (UNREACH/NOTOOL are signaled via stdout + non-zero exit). A real
+    // wsl.exe spawn / timeout failure returns Err and we treat as
+    // Unreachable.
+    let stdout = match crate::wsl::fs::__wsl_run_script_capture(distro, &script) {
         Ok(s) => s,
         Err(e) => {
             log::warn!("probe_url_for_distro({distro}): {e}");

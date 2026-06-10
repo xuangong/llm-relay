@@ -732,20 +732,15 @@ impl Service {
         targets
     }
 
-    /// Spawn the WSL detection state machine. Returns the handle so the
-    /// Tauri/TUI layers can call `request_refresh()` from UI commands.
-    /// Returns `None` if `proxy` isn't attached (test code or
-    /// pre-startup).
+    /// Build the WSL detection state machine. The caller is responsible for
+    /// spawning `sm.clone().run()` on the appropriate runtime (tokio for the
+    /// headless agent, `tauri::async_runtime` for the GUI). Returns `None`
+    /// if `proxy` isn't attached (test code or pre-startup).
     pub fn spawn_wsl_state_machine(
         &self,
     ) -> Option<Arc<crate::wsl::state::StateMachine>> {
         let proxy = self.proxy.as_ref()?.clone();
-        let sm = crate::wsl::state::StateMachine::new(self.db.clone(), proxy);
-        let sm_clone = sm.clone();
-        tokio::spawn(async move {
-            sm_clone.run().await;
-        });
-        Some(sm)
+        Some(crate::wsl::state::StateMachine::new(self.db.clone(), proxy))
     }
 
     /// List the WSL distros known to LLM Relay (cached in `wsl_distros`).

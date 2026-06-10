@@ -157,6 +157,8 @@ pub fn run() {
             let svc_for_wsl: llm_relay_core::Service =
                 (*service).clone().with_proxy(proxy_handle.clone());
             if let Some(sm) = svc_for_wsl.spawn_wsl_state_machine() {
+                let sm_run = sm.clone();
+                tauri::async_runtime::spawn(async move { sm_run.run().await; });
                 app.manage(sm);
             }
 
