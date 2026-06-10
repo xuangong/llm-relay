@@ -310,6 +310,23 @@ impl Service {
 
         crate::config_writer::clear_targets_from_snapshots()?;
 
+        // Defensive: state machine may have injected /etc/hosts entries on
+        // selected distros that never had an apply run against them (so no
+        // snapshot exists for clear_targets_from_snapshots to walk).
+        // Sweep every selected distro for our hostname so disable leaves
+        // distros clean regardless of apply history.
+        #[cfg(target_os = "windows")]
+        {
+            let hostname = crate::wsl::hosts::relay_hostname();
+            if let Ok(distros) = self.db.list_wsl_distros() {
+                for d in distros.iter().filter(|d| d.selected) {
+                    if let Err(e) = crate::wsl::hosts::clear_hosts_entry(&d.name, &hostname) {
+                        log::warn!("clear hosts entry on disable for {}: {e}", d.name);
+                    }
+                }
+            }
+        }
+
         crate::events::emit_typed(
             &*self.sink,
             "active_changed",
