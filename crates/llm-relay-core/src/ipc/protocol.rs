@@ -304,3 +304,28 @@ pub struct TuiSettings {
     pub auto_launch: bool,
     pub auto_failover: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WslDistroInfo {
+    pub name: String,
+    pub is_default: bool,
+    pub selected: bool,
+    pub home: Option<String>,
+    pub has_claude: bool,
+    pub has_codex: bool,
+    pub has_gemini: bool,
+    pub resolved_url: Option<String>,
+    pub status: WslDistroStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WslDistroStatus {
+    /// Has resolved URL, ready to apply.
+    Ready,
+    /// Probe ran but no candidate URL succeeded.
+    Unreachable,
+    /// Not yet probed (e.g., just discovered, before first state-machine tick).
+    Unknown,
+}

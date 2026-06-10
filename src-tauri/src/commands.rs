@@ -509,3 +509,35 @@ pub async fn fetch_keys_with_token(
 pub async fn open_url(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn list_wsl_distros(
+    state: State<'_, AppState>,
+) -> Result<Vec<llm_relay_core::ipc::protocol::WslDistroInfo>, String> {
+    state
+        .service
+        .list_wsl_distros()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn toggle_wsl_distro(
+    state: State<'_, AppState>,
+    name: String,
+    selected: bool,
+) -> Result<(), String> {
+    state
+        .service
+        .toggle_wsl_distro(name, selected)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn refresh_wsl_distros(
+    sm: State<'_, std::sync::Arc<llm_relay_core::wsl::state::StateMachine>>,
+) -> Result<(), String> {
+    sm.request_refresh();
+    Ok(())
+}

@@ -747,6 +747,42 @@ impl Service {
         });
         Some(sm)
     }
+
+    /// List the WSL distros known to LLM Relay (cached in `wsl_distros`).
+    /// Empty Vec on non-Windows or when no distros are installed.
+    pub async fn list_wsl_distros(
+        &self,
+    ) -> Result<Vec<crate::ipc::protocol::WslDistroInfo>, AppError> {
+        use crate::ipc::protocol::{WslDistroInfo, WslDistroStatus};
+        let rows = self.db.list_wsl_distros()?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let status = match (&r.resolved_url, r.probed_at.is_some()) {
+                    (Some(_), _) => WslDistroStatus::Ready,
+                    (None, true) => WslDistroStatus::Unreachable,
+                    (None, false) => WslDistroStatus::Unknown,
+                };
+                WslDistroInfo {
+                    name: r.name,
+                    is_default: r.is_default,
+                    selected: r.selected,
+                    home: r.home,
+                    has_claude: r.has_claude,
+                    has_codex: r.has_codex,
+                    has_gemini: r.has_gemini,
+                    resolved_url: r.resolved_url,
+                    status,
+                }
+            })
+            .collect())
+    }
+
+    /// Toggle whether a WSL distro is included in apply targets.
+    pub async fn toggle_wsl_distro(&self, name: String, selected: bool) -> Result<(), AppError> {
+        self.db.set_wsl_distro_selected(&name, selected)?;
+        Ok(())
+    }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

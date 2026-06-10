@@ -192,6 +192,9 @@ pub fn run() {
             commands::poll_device_login,
             commands::fetch_keys_with_token,
             commands::open_url,
+            commands::list_wsl_distros,
+            commands::toggle_wsl_distro,
+            commands::refresh_wsl_distros,
         ]);
 
     let app = builder
