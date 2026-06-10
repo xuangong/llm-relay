@@ -234,6 +234,37 @@ sudo loginctl enable-linger "$USER"
 
 ---
 
+## 在 WSL2 中使用（Windows）
+
+LLM Relay 在 Windows GUI 模式下会自动管理 WSL2 里的 Claude / Codex / Gemini CLI 配置。
+
+### 自动检测
+
+启动 Relay 后在主界面下方的 **WSL2 Distros** 面板：
+
+- 自动列出所有已安装的 WSL2 distro（WSL1 会被过滤）
+- 默认 distro 默认勾选；其它 distro 可手动勾选
+- 每行显示该 distro 是否已装 claude / codex / gemini —— 没装的会跳过
+
+### 网络
+
+Relay 在 Windows 的 `127.0.0.1:18080` 和 WSL 虚拟网卡 IP（通常 `172.x.x.1:18080`）上各开一个监听 ——
+**物理网卡（以太网 / WiFi）完全不监听，局域网无法触及**，无需防火墙配置。
+
+WSL 端写入的 URL 是 `http://host.docker.internal:18080`（NAT 模式）或 `http://127.0.0.1:18080`
+（mirror 模式）。两者皆为稳定 hostname，Windows / WSL 重启不会让配置失效。
+
+启动时 Relay 会从 distro 内部跑一次 HTTP probe，挑出可达的 URL 写入配置。
+要求 distro 里装了 `curl` 或 `wget`（极简镜像如裸 Alpine 可能没装；UI 会提示 Unreachable）。
+
+### 取消勾选 / Disable
+
+- 取消勾选某 distro → 该 distro 的 CLI 配置恢复到首次 apply 之前的状态
+- Disable Relay（清空 active gateway）→ Windows + 所有勾选 distro 都恢复
+- 重装 / unregister 一个 distro 之前请先取消勾选，否则恢复快照会失败（数据无损，只是 warning 进 log）
+
+---
+
 ## GUI ↔ TUI 互斥与接管
 
 GUI 和 agent 使用同一把锁（`~/.llm-relay/agent.lock`）+ 同一个端口（18080），**同时只能存在一个**。
