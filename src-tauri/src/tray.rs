@@ -1,7 +1,6 @@
 use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem};
 use tauri::Manager;
 
-use llm_relay_core::database::ActiveConfig;
 use llm_relay_core::AppError;
 use crate::AppState;
 
@@ -138,7 +137,7 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 if let Some(state) = app.try_state::<AppState>() {
-                    handle_gateway_switch(&app, state.inner(), &gw_id);
+                    handle_gateway_switch(&app, state.inner(), &gw_id).await;
                 }
             });
         }
@@ -147,55 +146,57 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
 }
 
 /// Switch to a different gateway via tray menu click.
-fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: &str) {
+async fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: &str) {
     let gw = match state.db.get_gateway(gw_id) {
         Ok(Some(gw)) => gw,
         _ => return,
     };
 
-    let config = match state.db.get_active_config() {
-        Ok(c) => c,
-        Err(_) => ActiveConfig {
-            gateway_id: None,
-            key_id: None,
-            key_name: None,
-            key_value: None,
-            claude_model: None,
-            claude_small_model: None,
-            codex_model: None,
-            gemini_model: None,
-            auto_switch: true,
-            applied_at: None,
-            last_switched_at: None,
-        },
+    let existing = state.db.get_active_config().ok();
+    // Tray-switch only re-applies an already-configured gateway. If we
+    // don't have a key_id from the previous active config, the user
+    // hasn't completed initial setup yet — bail and let them go through
+    // the GUI's apply flow.
+    let key_id = match existing.as_ref().and_then(|c| c.key_id.clone()) {
+        Some(k) => k,
+        None => {
+            log::warn!("Tray switch aborted: no key_id in existing active_config");
+            return;
+        }
     };
 
-    let proxy_url = llm_relay_core::proxy_server::proxy_base_url();
-
-    let _ = llm_relay_core::config_writer::apply_all_configs(
-        &proxy_url,
-        llm_relay_core::proxy_server::PLACEHOLDER_KEY,
-        config.claude_model.as_deref(),
-        config.claude_small_model.as_deref(),
-        config.codex_model.as_deref(),
-        config.gemini_model.as_deref(),
-    );
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let new_config = ActiveConfig {
-        gateway_id: Some(gw.id.clone()),
-        key_id: config.key_id,
-        key_name: config.key_name,
-        key_value: config.key_value,
-        claude_model: config.claude_model,
-        claude_small_model: config.claude_small_model,
-        codex_model: config.codex_model,
-        gemini_model: config.gemini_model,
-        auto_switch: config.auto_switch,
-        applied_at: Some(now.clone()),
-        last_switched_at: Some(now),
+    let gw_uuid = match uuid::Uuid::parse_str(&gw.id) {
+        Ok(u) => u,
+        Err(e) => {
+            log::warn!("Tray switch: invalid gateway uuid {}: {e}", gw.id);
+            return;
+        }
     };
-    let _ = state.db.set_active_config(&new_config);
+    let key_uuid = match uuid::Uuid::parse_str(&key_id) {
+        Ok(u) => u,
+        Err(e) => {
+            log::warn!("Tray switch: invalid key uuid {key_id}: {e}");
+            return;
+        }
+    };
+
+    // Reuse the per-gateway model preferences first; fall back to whatever
+    // was active before for fields the gateway row doesn't carry.
+    let models = llm_relay_core::ipc::protocol::ModelSelection {
+        claude: gw.claude_model.clone()
+            .or_else(|| existing.as_ref().and_then(|c| c.claude_model.clone())),
+        claude_small: gw.claude_small_model.clone()
+            .or_else(|| existing.as_ref().and_then(|c| c.claude_small_model.clone())),
+        codex: gw.codex_model.clone()
+            .or_else(|| existing.as_ref().and_then(|c| c.codex_model.clone())),
+        gemini: gw.gemini_model.clone()
+            .or_else(|| existing.as_ref().and_then(|c| c.gemini_model.clone())),
+    };
+
+    if let Err(e) = state.service.set_active(gw_uuid, key_uuid, models).await {
+        log::warn!("Tray switch failed: {e}");
+        return;
+    }
 
     refresh_tray_menu(app);
 

@@ -3,7 +3,6 @@ use tauri::State;
 use llm_relay_core::config_writer;
 use llm_relay_core::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthCache, HealthLogEntry, TrafficLogEntry, UsageSummary};
 use llm_relay_core::gateway::{self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList};
-use llm_relay_core::proxy_server;
 use crate::AppState;
 
 // ─── Gateway CRUD ───
@@ -215,14 +214,14 @@ pub async fn apply_config(
     codex_model: Option<String>,
     gemini_model: Option<String>,
 ) -> Result<(), String> {
+    let _ = (key_name, key_value); // service.set_active fetches fresh key info from gateway
+
     let gw = state
         .db
         .get_gateway(&gateway_id)
         .map_err(|e| e.to_string())?
         .ok_or("Gateway not found")?;
 
-    // Load existing config so omitted fields (e.g. on a plain re-apply) are
-    // preserved instead of being wiped out.
     let existing = state.db.get_active_config().ok();
     let same_gateway = existing
         .as_ref()
@@ -230,75 +229,44 @@ pub async fn apply_config(
         .map(|id| id == gateway_id)
         .unwrap_or(false);
 
-    // Merge priority for each model field:
-    //   1. Value passed from the UI (user just picked it)
-    //   2. Per-gateway stored model (this gateway's own remembered choice)
-    //   3. Active config value — only if we are re-applying the SAME gateway
-    //      (otherwise those values belong to a different gateway and must not leak)
-    let merged_key_id = key_id.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_id.clone()) } else { None });
-    let merged_key_name = key_name.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_name.clone()) } else { None });
-    let merged_key_value = key_value.or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_value.clone()) } else { None });
+    // Fall back to existing key_id only on same-gateway re-apply; another
+    // gateway's key_id is meaningless here.
+    let resolved_key_id = key_id
+        .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_id.clone()) } else { None })
+        .ok_or("key_id is required (no existing key to re-use)")?;
 
-    let merged_claude = claude_model.clone()
+    // Model merge priority:
+    //   1. UI-passed value
+    //   2. Per-gateway stored model
+    //   3. Active config value (only on same-gateway re-apply)
+    let merged_claude = claude_model
         .or_else(|| gw.claude_model.clone())
         .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.claude_model.clone()) } else { None });
-    let merged_claude_small = claude_small_model.clone()
+    let merged_claude_small = claude_small_model
         .or_else(|| gw.claude_small_model.clone())
         .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.claude_small_model.clone()) } else { None });
-    let merged_codex = codex_model.clone()
+    let merged_codex = codex_model
         .or_else(|| gw.codex_model.clone())
         .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.codex_model.clone()) } else { None });
-    let merged_gemini = gemini_model.clone()
+    let merged_gemini = gemini_model
         .or_else(|| gw.gemini_model.clone())
         .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.gemini_model.clone()) } else { None });
 
-    let proxy_url = proxy_server::proxy_base_url();
-
-    config_writer::apply_all_configs(
-        &proxy_url,
-        proxy_server::PLACEHOLDER_KEY,
-        merged_claude.as_deref(),
-        merged_claude_small.as_deref(),
-        merged_codex.as_deref(),
-        merged_gemini.as_deref(),
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Save active config
-    let now = chrono::Utc::now().to_rfc3339();
-    let config = ActiveConfig {
-        gateway_id: Some(gateway_id.clone()),
-        key_id: merged_key_id,
-        key_name: merged_key_name,
-        key_value: merged_key_value,
-        claude_model: merged_claude,
-        claude_small_model: merged_claude_small,
-        codex_model: merged_codex,
-        gemini_model: merged_gemini,
-        auto_switch: existing.as_ref().map(|c| c.auto_switch).unwrap_or(true),
-        applied_at: Some(now.clone()),
-        last_switched_at: Some(now),
+    let gw_uuid = uuid::Uuid::parse_str(&gateway_id).map_err(|e| e.to_string())?;
+    let key_uuid = uuid::Uuid::parse_str(&resolved_key_id).map_err(|e| e.to_string())?;
+    let models = llm_relay_core::ipc::protocol::ModelSelection {
+        claude: merged_claude,
+        claude_small: merged_claude_small,
+        codex: merged_codex,
+        gemini: merged_gemini,
     };
+
     state
-        .db
-        .set_active_config(&config)
+        .service
+        .set_active(gw_uuid, key_uuid, models)
+        .await
         .map_err(|e| e.to_string())?;
 
-    // Persist the resolved models on the gateway row itself so they survive
-    // switching to another gateway and back.
-    state
-        .db
-        .update_gateway_config(
-            &gateway_id,
-            None, // GUI doesn't set preferred_key_id here
-            config.claude_model.as_deref(),
-            config.claude_small_model.as_deref(),
-            config.codex_model.as_deref(),
-            config.gemini_model.as_deref(),
-        )
-        .map_err(|e| e.to_string())?;
-
-    // Update tray menu
     crate::tray::refresh_tray_menu(&app_handle);
 
     Ok(())
@@ -319,29 +287,10 @@ pub async fn clear_config(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    config_writer::clear_all_configs().map_err(|e| e.to_string())?;
-
-    // Clear active config in DB
-    let config = ActiveConfig {
-        gateway_id: None,
-        key_id: None,
-        key_name: None,
-        key_value: None,
-        claude_model: None,
-        claude_small_model: None,
-        codex_model: None,
-        gemini_model: None,
-        auto_switch: state
-            .db
-            .get_active_config()
-            .map(|c| c.auto_switch)
-            .unwrap_or(true),
-        applied_at: None,
-        last_switched_at: None,
-    };
     state
-        .db
-        .set_active_config(&config)
+        .service
+        .clear_active()
+        .await
         .map_err(|e| e.to_string())?;
 
     crate::tray::refresh_tray_menu(&app_handle);

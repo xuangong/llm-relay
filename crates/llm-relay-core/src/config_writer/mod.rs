@@ -60,6 +60,7 @@ pub struct CliConfigSnapshot {
     pub gemini: GeminiSnapshot,
 }
 
+#[allow(dead_code)]
 fn capture_claude_snapshot() -> ClaudeSnapshot {
     let path = claude_settings_path();
     let mut snap = ClaudeSnapshot::default();
@@ -77,6 +78,7 @@ fn capture_claude_snapshot() -> ClaudeSnapshot {
     snap
 }
 
+#[allow(dead_code)]
 fn capture_codex_snapshot() -> CodexSnapshot {
     let dir = codex_dir();
     let mut snap = CodexSnapshot::default();
@@ -119,6 +121,7 @@ fn capture_codex_snapshot() -> CodexSnapshot {
     snap
 }
 
+#[allow(dead_code)]
 fn capture_gemini_snapshot() -> GeminiSnapshot {
     let dir = gemini_dir();
     let mut snap = GeminiSnapshot::default();
@@ -153,6 +156,7 @@ fn capture_gemini_snapshot() -> GeminiSnapshot {
 /// already exist. Called from `apply_all_configs` so that the FIRST apply
 /// captures the user's pre-relay state; subsequent applies leave the snapshot
 /// untouched (otherwise we'd snapshot the relay's own values).
+#[allow(dead_code)]
 fn capture_snapshot_if_absent() -> Result<(), AppError> {
     let path = snapshot_path();
     if path.exists() {
@@ -179,6 +183,7 @@ pub fn read_snapshot() -> Result<Option<CliConfigSnapshot>, AppError> {
     Ok(Some(snap))
 }
 
+#[allow(dead_code)]
 fn restore_claude(snap: &ClaudeSnapshot) -> Result<(), AppError> {
     let path = claude_settings_path();
     if !path.exists() {
@@ -210,6 +215,7 @@ fn restore_claude(snap: &ClaudeSnapshot) -> Result<(), AppError> {
     atomic_write(&path, json_str.as_bytes())
 }
 
+#[allow(dead_code)]
 fn restore_codex(snap: &CodexSnapshot) -> Result<(), AppError> {
     let dir = codex_dir();
 
@@ -279,6 +285,7 @@ fn restore_codex(snap: &CodexSnapshot) -> Result<(), AppError> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn restore_gemini(snap: &GeminiSnapshot) -> Result<(), AppError> {
     let dir = gemini_dir();
 
@@ -338,6 +345,7 @@ fn restore_gemini(snap: &GeminiSnapshot) -> Result<(), AppError> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn delete_snapshot() -> Result<(), AppError> {
     let path = snapshot_path();
     if path.exists() {
@@ -840,48 +848,6 @@ pub fn clear_gemini_config() -> Result<(), AppError> {
 
     let content = serialize_env_file(&env_map);
     atomic_write(&env_path, content.as_bytes())
-}
-
-/// Write all three CLI configs pointing to the provided base_url/api_key.
-pub fn apply_all_configs(
-    base_url: &str,
-    api_key: &str,
-    claude_model: Option<&str>,
-    claude_small_model: Option<&str>,
-    codex_model: Option<&str>,
-    _gemini_model: Option<&str>,
-) -> Result<(), AppError> {
-    // Capture user's pre-relay state on the very first apply so that
-    // clear_all_configs can restore the original values. Snapshot file
-    // existing == "relay is active"; we never overwrite an existing one
-    // (otherwise the second apply would snapshot the relay's own values).
-    capture_snapshot_if_absent()?;
-
-    write_claude_config(base_url, api_key, claude_model, claude_small_model)?;
-    write_codex_config(base_url, api_key, codex_model)?;
-    write_gemini_config(base_url, api_key)?;
-    ensure_openai_api_key_in_shell_rc()?;
-    Ok(())
-}
-
-/// Clear all three CLI configs.
-///
-/// If a pre-apply snapshot exists, restore each captured field to its original
-/// value (re-inserting when the relay overwrote it, deleting when the relay
-/// introduced it) and remove the snapshot. Otherwise fall back to the legacy
-/// behavior of stripping only relay-written keys.
-pub fn clear_all_configs() -> Result<(), AppError> {
-    if let Some(snap) = read_snapshot()? {
-        restore_claude(&snap.claude)?;
-        restore_codex(&snap.codex)?;
-        restore_gemini(&snap.gemini)?;
-        delete_snapshot()?;
-    } else {
-        clear_claude_config()?;
-        clear_codex_config()?;
-        clear_gemini_config()?;
-    }
-    Ok(())
 }
 
 /// Ensure OPENAI_API_KEY is set in the user's environment.
