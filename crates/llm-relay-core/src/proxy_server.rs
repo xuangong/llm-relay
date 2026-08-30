@@ -398,6 +398,12 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
         "content-length",
         "transfer-encoding",
         "connection",
+        // Let reqwest negotiate its own encoding so it transparently
+        // decompresses the body (and strips content-encoding /
+        // content-length for us). Forwarding the client's value would
+        // hand us bytes we can't read: error bodies would be logged as
+        // mojibake and the usage tap couldn't parse the stream.
+        "accept-encoding",
     ];
     for (name, value) in in_headers.iter() {
         if SKIP.contains(&name.as_str()) {
@@ -467,10 +473,11 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                 let error_body = resp.text().await.unwrap_or_else(|_| format!("HTTP {}", status_code));
 
                 // Include model in error detail for better debugging
-                let error_detail = if error_body.len() > 500 {
-                    format!("[model:{}] {}...", model, &error_body[..500])
+                let (head, cut) = truncate_chars(&error_body, 500);
+                let error_detail = if cut {
+                    format!("[model:{}] {}...", model, head)
                 } else {
-                    format!("[model:{}] {}", model, error_body)
+                    format!("[model:{}] {}", model, head)
                 };
 
                 let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, Some(&error_detail));
@@ -643,6 +650,17 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
 /// advanced var most users shouldn't see.
 ///
 /// Behavior:
+/// Truncate `s` to at most `max` **characters**, returning the slice and
+/// whether anything was cut. Byte-slicing (`&s[..max]`) panics when the
+/// index lands inside a multi-byte character — which any non-ASCII error
+/// body can trigger.
+fn truncate_chars(s: &str, max: usize) -> (&str, bool) {
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => (&s[..idx], true),
+        None => (s, false),
+    }
+}
+
 /// - `-1m` suffix appends/merges `context-1m-2025-08-07` into `anthropic-beta`
 /// - `-high|-xhigh` suffix sets `x-copilot-reasoning-effort`
 /// - No suffix → strip any client-supplied stale modifiers so they can't
@@ -969,6 +987,27 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    #[test]
+    fn truncate_chars_keeps_short_strings_whole() {
+        assert_eq!(truncate_chars("hello", 500), ("hello", false));
+    }
+
+    #[test]
+    fn truncate_chars_cuts_at_char_count() {
+        assert_eq!(truncate_chars("abcdef", 3), ("abc", true));
+    }
+
+    /// A body of U+FFFD replacement chars is 3 bytes per char, so the old
+    /// `&body[..500]` byte-slice landed mid-character and panicked.
+    #[test]
+    fn truncate_chars_survives_multibyte_at_the_cut() {
+        let body: String = std::iter::repeat('\u{FFFD}').take(600).collect();
+        let (head, cut) = truncate_chars(&body, 500);
+        assert!(cut);
+        assert_eq!(head.chars().count(), 500);
+        assert!(!body.is_char_boundary(500), "precondition: byte 500 is mid-char");
+    }
 
     fn test_state() -> ProxyState {
         let db = Database::open_in_memory().expect("open_in_memory");
