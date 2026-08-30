@@ -85,6 +85,67 @@ pub async fn fetch_keys(url: &str, auth: &str) -> Result<Vec<ApiKey>, AppError> 
     Ok(keys)
 }
 
+/// Fetch API keys, trying each credential the gateway has until one of them
+/// actually answers the question.
+///
+/// `/api/keys` scopes its result to the caller: an admin sees every key, a
+/// user session sees only keys it owns or is assigned, and a bare API key sees
+/// itself. So a session belonging to a user who owns nothing returns `200 []`
+/// — a success that tells us nothing. Preferring the session unconditionally
+/// (it is usually the *broader* view, which is why it comes first) and then
+/// accepting that empty list is how a key the user just picked ends up
+/// unresolvable.
+///
+/// `want` is the key id the caller is looking for, when it has one; a
+/// credential answered if the list contains it. With no `want`, any non-empty
+/// list counts. If nothing satisfies, the first successful response is still
+/// returned — an empty picker is better than an error — and only a total
+/// failure propagates.
+pub async fn fetch_keys_with_fallback(
+    url: &str,
+    session_token: Option<&str>,
+    auth_key: &str,
+    want: Option<&str>,
+) -> Result<Vec<ApiKey>, AppError> {
+    let mut candidates: Vec<&str> = Vec::with_capacity(2);
+    for cred in [session_token.unwrap_or(""), auth_key] {
+        // The two are often the same string (logging in with an API key
+        // stores it as both); asking twice would just double the latency.
+        if !cred.is_empty() && !candidates.contains(&cred) {
+            candidates.push(cred);
+        }
+    }
+    if candidates.is_empty() {
+        return Err(AppError::Config(
+            "gateway has no credentials — log in again".into(),
+        ));
+    }
+
+    let mut first_ok: Option<Vec<ApiKey>> = None;
+    let mut last_err: Option<AppError> = None;
+    for auth in candidates {
+        match fetch_keys(url, auth).await {
+            Ok(keys) if answers(&keys, want) => return Ok(keys),
+            Ok(keys) => {
+                first_ok.get_or_insert(keys);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    match (first_ok, last_err) {
+        (Some(keys), _) => Ok(keys),
+        (None, Some(e)) => Err(e),
+        (None, None) => unreachable!("candidates is non-empty, so one arm ran"),
+    }
+}
+
+fn answers(keys: &[ApiKey], want: Option<&str>) -> bool {
+    match want {
+        Some(id) => keys.iter().any(|k| k.id == id),
+        None => !keys.is_empty(),
+    }
+}
+
 /// Fetch models from a gateway. Also used for health checks.
 /// GET /api/models  Authorization: Bearer <auth>
 pub async fn fetch_models(url: &str, auth: &str) -> Result<ModelList, AppError> {

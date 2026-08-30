@@ -153,14 +153,18 @@ async fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: 
     };
 
     let existing = state.db.get_active_config().ok();
-    // Tray-switch only re-applies an already-configured gateway. If we
-    // don't have a key_id from the previous active config, the user
-    // hasn't completed initial setup yet — bail and let them go through
-    // the GUI's apply flow.
-    let key_id = match existing.as_ref().and_then(|c| c.key_id.clone()) {
+    // Tray-switch only re-applies an already-configured gateway. Without a
+    // key for *this* gateway the user hasn't completed initial setup — bail
+    // and let them go through the GUI's apply flow. (Reusing the previously
+    // active key here would hand set_active a key id belonging to whatever
+    // gateway was active before, which this one has never issued.)
+    let key_id = match llm_relay_core::service::pick_key_id(&gw, existing.as_ref()) {
         Some(k) => k,
         None => {
-            log::warn!("Tray switch aborted: no key_id in existing active_config");
+            log::warn!(
+                "Tray switch to {} aborted: gateway has no configured key",
+                gw.name
+            );
             return;
         }
     };
@@ -180,17 +184,22 @@ async fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: 
         }
     };
 
-    // Reuse the per-gateway model preferences first; fall back to whatever
-    // was active before for fields the gateway row doesn't carry.
+    // Reuse the per-gateway model preferences first; fall back to whatever was
+    // active before only on a same-gateway re-apply. Another gateway's model
+    // names may not exist here, and the same guard already governs `key_id`
+    // above and the GUI's apply path.
+    let prev = existing
+        .as_ref()
+        .filter(|c| c.gateway_id.as_deref() == Some(gw.id.as_str()));
     let models = llm_relay_core::ipc::protocol::ModelSelection {
         claude: gw.claude_model.clone()
-            .or_else(|| existing.as_ref().and_then(|c| c.claude_model.clone())),
+            .or_else(|| prev.and_then(|c| c.claude_model.clone())),
         claude_small: gw.claude_small_model.clone()
-            .or_else(|| existing.as_ref().and_then(|c| c.claude_small_model.clone())),
+            .or_else(|| prev.and_then(|c| c.claude_small_model.clone())),
         codex: gw.codex_model.clone()
-            .or_else(|| existing.as_ref().and_then(|c| c.codex_model.clone())),
+            .or_else(|| prev.and_then(|c| c.codex_model.clone())),
         gemini: gw.gemini_model.clone()
-            .or_else(|| existing.as_ref().and_then(|c| c.gemini_model.clone())),
+            .or_else(|| prev.and_then(|c| c.gemini_model.clone())),
     };
 
     if let Err(e) = state.service.set_active(gw_uuid, key_uuid, models).await {

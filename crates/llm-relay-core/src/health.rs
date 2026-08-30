@@ -161,16 +161,12 @@ pub async fn do_switch(
         _ => return,
     };
 
-    // Pick a key to apply: prefer the gateway's preferred_key_id (set by
-    // a prior login/apply on this gateway); fall back to the current
-    // active key only if we are bouncing between gateways that share a key.
-    // Without a key_id, we cannot run a real apply — log + bail rather than
-    // silently rewriting the DB row to a state that doesn't match disk.
-    let key_id_opt = gw
-        .preferred_key_id
-        .clone()
-        .or_else(|| current_config.key_id.clone());
-    let Some(key_id_str) = key_id_opt else {
+    // Pick a key to apply: prefer the gateway's preferred_key_id (set by a
+    // prior login/apply on this gateway), falling back to the current active
+    // key only when it belongs to this same gateway. Without a key_id, we
+    // cannot run a real apply — log + bail rather than silently rewriting the
+    // DB row to a state that doesn't match disk.
+    let Some(key_id_str) = crate::service::pick_key_id(&gw, Some(current_config)) else {
         log::warn!(
             "Auto-switch to {} skipped: no key_id available (no preferred key on gateway, \
              no current active key). Active config left unchanged.",

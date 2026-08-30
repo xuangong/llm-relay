@@ -14,6 +14,24 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+/// Decide which key id an activation of `gw` should use.
+///
+/// Key ids are per-gateway, so the previously active key is only a candidate
+/// when we are re-applying the *same* gateway. Carrying it across gateways
+/// hands `set_active` an id the new gateway has never heard of, and every
+/// caller that resolves a key id needs the same rule — tray click, auto-switch
+/// on failure, and the GUI's Apply button.
+///
+/// Returns `None` when the gateway has never been configured, which callers
+/// surface as "log in to this gateway first" rather than guessing.
+pub fn pick_key_id(gw: &Gateway, existing: Option<&ActiveConfig>) -> Option<String> {
+    gw.preferred_key_id.clone().or_else(|| {
+        existing
+            .filter(|c| c.gateway_id.as_deref() == Some(gw.id.as_str()))
+            .and_then(|c| c.key_id.clone())
+    })
+}
+
 #[derive(Clone)]
 pub struct Service {
     pub db: Arc<Database>,
@@ -225,13 +243,26 @@ impl Service {
         // Fetch the key value from the gateway so the proxy can forward with it.
         let gw = self.db.get_gateway(&gw_id_str)?
             .ok_or_else(|| AppError::Config(format!("gateway {gateway_id} not found")))?;
-        let auth = gw.session_token.as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&gw.auth_key);
-        let keys = crate::gateway::fetch_keys(&gw.url, auth).await?;
-        let matched_key = keys.iter().find(|k| k.id == key_id_str);
-        let key_name = matched_key.map(|k| k.name.clone());
-        let key_value = matched_key.map(|k| k.key.clone());
+        let keys = crate::gateway::fetch_keys_with_fallback(
+            &gw.url,
+            gw.session_token.as_deref(),
+            &gw.auth_key,
+            Some(&key_id_str),
+        )
+        .await?;
+        // Refuse rather than store NULLs. A config with no key_value makes the
+        // proxy fall back to the gateway's own auth_key, so every request would
+        // silently go out under a different credential than the one that was
+        // picked — wrong quota, wrong attribution, and no sign anything failed.
+        let matched_key = keys.iter().find(|k| k.id == key_id_str).ok_or_else(|| {
+            AppError::Config(format!(
+                "key {key_id} is not visible on {} — log in to that gateway again, \
+                 then pick a key from the refreshed list",
+                gw.name
+            ))
+        })?;
+        let key_name = Some(matched_key.name.clone());
+        let key_value = Some(matched_key.key.clone());
 
         // Fetch current config to preserve auto_switch / last_switched_at
         let existing = self.db.get_active_config()?;
@@ -365,14 +396,16 @@ impl Service {
             .get_gateway(&gateway_id.to_string())?
             .ok_or_else(|| AppError::Config(format!("gateway {gateway_id} not found")))?;
 
-        // Prefer session token for auth, fall back to auth_key
-        let auth = gw
-            .session_token
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&gw.auth_key);
-
-        let keys = crate::gateway::fetch_keys(&gw.url, auth).await?;
+        // Prefer session token for auth, fall back to auth_key — a session that
+        // owns no keys answers with an empty list, which would leave the picker
+        // blank on a gateway that has keys.
+        let keys = crate::gateway::fetch_keys_with_fallback(
+            &gw.url,
+            gw.session_token.as_deref(),
+            &gw.auth_key,
+            None,
+        )
+        .await?;
         Ok(keys
             .into_iter()
             .map(|k| KeyInfo {

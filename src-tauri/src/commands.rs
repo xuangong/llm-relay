@@ -148,9 +148,10 @@ pub async fn fetch_keys(
         .map_err(|e| e.to_string())?
         .ok_or("Gateway not found")?;
 
-    // Use session_token if available, otherwise use auth_key
-    let auth = gw.session_token.as_deref().unwrap_or(&gw.auth_key);
-    gateway::fetch_keys(&gw.url, auth)
+    // Prefer the session (usually the broader view), but fall back to the
+    // gateway's own key: a session whose user owns no keys answers 200 with an
+    // empty list, which would show an empty picker on a gateway that has keys.
+    gateway::fetch_keys_with_fallback(&gw.url, gw.session_token.as_deref(), &gw.auth_key, None)
         .await
         .map_err(|e| e.to_string())
 }
@@ -227,10 +228,12 @@ pub async fn apply_config(
         .map(|id| id == gateway_id)
         .unwrap_or(false);
 
-    // Fall back to existing key_id only on same-gateway re-apply; another
-    // gateway's key_id is meaningless here.
+    // Then the gateway's own remembered key, so re-activating a gateway that
+    // was configured earlier needs no re-login. `pick_key_id` also handles the
+    // fall back to the existing key_id on same-gateway re-apply; another
+    // gateway's key_id is meaningless here. Shared with tray + auto-switch.
     let resolved_key_id = key_id
-        .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.key_id.clone()) } else { None })
+        .or_else(|| llm_relay_core::service::pick_key_id(&gw, existing.as_ref()))
         .ok_or("This gateway has no API key yet. Click Login on the gateway row to fetch keys, then try Apply again.")?;
 
     // Model merge priority:
