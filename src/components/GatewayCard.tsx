@@ -40,6 +40,7 @@ import {
   LogIn,
   KeyRound,
   X,
+  ArrowUpToLine,
 } from "lucide-react";
 
 interface GatewayCardProps {
@@ -54,6 +55,9 @@ interface GatewayCardProps {
     gemini: string | null;
   };
   dragHandleProps?: Record<string, unknown>;
+  /** False for the first card — nothing to pin above. */
+  canPinTop?: boolean;
+  onPinTop?: () => void;
   onSelect: () => void;
   onDelete: () => void;
   onApplied: () => void;
@@ -66,6 +70,8 @@ export function GatewayCard({
   activeKeyName,
   activeModels,
   dragHandleProps,
+  canPinTop,
+  onPinTop,
   onSelect,
   onDelete,
   onApplied,
@@ -86,10 +92,42 @@ export function GatewayCard({
   const [trafficLog, setTrafficLog] = useState<ProxyTrafficEntry[]>([]);
   const trafficLogRef = useRef<ProxyTrafficEntry[]>([]);
   const [showSignIn, setShowSignIn] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState(gateway.name);
 
   // Tri-state: null = never checked, true = healthy, false = confirmed offline
   const neverChecked = gateway.lastChecked === null;
   const isHealthy = gateway.isHealthy;
+
+  // Keep the draft in sync when the name changes from elsewhere (refresh,
+  // health-updated payload, another window).
+  useEffect(() => {
+    setNameDraft(gateway.name);
+  }, [gateway.name]);
+
+  const cancelRename = () => {
+    setNameDraft(gateway.name);
+    setRenaming(false);
+  };
+
+  const commitRename = async () => {
+    setRenaming(false);
+    // An emptied field means "give me the default back", which is the gateway
+    // account name — what a freshly-added gateway is named.
+    const next = (nameDraft.trim() || gateway.userName || gateway.name).trim();
+    if (next === gateway.name) {
+      setNameDraft(gateway.name);
+      return;
+    }
+    try {
+      await api.updateGateway(gateway.id, next, gateway.url, gateway.authKey);
+      onApplied();
+    } catch (err) {
+      console.error("Failed to rename gateway:", err);
+      toast.error(`Rename failed: ${extractErrorMessage(err)}`);
+      setNameDraft(gateway.name);
+    }
+  };
 
   useEffect(() => {
     setExpanded(isActive);
@@ -322,14 +360,41 @@ export function GatewayCard({
           {/* Gateway info */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-1.5 min-w-0">
-              <span className="font-medium text-sm truncate">{gateway.name}</span>
+              {renaming ? (
+                <input
+                  value={nameDraft}
+                  autoFocus
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  onBlur={commitRename}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === "Enter") commitRename();
+                    else if (e.key === "Escape") cancelRename();
+                  }}
+                  className="font-medium text-sm h-5 min-w-0 max-w-[14rem] px-1 rounded border border-primary/50 bg-background outline-none focus:ring-1 focus:ring-primary/40"
+                />
+              ) : (
+                <span
+                  className="font-medium text-sm truncate cursor-text"
+                  // The name is its own control, so swallow the click rather
+                  // than let the row toggle twice on the way to a dblclick.
+                  onClick={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => { e.stopPropagation(); setRenaming(true); }}
+                  title={t('gateway.renameHint')}
+                >
+                  {gateway.name}
+                </span>
+              )}
               {isActive && (
                 <span className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-primary text-primary-foreground">
                   {t('gateway.inUse')}
                 </span>
               )}
               <span className="text-[11px] text-muted-foreground font-mono truncate">{gateway.url}</span>
-              {gateway.userName && (
+              {/* Only worth showing once the name has been changed away from
+                  it — otherwise it just repeats the name verbatim. */}
+              {gateway.userName && gateway.userName !== gateway.name && (
                 <span className="text-[10px] text-muted-foreground/60 truncate">
                   ({gateway.userName})
                 </span>
@@ -360,6 +425,17 @@ export function GatewayCard({
               title={t('gateway.signInToEdit')}
             >
               <LogIn className="h-3.5 w-3.5" />
+            </button>
+          )}
+
+          {/* Pin to top — faster than dragging when the list is long */}
+          {canPinTop && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onPinTop?.(); }}
+              className="text-muted-foreground/40 hover:text-primary transition-elegant-fast"
+              title={t('gateway.pinToTop')}
+            >
+              <ArrowUpToLine className="h-3.5 w-3.5" />
             </button>
           )}
 

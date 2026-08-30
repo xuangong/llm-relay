@@ -43,6 +43,8 @@ function SortableGatewayCard({
   activeKeyId,
   activeKeyName,
   activeModels,
+  canPinTop,
+  onPinTop,
   onSelect,
   onDelete,
   onApplied,
@@ -57,6 +59,8 @@ function SortableGatewayCard({
     codex: string | null;
     gemini: string | null;
   };
+  canPinTop: boolean;
+  onPinTop: () => void;
   onSelect: () => void;
   onDelete: () => void;
   onApplied: () => void;
@@ -86,6 +90,8 @@ function SortableGatewayCard({
         activeKeyName={activeKeyName}
         activeModels={activeModels}
         dragHandleProps={listeners}
+        canPinTop={canPinTop}
+        onPinTop={onPinTop}
         onSelect={onSelect}
         onDelete={onDelete}
         onApplied={onApplied}
@@ -148,6 +154,24 @@ export function GatewayList({
     [gateways]
   );
 
+  const handlePinTop = useCallback(
+    async (id: string) => {
+      const index = gateways.findIndex((g) => g.id === id);
+      if (index <= 0) return;
+      const previous = gateways;
+      const newOrder = arrayMove(gateways, index, 0);
+      setGateways(newOrder);
+
+      try {
+        await api.reorderGateways(newOrder.map((g) => g.id));
+      } catch (err) {
+        toast.error(`Pin failed: ${extractErrorMessage(err)}`);
+        setGateways(previous);
+      }
+    },
+    [gateways]
+  );
+
   const handleDelete = useCallback(
     async (id: string) => {
       try {
@@ -171,7 +195,7 @@ export function GatewayList({
         strategy={verticalListSortingStrategy}
       >
         <div className="space-y-2">
-          {gateways.map((gw) => (
+          {gateways.map((gw, i) => (
             <SortableGatewayCard
               key={gw.id}
               gateway={gw}
@@ -179,6 +203,8 @@ export function GatewayList({
               activeKeyId={activeKeyId}
               activeKeyName={activeKeyName}
               activeModels={activeModels}
+              canPinTop={i > 0}
+              onPinTop={() => handlePinTop(gw.id)}
               onSelect={() => {}}
               onDelete={() => handleDelete(gw.id)}
               onApplied={onRefresh}

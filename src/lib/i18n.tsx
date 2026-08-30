@@ -92,6 +92,8 @@ const en: Translations = {
     signInToEdit: "Sign in to edit",
     checking: "checking...",
     currentKey: "Current Key",
+    pinToTop: "Pin to top",
+    renameHint: "Double-click to rename",
   },
   usage: {
     title: "Token Usage",
@@ -219,6 +221,8 @@ const zh: Translations = {
     signInToEdit: "登录以编辑",
     checking: "检查中...",
     currentKey: "当前密钥",
+    pinToTop: "置顶",
+    renameHint: "双击重命名",
   },
   usage: {
     title: "用量统计",
