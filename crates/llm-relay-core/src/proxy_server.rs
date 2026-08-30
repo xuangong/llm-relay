@@ -367,8 +367,9 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
         }
     };
 
-    // Extract model name from request JSON body (best-effort)
-    let model = extract_model(&body_bytes, &path).unwrap_or_else(|| "unknown".to_string());
+    // Extract model name from request JSON body (best-effort). Stays an
+    // Option: plenty of requests legitimately name no model.
+    let model = extract_model(&body_bytes, &path);
 
     // Skip usage tracking for requests without a body (e.g., GET /models)
     let should_track_usage = !body_bytes.is_empty();
@@ -473,15 +474,16 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                 let error_body = resp.text().await.unwrap_or_else(|_| format!("HTTP {}", status_code));
 
                 // Include model in error detail for better debugging
-                let (head, cut) = truncate_chars(&error_body, 500);
-                let error_detail = if cut {
-                    format!("[model:{}] {}...", model, head)
-                } else {
-                    format!("[model:{}] {}", model, head)
-                };
+                let error_detail = format_error_detail(model.as_deref(), &error_body);
 
                 let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, Some(&error_detail));
-                log::warn!("Proxy error {} → {} (model:{}): {}", target_url, status_code, model, error_body);
+                log::warn!(
+                    "Proxy error {} → {} (model:{}): {}",
+                    target_url,
+                    status_code,
+                    model.as_deref().unwrap_or("none"),
+                    error_body
+                );
 
                 if is_server_error {
                     let count = state.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
@@ -521,7 +523,12 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>, String>>();
             let db_usage = state.db.clone();
             let gw_usage = gateway_id.clone();
-            let model_usage = model.clone();
+            // `usage_log` is keyed by model, so a request that recorded tokens
+            // without naming one still needs some bucket to land in. That is a
+            // genuine gap in what we know — unlike a request that simply has no
+            // model, which never reaches here (`should_track_usage` is false
+            // for bodyless requests).
+            let model_usage = model.clone().unwrap_or_else(|| "unknown".to_string());
             let track_usage = should_track_usage;
             let db_error = state.db.clone();
             let gw_error = gateway_id.clone();
@@ -659,6 +666,19 @@ fn truncate_chars(s: &str, max: usize) -> (&str, bool) {
         Some((idx, _)) => (&s[..idx], true),
         None => (s, false),
     }
+}
+
+/// Compose the `error_detail` stored in the traffic log.
+///
+/// A request that names no model gets no `[model:...]` prefix at all. The old
+/// `[model:unknown]` read as "we tried to find the model and failed", when for
+/// a bodyless GET — a probe for some path the gateway doesn't serve, say —
+/// there was never a model to find.
+fn format_error_detail(model: Option<&str>, body: &str) -> String {
+    let (head, cut) = truncate_chars(body, 500);
+    let prefix = model.map(|m| format!("[model:{m}] ")).unwrap_or_default();
+    let ellipsis = if cut { "..." } else { "" };
+    format!("{prefix}{head}{ellipsis}")
 }
 
 /// - `-1m` suffix appends/merges `context-1m-2025-08-07` into `anthropic-beta`
@@ -1002,11 +1022,37 @@ mod tests {
     /// `&body[..500]` byte-slice landed mid-character and panicked.
     #[test]
     fn truncate_chars_survives_multibyte_at_the_cut() {
-        let body: String = std::iter::repeat('\u{FFFD}').take(600).collect();
+        let body: String = "\u{FFFD}".repeat(600);
         let (head, cut) = truncate_chars(&body, 500);
         assert!(cut);
         assert_eq!(head.chars().count(), 500);
         assert!(!body.is_char_boundary(500), "precondition: byte 500 is mid-char");
+    }
+
+    /// `GET /api/hello` — no body, so no model, and a gateway that doesn't
+    /// serve the path answers 404 with nothing. There is nothing to report,
+    /// and an empty detail is what makes the panel hide the row's expander.
+    #[test]
+    fn a_request_with_no_model_gets_no_prefix() {
+        assert_eq!(format_error_detail(None, ""), "");
+        assert_eq!(format_error_detail(None, "Not Found"), "Not Found");
+    }
+
+    #[test]
+    fn a_named_model_is_prefixed() {
+        assert_eq!(
+            format_error_detail(Some("claude-opus-5"), "rate limited"),
+            "[model:claude-opus-5] rate limited"
+        );
+    }
+
+    #[test]
+    fn long_bodies_are_cut_with_an_ellipsis() {
+        let body = "x".repeat(600);
+        let detail = format_error_detail(Some("m"), &body);
+        assert!(detail.starts_with("[model:m] xxx"));
+        assert!(detail.ends_with("..."));
+        assert_eq!(detail.chars().count(), "[model:m] ".len() + 500 + 3);
     }
 
     fn test_state() -> ProxyState {
