@@ -22,7 +22,14 @@ async fn main() -> Result<()> {
     // No OS keychain, no interactive prompt — the agent is meant for
     // server / TUI deployments where neither makes sense.
     if let Err(e) = llm_relay_core::keystore::init_env(&paths::config_dir()) {
-        eprintln!("error: {e}\n\n{}", llm_relay_core::keystore::env_setup_hint());
+        use llm_relay_core::keystore::EnvInitError;
+        eprintln!("error: {e}");
+        // The "generate a key" hint only helps someone who has no key. For a
+        // key that simply doesn't match the store, it would send them off to
+        // create a second wrong one.
+        if matches!(e, EnvInitError::MissingKey(_)) {
+            eprintln!("\n{}", llm_relay_core::keystore::env_setup_hint());
+        }
         std::process::exit(2);
     }
 

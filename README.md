@@ -187,6 +187,16 @@ gemini
 
 ### 1. 准备主密钥（服务器模式必需）
 
+最省事的办法是**直接启动 TUI**：检测到没有主密钥时会弹出首次运行向导，帮你生成、显示一次、并可复制到剪贴板，确认保存后才带着它拉起 agent。
+
+```bash
+./llm-relay-tui   # 首次运行会引导生成主密钥
+```
+
+> 向导生成的密钥**不会写盘**——密钥若和它保护的密文放在一起，加密就成了摆设。请自行存进密码管理器或 systemd `EnvironmentFile=`。
+
+也可以自己生成（例如要先写好 systemd unit 再启动）：
+
 ```bash
 # 生成 32 字节 base64 主密钥（仅需一次，写入服务器的 env/secret manager）
 openssl rand -base64 32
@@ -194,7 +204,7 @@ openssl rand -base64 32
 export LLM_RELAY_MASTER_KEY="生成的 base64 字符串"
 ```
 
-> agent 用这个密钥 AES-256-GCM 加密 `~/.llm-relay/secrets.env.enc`。没有这个环境变量 agent 拒绝启动。
+> agent 用这个密钥 AES-256-GCM 加密 `~/.llm-relay/secrets.env.enc`。没有这个环境变量 agent 拒绝启动；密钥不对（换过、抄错）同样拒绝启动，而不是静默地把所有网关变成未认证状态。密钥丢了就只能删掉 `secrets.env.enc` 重新登录。
 
 ### 2. 启动 agent（后台）
 
@@ -337,7 +347,7 @@ kill -TERM $(cat ~/.llm-relay/agent.pid)
 
 | 变量 | 作用 | 默认 |
 |------|------|------|
-| `LLM_RELAY_MASTER_KEY` | 无头 agent 的 AES 主密钥（base64 32B） | 必填（headless） |
+| `LLM_RELAY_MASTER_KEY` | 无头 agent 的 AES 主密钥（base64 32B） | 必填（headless，TUI 首次运行可代为生成） |
 | `LLM_RELAY_PROXY_PORT` | 覆盖代理端口（测试 / 多实例） | `18080` |
 | `LLM_RELAY_RUNTIME_DIR` | 覆盖 runtime 目录（锁 / pid / socket） | `~/.llm-relay/` |
 

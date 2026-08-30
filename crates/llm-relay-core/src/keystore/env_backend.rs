@@ -26,6 +26,17 @@ pub struct EnvBackend {
     key: [u8; 32],
 }
 
+/// What `secrets.env.enc` looks like on disk. `load()` treats Missing and
+/// Malformed alike (empty map), but startup needs to tell them apart: a
+/// missing file is a legitimate first run, a malformed one is not.
+enum Stored {
+    /// No file yet — first run.
+    Missing,
+    /// File exists but isn't ours (truncated, corrupt, foreign format).
+    Malformed,
+    Sealed { nonce: Vec<u8>, ct: Vec<u8> },
+}
+
 impl EnvBackend {
     /// Build a backend by reading and validating the master key from env.
     /// Returns Err if the env var is missing or not a base64-encoded 32-byte value.
@@ -46,21 +57,53 @@ impl EnvBackend {
         Ok(Self { path, key })
     }
 
+    /// Check the master key against the ciphertext on disk before anything
+    /// depends on it. Call once at startup.
+    ///
+    /// Without this the agent comes up clean on a wrong or rotated key,
+    /// loads zero secrets, and every gateway goes unauthenticated — which
+    /// reads as a total gateway outage rather than the config error it is.
+    /// Refusing to start puts the cause in front of the operator instead of
+    /// burying it in `agent.log`.
+    pub fn verify(&self) -> Result<(), String> {
+        let path = self.path.display();
+        match self.read_stored() {
+            Stored::Missing => Ok(()),
+            Stored::Malformed => Err(format!(
+                "{path} is not a valid llm-relay keystore (bad header).\n\
+                 It is corrupt or belongs to another tool. Move it aside to start fresh."
+            )),
+            Stored::Sealed { nonce, ct } => self
+                .cipher()
+                .decrypt(Nonce::from_slice(&nonce), ct.as_ref())
+                .map(|_| ())
+                .map_err(|_| {
+                    format!(
+                        "{path} cannot be decrypted with the current {ENV_VAR}.\n\
+                         The key is wrong or was rotated — there is no re-key path, so either\n\
+                         restore the original key, or delete {path} and sign in again."
+                    )
+                }),
+        }
+    }
+
     fn cipher(&self) -> Aes256Gcm {
         Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.key))
     }
 
-    fn read_file(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        let bytes = std::fs::read(&self.path).ok()?;
+    fn read_stored(&self) -> Stored {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(b) => b,
+            Err(_) => return Stored::Missing,
+        };
         if bytes.len() < MAGIC.len() + NONCE_LEN || &bytes[..MAGIC.len()] != MAGIC {
-            log::warn!("env keystore at {} has bad magic", self.path.display());
-            return None;
+            return Stored::Malformed;
         }
         let mut o = MAGIC.len();
         let nonce = bytes[o..o + NONCE_LEN].to_vec();
         o += NONCE_LEN;
         let ct = bytes[o..].to_vec();
-        Some((nonce, ct))
+        Stored::Sealed { nonce, ct }
     }
 
     fn write_file(&self, nonce: &[u8], ct: &[u8]) -> std::io::Result<()> {
@@ -83,8 +126,13 @@ impl EnvBackend {
 
 impl Backend for EnvBackend {
     fn load(&self) -> HashMap<String, String> {
-        let Some((nonce, ct)) = self.read_file() else {
-            return HashMap::new();
+        let (nonce, ct) = match self.read_stored() {
+            Stored::Sealed { nonce, ct } => (nonce, ct),
+            Stored::Missing => return HashMap::new(),
+            Stored::Malformed => {
+                log::warn!("env keystore at {} has bad magic", self.path.display());
+                return HashMap::new();
+            }
         };
         match self.cipher().decrypt(Nonce::from_slice(&nonce), ct.as_ref()) {
             Ok(plain) => serde_json::from_slice(&plain).unwrap_or_default(),
@@ -122,4 +170,16 @@ pub fn setup_hint() -> String {
          Then export it before starting the agent:\n\n\
          \texport {ENV_VAR}=<base64-32-bytes>\n"
     )
+}
+
+/// Generate a fresh master key: 32 cryptographically random bytes, base64.
+///
+/// Deliberately does not persist it. Writing the key next to the ciphertext
+/// it protects would reduce the encryption to decoration — the whole benefit
+/// is that a copied-off `secrets.env.enc` is useless without a key held
+/// somewhere else. The caller shows it to the operator once.
+pub fn generate_master_key() -> String {
+    let mut k = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut k);
+    base64::engine::general_purpose::STANDARD.encode(k)
 }

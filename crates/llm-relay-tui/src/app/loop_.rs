@@ -305,7 +305,15 @@ fn saved_model_indexes(
     )
 }
 
-pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf) -> std::io::Result<()> {
+pub async fn run(
+    mut term: Tui,
+    initial_client: Arc<IpcClient>,
+    socket: PathBuf,
+    // Env for any agent we respawn after a disconnect. Must be the same set
+    // main() used, or the replacement agent comes up without the master key
+    // and immediately exits.
+    spawn_env: Vec<(String, String)>,
+) -> std::io::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
     // Wrap client in a slot so the reconnect path can swap it.
@@ -393,7 +401,7 @@ pub async fn run(mut term: Tui, initial_client: Arc<IpcClient>, socket: PathBuf)
 
                     // Retry until we get a new connection.
                     loop {
-                        match bootstrap::ensure_agent(&socket, EnsureMode::AttachOrSpawn).await {
+                        match bootstrap::ensure_agent(&socket, EnsureMode::AttachOrSpawn, &spawn_env).await {
                             Ok(AgentHandle::Attached(c)) | Ok(AgentHandle::Spawned { client: c, .. }) => {
                                 // Swap the client.
                                 *client_slot.lock().await = c.clone();

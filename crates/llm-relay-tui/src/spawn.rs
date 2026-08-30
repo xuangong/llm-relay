@@ -10,8 +10,15 @@
 
 use std::io;
 
+/// Extra environment for the spawned agent, as `(name, value)` pairs.
+///
+/// Passed explicitly rather than via `std::env::set_var`: mutating the
+/// process environment is unsound once other threads exist, and the TUI is
+/// a multi-threaded tokio runtime long before it decides to spawn an agent.
+pub type EnvPairs = [(String, String)];
+
 #[cfg(unix)]
-pub fn spawn_detached(cmd: &str, args: &[&str]) -> io::Result<u32> {
+pub fn spawn_detached(cmd: &str, args: &[&str], envs: &EnvPairs) -> io::Result<u32> {
     use std::io::Read;
     use std::os::unix::io::{FromRawFd, IntoRawFd, OwnedFd};
     use std::os::unix::process::CommandExt;
@@ -32,6 +39,7 @@ pub fn spawn_detached(cmd: &str, args: &[&str]) -> io::Result<u32> {
     let mut child = unsafe {
         Command::new(cmd)
             .args(args)
+            .envs(envs.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -88,7 +96,7 @@ pub fn spawn_detached(cmd: &str, args: &[&str]) -> io::Result<u32> {
 }
 
 #[cfg(windows)]
-pub fn spawn_detached(cmd: &str, args: &[&str]) -> io::Result<u32> {
+pub fn spawn_detached(cmd: &str, args: &[&str], envs: &EnvPairs) -> io::Result<u32> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -99,6 +107,7 @@ pub fn spawn_detached(cmd: &str, args: &[&str]) -> io::Result<u32> {
 
     let child = Command::new(cmd)
         .args(args)
+        .envs(envs.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

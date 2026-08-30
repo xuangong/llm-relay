@@ -6,7 +6,10 @@ mod env_backend;
 mod file_backend;
 mod system_backend;
 
-pub use env_backend::{setup_hint as env_setup_hint, ENV_VAR as ENV_KEY_VAR};
+pub use env_backend::{
+    generate_master_key, setup_hint as env_setup_hint, ENV_VAR as ENV_KEY_VAR,
+    FILE_NAME as ENV_STORE_FILE,
+};
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -44,16 +47,58 @@ pub fn init(config_dir: &std::path::Path) {
     let _ = BACKEND.set(backend);
 }
 
+/// Why `init_env` refused to start the process.
+#[derive(Debug)]
+pub enum EnvInitError {
+    /// No usable master key: env var missing, not base64, or wrong length.
+    /// The operator needs the "generate one" instructions.
+    MissingKey(String),
+    /// The key is well-formed but doesn't open `secrets.env.enc`. Telling
+    /// this operator to generate a key would be actively wrong — they have
+    /// one, it just isn't the one that sealed this file.
+    UnreadableStore(String),
+    /// `init()` or `init_env()` already ran in this process.
+    AlreadyInitialized,
+}
+
+impl std::fmt::Display for EnvInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingKey(m) | Self::UnreadableStore(m) => f.write_str(m),
+            Self::AlreadyInitialized => f.write_str("keystore already initialized"),
+        }
+    }
+}
+
+impl std::error::Error for EnvInitError {}
+
+/// Check the env master key against the store **without** installing it as
+/// the process backend. Lets a caller decide what to do about a missing key
+/// before committing to it — the TUI uses this to run its first-run wizard
+/// instead of spawning an agent that would immediately `exit(2)`.
+pub fn probe_env(config_dir: &std::path::Path) -> Result<(), EnvInitError> {
+    let path = config_dir.join(env_backend::FILE_NAME);
+    env_backend::EnvBackend::from_env(path)
+        .map_err(EnvInitError::MissingKey)?
+        .verify()
+        .map_err(EnvInitError::UnreadableStore)
+}
+
 /// Initialize the keystore in env-only mode (headless agent / TUI server).
 /// Reads the master key from `LLM_RELAY_MASTER_KEY` (base64 32 bytes) and
 /// stores ciphertext at `<config_dir>/secrets.env.enc`. NEVER falls back to
 /// the OS keychain or interactive file backend — server deployments must
 /// supply the env var explicitly.
-pub fn init_env(config_dir: &std::path::Path) -> Result<(), String> {
+///
+/// Fails fast when the key doesn't match an existing store, so a rotated or
+/// mistyped key surfaces as a startup error instead of a silently empty
+/// secret set that looks like every gateway went down at once.
+pub fn init_env(config_dir: &std::path::Path) -> Result<(), EnvInitError> {
+    probe_env(config_dir)?;
     let path = config_dir.join(env_backend::FILE_NAME);
-    let backend = env_backend::EnvBackend::from_env(path)?;
+    let backend = env_backend::EnvBackend::from_env(path).map_err(EnvInitError::MissingKey)?;
     if BACKEND.set(Box::new(backend)).is_err() {
-        return Err("keystore already initialized".to_string());
+        return Err(EnvInitError::AlreadyInitialized);
     }
     let _ = CURRENT_KIND.set(KeystoreKind::Env);
     Ok(())
@@ -147,4 +192,11 @@ pub fn file_backend_for_test(path: std::path::PathBuf) -> impl Backend {
 #[doc(hidden)]
 pub fn env_backend_for_test(path: std::path::PathBuf) -> Result<impl Backend, String> {
     env_backend::EnvBackend::from_env(path)
+}
+
+/// Test-only hook for `EnvBackend::verify` — the startup guard that makes a
+/// wrong master key fatal instead of silently empty.
+#[doc(hidden)]
+pub fn env_verify_for_test(path: std::path::PathBuf) -> Result<(), String> {
+    env_backend::EnvBackend::from_env(path)?.verify()
 }

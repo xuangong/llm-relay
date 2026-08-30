@@ -24,7 +24,7 @@ async fn returns_attached_when_socket_already_exists_and_responds() {
         }
     });
 
-    let result = ensure_agent(&sock, EnsureMode::AttachOnly).await.unwrap();
+    let result = ensure_agent(&sock, EnsureMode::AttachOnly, &[]).await.unwrap();
     assert!(matches!(result, llm_relay_tui::bootstrap::AgentHandle::Attached(_)));
     server.await.unwrap();
 }
@@ -33,6 +33,6 @@ async fn returns_attached_when_socket_already_exists_and_responds() {
 async fn fails_attach_only_when_no_socket() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("nope.sock");
-    let result = ensure_agent(&sock, EnsureMode::AttachOnly).await;
+    let result = ensure_agent(&sock, EnsureMode::AttachOnly, &[]).await;
     assert!(result.is_err());
 }

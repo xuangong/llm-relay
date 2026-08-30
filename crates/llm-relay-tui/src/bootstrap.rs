@@ -5,6 +5,10 @@
 //!  2. Otherwise, if `mode == AttachOnly`, return `NoAgent`.
 //!  3. Otherwise: spawn the agent binary detached, then poll the socket
 //!     for up to 5 seconds, retrying `Ping` until it succeeds.
+//!
+//! `spawn_env` carries variables the agent needs but the TUI's own
+//! environment may not have — in practice `LLM_RELAY_MASTER_KEY`, which the
+//! first-run wizard generates in memory and never writes down.
 
 use crate::ipc_client::IpcClient;
 use crate::spawn;
@@ -63,6 +67,7 @@ pub enum BootstrapError {
 pub async fn ensure_agent(
     socket: &Path,
     mode: EnsureMode,
+    spawn_env: &spawn::EnvPairs,
 ) -> Result<AgentHandle, BootstrapError> {
     // On Unix, check if the socket file exists before attempting connect.
     // On Windows, named pipes live in kernel namespace — always try connect.
@@ -98,6 +103,7 @@ pub async fn ensure_agent(
             let pid = spawn::spawn_detached(
                 agent_bin.to_str().expect("utf-8 path"),
                 &[],
+                spawn_env,
             )
             .map_err(|e| BootstrapError::Spawn(e.to_string()))?;
 
