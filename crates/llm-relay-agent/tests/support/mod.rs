@@ -6,6 +6,9 @@ pub struct AgentBin {
     pub bin: PathBuf,
 }
 
+// Same reason as the free functions below: `spawn` is used by some test
+// binaries and not others, and each recompiles this module independently.
+#[allow(dead_code)]
 impl AgentBin {
     pub fn locate() -> Self {
         // CARGO_BIN_EXE_<name> is set by cargo when building the test crate

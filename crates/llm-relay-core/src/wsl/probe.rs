@@ -83,6 +83,9 @@ exit 1
     Ok(parse_probe_outcome(&stdout))
 }
 
+// Only reachable from the Windows `probe_url`; the parser itself is
+// platform-independent, so keep it compiled for tests everywhere.
+#[cfg(any(target_os = "windows", test))]
 fn parse_probe_outcome(stdout: &str) -> ProbeOutcome {
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
     let last = lines.last().copied().unwrap_or("");

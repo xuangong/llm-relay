@@ -90,6 +90,10 @@ fn decode_wsl_output(bytes: &[u8]) -> String {
 ///   "* Ubuntu     Running  2"
 ///   "  Debian     Stopped  2"
 ///   "  Legacy     Stopped  1"   ← filtered (WSL1)
+///
+/// Only reachable from the Windows `list_distros`; the parser itself is
+/// platform-independent, so keep it compiled for tests everywhere.
+#[cfg(any(target_os = "windows", test))]
 fn parse_wsl_list(text: &str) -> Vec<DiscoveredDistro> {
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -200,6 +204,9 @@ pub fn probe_distro(_name: &str) -> Result<ProbeResult, AppError> {
     Err(AppError::Config("probe_distro: Windows only".into()))
 }
 
+/// Only reachable from the Windows `probe_distro`; the parser itself is
+/// platform-independent, so keep it compiled for tests everywhere.
+#[cfg(any(target_os = "windows", test))]
 fn parse_probe_output(text: &str) -> ProbeResult {
     let mut r = ProbeResult::default();
     for line in text.lines() {

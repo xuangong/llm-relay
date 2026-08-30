@@ -108,6 +108,10 @@ mv -f "$TMP" "$HOSTS"
 /// script. Allowed: ASCII letters, digits, dots, hyphens, length 1..=253.
 /// We always single-quote the value too, but rejecting outright is
 /// cheaper than reasoning about quote-escaping for shell + awk.
+///
+/// Only reachable from the Windows hosts-entry writers; the check itself
+/// is platform-independent, so keep it compiled for tests everywhere.
+#[cfg(any(target_os = "windows", test))]
 fn validate_hostname(h: &str) -> Result<(), AppError> {
     if h.is_empty() || h.len() > 253 {
         return Err(AppError::Config(format!("invalid hostname: {h:?}")));

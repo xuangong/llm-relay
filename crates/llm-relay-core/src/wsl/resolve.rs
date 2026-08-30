@@ -14,6 +14,8 @@
 //! The hosts-injection path requires `gateway_ip`; without it we can
 //! only attempt steps 1 and 2.
 
+// Both are used only by the Windows `resolve_url_for_distro` below.
+#[cfg(target_os = "windows")]
 use crate::wsl::probe::{probe_url, ProbeOutcome};
 use crate::AppError;
 use std::net::IpAddr;
