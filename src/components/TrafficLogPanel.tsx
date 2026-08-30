@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { RefreshCw, AlertTriangle, ChevronDown } from "lucide-react";
+import { RefreshCw, AlertTriangle, ChevronDown, Bell, BellOff } from "lucide-react";
 import { TrafficLogEntry } from "@/lib/api";
 import * as api from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
@@ -8,35 +8,52 @@ import { useI18n } from "@/lib/i18n";
 interface TrafficLogPanelProps {
   filterGateway: string;
   onFilterChange: (value: string) => void;
+  /** Lets the shell refresh anything keyed off the mute list (e.g. the error badge). */
+  onSuppressionChange?: () => void;
 }
 
-export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPanelProps) {
+export function TrafficLogPanel({ filterGateway, onFilterChange, onSuppressionChange }: TrafficLogPanelProps) {
   const { t } = useI18n();
   const [logs, setLogs] = useState<TrafficLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [gateways, setGateways] = useState<{ id: string; name: string }[]>([]);
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
+  const [showSuppressed, setShowSuppressed] = useState(false);
+  const [suppressedCount, setSuppressedCount] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const gid = filterGateway === "all" ? undefined : filterGateway;
-      const [entries, gws] = await Promise.all([
-        api.getTrafficLogs(gid, 200),
+      const [entries, gws, muted] = await Promise.all([
+        api.getTrafficLogs(gid, 200, showSuppressed),
         api.listGateways(),
+        api.listSuppressedPaths(),
       ]);
       setLogs(entries);
       setGateways(gws.map((g) => ({ id: g.id, name: g.name })));
+      setSuppressedCount(muted.length);
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
-  }, [filterGateway]);
+  }, [filterGateway, showSuppressed]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  const toggleSuppress = async (path: string, isSuppressed: boolean) => {
+    try {
+      if (isSuppressed) await api.unsuppressPath(path);
+      else await api.suppressPath(path);
+      await load();
+      onSuppressionChange?.();
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   // Auto-refresh when proxy-traffic fires a new anomalous entry
   useEffect(() => {
@@ -103,6 +120,20 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
         )}
 
         <div className="flex-1" />
+        {suppressedCount > 0 && (
+          <button
+            onClick={() => setShowSuppressed((v) => !v)}
+            title={t(showSuppressed ? 'traffic.hideSuppressed' : 'traffic.showSuppressed', { n: String(suppressedCount) })}
+            className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border transition-colors ${
+              showSuppressed
+                ? "bg-amber-500/15 border-amber-500/30 text-amber-500"
+                : "border-border/60 text-muted-foreground/70 hover:text-foreground hover:border-border"
+            }`}
+          >
+            <BellOff className="h-3 w-3" />
+            {suppressedCount}
+          </button>
+        )}
         {logs.length > 0 && (
           <span className="text-xs text-muted-foreground">{t('traffic.entries', { n: String(logs.length) })}</span>
         )}
@@ -156,7 +187,7 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
                     )}
                     <tr
                       key={entry.id}
-                      className={`border-b border-border/20 hover:bg-secondary/20 transition-colors ${statusBg(entry.status)} ${hasDetail ? 'cursor-pointer' : ''}`}
+                      className={`group border-b border-border/20 hover:bg-secondary/20 transition-colors ${statusBg(entry.status)} ${entry.suppressed ? 'opacity-50' : ''} ${hasDetail ? 'cursor-pointer' : ''}`}
                       onClick={() => hasDetail && setExpandedRow(isExpanded ? null : entry.id)}
                     >
                       <td className="px-4 py-1.5 font-mono text-muted-foreground whitespace-nowrap">
@@ -173,10 +204,35 @@ export function TrafficLogPanel({ filterGateway, onFilterChange }: TrafficLogPan
                           {entry.gatewayName ?? entry.gatewayId.slice(0, 8)}
                         </td>
                       )}
-                      <td className="px-2 py-1.5 font-mono text-foreground/70 truncate max-w-[12rem]">
-                        {entry.path}
+                      <td className="px-2 py-1.5 font-mono text-foreground/70 max-w-[12rem]">
+                        <div className="flex items-center gap-1">
+                          <span className={`truncate ${entry.suppressed ? 'line-through' : ''}`}>
+                            {entry.path}
+                          </span>
+                          <button
+                            title={entry.suppressed ? t('traffic.unsuppress') : t('traffic.suppress')}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleSuppress(entry.path, entry.suppressed);
+                            }}
+                            className={`shrink-0 transition-opacity ${
+                              entry.suppressed
+                                ? "text-amber-500 hover:text-amber-400"
+                                : "opacity-0 group-hover:opacity-100 focus:opacity-100 text-muted-foreground/50 hover:text-amber-500"
+                            }`}
+                          >
+                            {entry.suppressed
+                              ? <Bell className="h-3 w-3" />
+                              : <BellOff className="h-3 w-3" />}
+                          </button>
+                        </div>
                       </td>
                       <td className="px-2 py-1.5 text-muted-foreground/60 flex items-center gap-1">
+                        {entry.suppressed && (
+                          <span className="shrink-0 text-[9px] uppercase tracking-wider px-1 rounded bg-amber-500/15 text-amber-500 border border-amber-500/25">
+                            {t('traffic.suppressed')}
+                          </span>
+                        )}
                         {hasDetail ? (
                           <>
                             <span className={`flex-1 ${isExpanded ? '' : 'truncate max-w-[14rem]'}`}>

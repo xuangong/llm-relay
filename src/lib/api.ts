@@ -110,6 +110,12 @@ export interface TrafficLogEntry {
   latencyMs: number;
   errorDetail: string | null;
   loggedAt: string;
+  suppressed: boolean;
+}
+
+export interface SuppressedPath {
+  path: string;
+  createdAt: string;
 }
 
 export interface UsageSummary {
@@ -166,8 +172,17 @@ export const checkAllHealth = () =>
 export const getHealthLog = (gatewayId: string) =>
   invoke<HealthLogEntry[]>("get_health_log", { gatewayId });
 
-export const getTrafficLogs = (gatewayId?: string, limit?: number) =>
-  invoke<TrafficLogEntry[]>("get_traffic_logs", { gatewayId, limit });
+export const getTrafficLogs = (gatewayId?: string, limit?: number, includeSuppressed?: boolean) =>
+  invoke<TrafficLogEntry[]>("get_traffic_logs", { gatewayId, limit, includeSuppressed });
+
+export const listSuppressedPaths = () =>
+  invoke<SuppressedPath[]>("list_suppressed_paths");
+
+export const suppressPath = (path: string) =>
+  invoke<void>("suppress_path", { path });
+
+export const unsuppressPath = (path: string) =>
+  invoke<void>("unsuppress_path", { path });
 
 export type UsagePeriod = "today" | "week" | "7d" | "30d";
 

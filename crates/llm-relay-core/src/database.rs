@@ -86,6 +86,17 @@ pub struct TrafficLogEntry {
     pub latency_ms: u64,
     pub error_detail: Option<String>,
     pub logged_at: String,
+    /// Whether this row's path is muted. Carried on the row (rather than just
+    /// filtered out) so a caller that asks to see muted rows can render them as
+    /// muted instead of leaving the user wondering where they went.
+    pub suppressed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuppressedPath {
+    pub path: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,8 +230,13 @@ impl Database {
                 probed_at     TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS suppressed_paths (
+                path       TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL
+            );
+
             INSERT OR IGNORE INTO active_config (id, auto_switch) VALUES (1, 1);
-            PRAGMA user_version = 10;
+            PRAGMA user_version = 11;
             ",
         )?;
         Ok(Database { conn: Mutex::new(conn) })
@@ -473,6 +489,19 @@ impl Database {
                 );",
             )?;
             conn.execute_batch("PRAGMA user_version = 10")?;
+        }
+
+        if version < 11 {
+            // Paths whose errors the user has muted in the traffic log. Keyed by
+            // path alone: a probe like `/api/hello` is noise on every gateway,
+            // not just the one that happened to log it first.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS suppressed_paths (
+                    path       TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                );",
+            )?;
+            conn.execute_batch("PRAGMA user_version = 11")?;
         }
 
         Ok(())
@@ -894,53 +923,75 @@ impl Database {
 
     /// Returns recent anomalous traffic entries (newest first).
     /// `gateway_id = None` returns across all gateways.
+    ///
+    /// Muted paths are filtered in SQL rather than by the caller so that `limit`
+    /// counts rows the user will actually see — otherwise a chatty suppressed
+    /// path (a health probe firing every few seconds) would crowd real errors
+    /// out of the window.
     pub fn get_traffic_log(
         &self,
         gateway_id: Option<&str>,
         limit: usize,
+        include_suppressed: bool,
     ) -> Result<Vec<TrafficLogEntry>, AppError> {
         let conn = self.conn.lock().unwrap();
-        let entries = if let Some(gid) = gateway_id {
-            let mut stmt = conn.prepare(
-                "SELECT t.id, t.gateway_id, g.name, t.path, t.status, t.latency_ms, t.error_detail, t.logged_at
-                 FROM traffic_log t LEFT JOIN gateways g ON g.id = t.gateway_id
-                 WHERE t.gateway_id = ?1
-                 ORDER BY t.logged_at DESC LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![gid, limit as i64], |row| {
-                Ok(TrafficLogEntry {
-                    id: row.get(0)?,
-                    gateway_id: row.get(1)?,
-                    gateway_name: row.get(2)?,
-                    path: row.get(3)?,
-                    status: row.get::<_, i32>(4)? as u16,
-                    latency_ms: row.get::<_, i64>(5)? as u64,
-                    error_detail: row.get(6)?,
-                    logged_at: row.get(7)?,
-                })
-            })?;
-            rows.filter_map(|r| r.ok()).collect()
-        } else {
-            let mut stmt = conn.prepare(
-                "SELECT t.id, t.gateway_id, g.name, t.path, t.status, t.latency_ms, t.error_detail, t.logged_at
-                 FROM traffic_log t LEFT JOIN gateways g ON g.id = t.gateway_id
-                 ORDER BY t.logged_at DESC LIMIT ?1",
-            )?;
-            let rows = stmt.query_map(params![limit as i64], |row| {
-                Ok(TrafficLogEntry {
-                    id: row.get(0)?,
-                    gateway_id: row.get(1)?,
-                    gateway_name: row.get(2)?,
-                    path: row.get(3)?,
-                    status: row.get::<_, i32>(4)? as u16,
-                    latency_ms: row.get::<_, i64>(5)? as u64,
-                    error_detail: row.get(6)?,
-                    logged_at: row.get(7)?,
-                })
-            })?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
-        Ok(entries)
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.gateway_id, g.name, t.path, t.status, t.latency_ms, t.error_detail,
+                    t.logged_at,
+                    EXISTS (SELECT 1 FROM suppressed_paths s WHERE s.path = t.path)
+             FROM traffic_log t LEFT JOIN gateways g ON g.id = t.gateway_id
+             WHERE (?1 IS NULL OR t.gateway_id = ?1)
+               AND (?2 OR NOT EXISTS (SELECT 1 FROM suppressed_paths s WHERE s.path = t.path))
+             ORDER BY t.logged_at DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![gateway_id, include_suppressed, limit as i64], |row| {
+            Ok(TrafficLogEntry {
+                id: row.get(0)?,
+                gateway_id: row.get(1)?,
+                gateway_name: row.get(2)?,
+                path: row.get(3)?,
+                status: row.get::<_, i32>(4)? as u16,
+                latency_ms: row.get::<_, i64>(5)? as u64,
+                error_detail: row.get(6)?,
+                logged_at: row.get(7)?,
+                suppressed: row.get(8)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    // ─── Suppressed Paths ───
+
+    pub fn list_suppressed_paths(&self) -> Result<Vec<SuppressedPath>, AppError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path, created_at FROM suppressed_paths ORDER BY created_at DESC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SuppressedPath {
+                path: row.get(0)?,
+                created_at: row.get(1)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Mute a path. Idempotent — re-muting keeps the original timestamp.
+    pub fn suppress_path(&self, path: &str) -> Result<(), AppError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO suppressed_paths (path, created_at) VALUES (?1, ?2)",
+            params![path, now],
+        )?;
+        Ok(())
+    }
+
+    /// Unmute a path. Past rows for it are still in `traffic_log` (subject to
+    /// the 24h purge), so they reappear immediately.
+    pub fn unsuppress_path(&self, path: &str) -> Result<(), AppError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM suppressed_paths WHERE path = ?1", params![path])?;
+        Ok(())
     }
 
     // ─── Usage Log ───
@@ -1141,5 +1192,106 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM wsl_distros WHERE name = ?1", params![name])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `add_traffic_log` needs no gateway row — the list query left-joins, so a
+    /// dangling gateway_id just yields a NULL name.
+    fn log(db: &Database, path: &str, status: u16) {
+        db.add_traffic_log("gw-1", path, status, 100, Some("boom"))
+            .expect("insert");
+    }
+
+    #[test]
+    fn muting_a_path_hides_only_that_path() {
+        let db = Database::open_in_memory().unwrap();
+        log(&db, "/api/hello", 404);
+        log(&db, "/v1/messages", 500);
+
+        db.suppress_path("/api/hello").unwrap();
+
+        let visible = db.get_traffic_log(None, 100, false).unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].path, "/v1/messages");
+        assert!(!visible[0].suppressed);
+    }
+
+    /// The toolbar toggle asks for muted rows so it can render them struck
+    /// through. They must come back *flagged*, not silently mixed in with the
+    /// real errors.
+    #[test]
+    fn muted_rows_come_back_flagged_when_asked_for() {
+        let db = Database::open_in_memory().unwrap();
+        log(&db, "/api/hello", 404);
+        log(&db, "/v1/messages", 500);
+        db.suppress_path("/api/hello").unwrap();
+
+        let all = db.get_traffic_log(None, 100, true).unwrap();
+        assert_eq!(all.len(), 2);
+        let hello = all.iter().find(|e| e.path == "/api/hello").unwrap();
+        let msgs = all.iter().find(|e| e.path == "/v1/messages").unwrap();
+        assert!(hello.suppressed);
+        assert!(!msgs.suppressed);
+    }
+
+    /// The whole point of the feature being reversible: past rows are still in
+    /// `traffic_log`, so unmuting brings them straight back.
+    #[test]
+    fn unmuting_restores_the_existing_rows() {
+        let db = Database::open_in_memory().unwrap();
+        log(&db, "/api/hello", 404);
+        db.suppress_path("/api/hello").unwrap();
+        assert!(db.get_traffic_log(None, 100, false).unwrap().is_empty());
+
+        db.unsuppress_path("/api/hello").unwrap();
+
+        let visible = db.get_traffic_log(None, 100, false).unwrap();
+        assert_eq!(visible.len(), 1);
+        assert!(!visible[0].suppressed);
+    }
+
+    /// Clicking mute twice (two rows, same path) must not create a second entry
+    /// or reset when it was first muted.
+    #[test]
+    fn muting_twice_is_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        db.suppress_path("/api/hello").unwrap();
+        let first = db.list_suppressed_paths().unwrap();
+        db.suppress_path("/api/hello").unwrap();
+        let second = db.list_suppressed_paths().unwrap();
+
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].created_at, second[0].created_at);
+    }
+
+    /// Why the filter lives in SQL rather than in the caller: a chatty muted
+    /// path must not eat the row budget and push real errors out of view.
+    #[test]
+    fn the_limit_counts_only_visible_rows() {
+        let db = Database::open_in_memory().unwrap();
+        for _ in 0..20 {
+            log(&db, "/api/hello", 404);
+        }
+        log(&db, "/v1/messages", 500);
+        db.suppress_path("/api/hello").unwrap();
+
+        let visible = db.get_traffic_log(None, 5, false).unwrap();
+        assert_eq!(visible.len(), 1, "the real error must survive the limit");
+        assert_eq!(visible[0].path, "/v1/messages");
+    }
+
+    #[test]
+    fn muting_applies_across_gateways() {
+        let db = Database::open_in_memory().unwrap();
+        db.add_traffic_log("gw-1", "/api/hello", 404, 10, None).unwrap();
+        db.add_traffic_log("gw-2", "/api/hello", 404, 10, None).unwrap();
+        db.suppress_path("/api/hello").unwrap();
+
+        assert!(db.get_traffic_log(Some("gw-1"), 100, false).unwrap().is_empty());
+        assert!(db.get_traffic_log(Some("gw-2"), 100, false).unwrap().is_empty());
     }
 }

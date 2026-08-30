@@ -30,6 +30,24 @@ function App() {
   const [bottomTab, setBottomTab] = useState<"usage" | "logs">("usage");
   const [appVersion, setAppVersion] = useState("");
   const [logFilterGateway, setLogFilterGateway] = useState<string>("all");
+  // Muted paths, mirrored here so the error badge stays quiet for them too —
+  // otherwise muting a noisy probe would still light up the Errors button. A
+  // ref, not state: only the proxy-traffic listener reads it, and keeping it out
+  // of that effect's deps avoids tearing down the listener on every mute.
+  const suppressedPaths = useRef<string[]>([]);
+
+  const loadSuppressed = useCallback(async () => {
+    try {
+      const muted = await api.listSuppressedPaths();
+      suppressedPaths.current = muted.map((m) => m.path);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSuppressed();
+  }, [loadSuppressed]);
   const [clientName, setClientName] = useState("");
   const [editingClientName, setEditingClientName] = useState(false);
   const [clientNameDraft, setClientNameDraft] = useState("");
@@ -104,8 +122,9 @@ function App() {
       loadAll();
     });
 
-    const unlisten3 = appWindow.listen<{ status: number }>("proxy-traffic", (event) => {
-      if (event.payload.status >= 400) {
+    const unlisten3 = appWindow.listen<{ status: number; path?: string }>("proxy-traffic", (event) => {
+      const { status, path } = event.payload;
+      if (status >= 400 && !(path && suppressedPaths.current.includes(path))) {
         setLogErrorCount((n) => n + 1);
       }
     });
@@ -384,6 +403,7 @@ function App() {
               <TrafficLogPanel
                 filterGateway={logFilterGateway}
                 onFilterChange={setLogFilterGateway}
+                onSuppressionChange={loadSuppressed}
               />
             )}
           </div>

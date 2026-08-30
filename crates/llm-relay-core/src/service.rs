@@ -506,7 +506,7 @@ impl Service {
         let gw_id_str = gateway_id.map(|id| id.to_string());
         let logs = self
             .db
-            .get_traffic_log(gw_id_str.as_deref(), 500)?;
+            .get_traffic_log(gw_id_str.as_deref(), 500, false)?;
         Ok(logs
             .into_iter()
             .map(|l| {
@@ -592,7 +592,7 @@ impl Service {
     /// the TUI surfaces the gap rather than presenting an empty (and untrue)
     /// "no errors" view.
     pub async fn get_errors(&self, limit: u32) -> Result<Vec<ErrorRow>, AppError> {
-        let entries = self.db.get_traffic_log(None, limit as usize)?;
+        let entries = self.db.get_traffic_log(None, limit as usize, false)?;
         Ok(entries
             .into_iter()
             .filter(|e| e.status >= 400 || e.error_detail.is_some())

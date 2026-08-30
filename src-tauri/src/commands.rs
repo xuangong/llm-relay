@@ -405,11 +405,35 @@ pub async fn get_traffic_logs(
     state: State<'_, AppState>,
     gateway_id: Option<String>,
     limit: Option<usize>,
+    include_suppressed: Option<bool>,
 ) -> Result<Vec<TrafficLogEntry>, String> {
     state
         .db
-        .get_traffic_log(gateway_id.as_deref(), limit.unwrap_or(200))
+        .get_traffic_log(
+            gateway_id.as_deref(),
+            limit.unwrap_or(200),
+            include_suppressed.unwrap_or(false),
+        )
         .map_err(|e| e.to_string())
+}
+
+// ─── Suppressed Paths ───
+
+#[tauri::command]
+pub async fn list_suppressed_paths(
+    state: State<'_, AppState>,
+) -> Result<Vec<llm_relay_core::database::SuppressedPath>, String> {
+    state.db.list_suppressed_paths().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn suppress_path(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    state.db.suppress_path(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn unsuppress_path(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    state.db.unsuppress_path(&path).map_err(|e| e.to_string())
 }
 
 // ─── Usage Stats ───
