@@ -29,6 +29,8 @@ const en: Translations = {
     howToUse: "How to Use",
     online: "{healthy}/{total} online",
     disableRelay: "Disable Relay",
+    renameClient: "Click to rename this client",
+    nameThisDevice: "+ Name this device",
   },
   disable: {
     title: "Disable LLM Relay",
@@ -164,6 +166,8 @@ const zh: Translations = {
     howToUse: "使用指南",
     online: "{healthy}/{total} 在线",
     disableRelay: "停用中继",
+    renameClient: "点击重命名此客户端",
+    nameThisDevice: "+ 命名此设备",
   },
   disable: {
     title: "停用 LLM Relay",

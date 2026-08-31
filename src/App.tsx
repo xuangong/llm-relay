@@ -228,10 +228,16 @@ function App() {
               ) : (
                 <button
                   onClick={handleEditClientName}
-                  className="text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-                  title="Click to rename this client"
+                  className={`text-xs transition-colors cursor-pointer ${
+                    clientName
+                      ? "text-muted-foreground hover:text-foreground"
+                      : // Never named: without a label the button would render
+                        // zero-width, leaving no way to ever set a name.
+                        "px-1.5 py-0.5 rounded border border-dashed border-border/70 text-muted-foreground/70 hover:text-foreground hover:border-border"
+                  }`}
+                  title={t('header.renameClient')}
                 >
-                  {clientName}
+                  {clientName || t('header.nameThisDevice')}
                 </button>
               )
             )}
