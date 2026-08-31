@@ -290,12 +290,8 @@ pub async fn send_heartbeat(db: Arc<Database>) {
             id
         });
 
-    let payload = serde_json::json!({
-        "clientId": client_id,
-        "clientName": client_name,
-        "hostname": hostname,
-        "gatewayUrl": gw.url,
-    });
+    let machine_id = crate::machine_id::machine_id();
+    let payload = heartbeat_payload(&client_id, &client_name, &hostname, &gw.url, machine_id);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -303,8 +299,8 @@ pub async fn send_heartbeat(db: Arc<Database>) {
         .unwrap_or_default();
 
     let url = format!("{}/api/heartbeat", gw.url.trim_end_matches('/'));
-    log::info!("Sending heartbeat to {} (client_id: {}, client_name: '{}', hostname: '{}')",
-        url, client_id, client_name, hostname);
+    log::info!("Sending heartbeat to {} (client_id: {}, machine_id: {}, client_name: '{}', hostname: '{}')",
+        url, client_id, if machine_id.is_some() { "present" } else { "absent" }, client_name, hostname);
 
     match client
         .post(&url)
@@ -326,5 +322,66 @@ pub async fn send_heartbeat(db: Arc<Database>) {
         Err(e) => {
             log::warn!("Heartbeat network error to {} ({}): {}", gw.name, url, e);
         }
+    }
+}
+
+/// Build the `POST /api/heartbeat` body.
+///
+/// `machine_id` is sent *alongside* `clientId`, not instead of it: the server
+/// merges the old per-install UUIDs onto the machine id the first time it sees
+/// both, so both fields have to be present for at least one release cycle.
+///
+/// When the OS id is unreadable the key is omitted entirely rather than sent
+/// empty — the server then falls back to `clientId`, whereas a placeholder would
+/// collapse every such install into one fake shared device.
+fn heartbeat_payload(
+    client_id: &str,
+    client_name: &str,
+    hostname: &str,
+    gateway_url: &str,
+    machine_id: Option<&str>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "clientId": client_id,
+        "clientName": client_name,
+        "hostname": hostname,
+        "gatewayUrl": gateway_url,
+    });
+    if let Some(id) = machine_id {
+        payload["machineId"] = serde_json::Value::String(id.to_string());
+    }
+    payload
+}
+
+#[cfg(test)]
+mod heartbeat_payload_tests {
+    use super::*;
+
+    #[test]
+    fn carries_the_machine_id_when_the_os_gives_one() {
+        let p = heartbeat_payload("cid", "laptop", "host", "https://gw", Some("MID-1"));
+        assert_eq!(p["machineId"], "MID-1");
+        // Still sent: the server needs both to merge historic rows.
+        assert_eq!(p["clientId"], "cid");
+    }
+
+    #[test]
+    fn omits_the_key_entirely_when_the_os_gives_none() {
+        let p = heartbeat_payload("cid", "laptop", "host", "https://gw", None);
+        assert!(
+            p.get("machineId").is_none(),
+            "must omit rather than send null/empty, or every unreadable install \
+             merges into one phantom device: {p}"
+        );
+        assert_eq!(p["clientId"], "cid");
+    }
+
+    #[test]
+    fn passes_the_os_value_through_unmodified() {
+        // No hostname/user/IP mixed in — anything derived would reintroduce the
+        // instability the machine id exists to remove.
+        let raw = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
+        let p = heartbeat_payload("cid", "laptop", "host", "https://gw", Some(raw));
+        assert_eq!(p["machineId"], raw);
     }
 }

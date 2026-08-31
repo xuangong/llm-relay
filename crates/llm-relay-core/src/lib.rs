@@ -15,6 +15,7 @@ pub mod service;
 pub use service::Service;
 pub mod paths;
 pub mod process;
+pub mod machine_id;
 pub mod lifecycle;
 pub mod wsl;
 pub mod cli_target;
