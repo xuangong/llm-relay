@@ -41,6 +41,7 @@ import {
   KeyRound,
   X,
   ArrowUpToLine,
+  ExternalLink,
 } from "lucide-react";
 
 interface GatewayCardProps {
@@ -391,7 +392,23 @@ export function GatewayCard({
                   {t('gateway.inUse')}
                 </span>
               )}
-              <span className="text-[11px] text-muted-foreground font-mono truncate">{gateway.url}</span>
+              <button
+                type="button"
+                // Opens in the system browser, not a webview: this is the
+                // gateway's own dashboard, and the click must not also toggle
+                // the row it sits in.
+                onClick={(e) => {
+                  e.stopPropagation();
+                  api.openUrl(gateway.url).catch((err) =>
+                    toast.error(extractErrorMessage(err))
+                  );
+                }}
+                title={t('gateway.openInBrowser')}
+                className="group/url inline-flex items-center gap-1 min-w-0 text-[11px] text-muted-foreground font-mono hover:text-primary hover:underline transition-colors"
+              >
+                <span className="truncate">{gateway.url}</span>
+                <ExternalLink className="h-2.5 w-2.5 shrink-0 opacity-0 group-hover/url:opacity-100 transition-opacity" />
+              </button>
               {/* Only worth showing once the name has been changed away from
                   it — otherwise it just repeats the name verbatim. */}
               {gateway.userName && gateway.userName !== gateway.name && (

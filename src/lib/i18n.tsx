@@ -94,6 +94,7 @@ const en: Translations = {
     currentKey: "Current Key",
     pinToTop: "Pin to top",
     renameHint: "Double-click to rename",
+    openInBrowser: "Open in browser",
   },
   usage: {
     title: "Token Usage",
@@ -228,6 +229,7 @@ const zh: Translations = {
     currentKey: "当前密钥",
     pinToTop: "置顶",
     renameHint: "双击重命名",
+    openInBrowser: "在浏览器中打开",
   },
   usage: {
     title: "用量统计",
