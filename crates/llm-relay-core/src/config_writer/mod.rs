@@ -543,114 +543,418 @@ pub fn clear_gemini_config() -> Result<(), AppError> {
     atomic_write(&env_path, content.as_bytes())
 }
 
-/// Ensure OPENAI_API_KEY is set in the user's environment.
-/// Codex CLI requires this env var to exist; we set a dummy placeholder
-/// since the local proxy injects the real key.
-pub(crate) fn ensure_openai_api_key_in_shell_rc() -> Result<(), AppError> {
-    // Set in current process so child processes inherit immediately
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        std::env::set_var("OPENAI_API_KEY", "dummy");
+/// The value written into `OPENAI_API_KEY`.
+///
+/// Codex CLI refuses to start without the variable set, but the real key never
+/// comes from here — the local proxy swaps it on the wire. The value is named
+/// rather than left as `dummy` so anyone who finds it in their shell profile can
+/// tell where it came from and that it is meant to be disregarded.
+pub const OPENAI_API_KEY_PLACEHOLDER: &str = "llm-relay-ignore";
+
+/// Which login shell the user actually runs, which decides both the file to
+/// write and the syntax to write in. Guessing from whichever rc file happens to
+/// exist gets this wrong for anyone who has both `.zshrc` and `.bashrc`.
+///
+/// Not `cfg(unix)`-gated: a Windows host still writes rc files inside its WSL
+/// distros, where the shell is whatever that distro's passwd entry says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellKind {
+    Zsh,
+    Bash,
+    Fish,
+    /// Unrecognised (ksh, dash, a login shell we've never heard of). `.profile`
+    /// with `export` is the portable common denominator.
+    Posix,
+}
+
+fn detect_shell(shell_path: Option<&str>) -> ShellKind {
+    // Match on the file name so /bin/zsh, /usr/bin/zsh and a homebrew zsh all
+    // land in the same bucket.
+    let name = shell_path
+        .and_then(|p| p.rsplit('/').next())
+        .unwrap_or_default();
+    match name {
+        "zsh" => ShellKind::Zsh,
+        "bash" => ShellKind::Bash,
+        "fish" => ShellKind::Fish,
+        _ => ShellKind::Posix,
+    }
+}
+
+impl ShellKind {
+    fn rc_relative_path(self) -> Vec<&'static str> {
+        match self {
+            ShellKind::Zsh => vec![".zshrc"],
+            ShellKind::Fish => vec![".config", "fish", "config.fish"],
+            // Terminal.app and iTerm start bash as a *login* shell, which reads
+            // .bash_profile and never .bashrc; most Linux terminals do the
+            // opposite. Writing to the wrong one leaves the var unset. Keyed off
+            // the build target rather than the write target, which is fine
+            // because WSL only ever exists on a Windows host.
+            #[cfg(target_os = "macos")]
+            ShellKind::Bash => vec![".bash_profile"],
+            #[cfg(not(target_os = "macos"))]
+            ShellKind::Bash => vec![".bashrc"],
+            ShellKind::Posix => vec![".profile"],
+        }
+    }
+
+    fn export_line(self, value: &str) -> String {
+        match self {
+            // fish is not POSIX: `export FOO=bar` is a syntax error there.
+            ShellKind::Fish => format!("set -gx OPENAI_API_KEY {value}"),
+            _ => format!("export OPENAI_API_KEY={value}"),
+        }
+    }
+
+    fn assignment_prefixes(self) -> &'static [&'static str] {
+        match self {
+            ShellKind::Fish => &["set -gx OPENAI_API_KEY", "set -x OPENAI_API_KEY"],
+            _ => &["export OPENAI_API_KEY=", "OPENAI_API_KEY="],
+        }
+    }
+}
+
+/// Values this module considers its own, and is therefore free to overwrite.
+/// `dummy` is what releases up to v0.4.0 wrote; without it in this list every
+/// existing install would be stranded on the old value forever.
+const RELAY_OWNED_OPENAI_VALUES: &[&str] = &["dummy", OPENAI_API_KEY_PLACEHOLDER];
+
+/// Whether `OPENAI_API_KEY=<value>` is something we wrote, as opposed to a real
+/// OpenAI key the user set themselves. Quotes are stripped first, since both
+/// `export FOO="x"` and `export FOO=x` are common.
+fn is_relay_owned_openai_value(value: &str) -> bool {
+    let v = value.trim().trim_matches(['"', '\'']);
+    RELAY_OWNED_OPENAI_VALUES.contains(&v)
+}
+
+/// The value assigned by an `OPENAI_API_KEY` line, as written.
+fn assigned_openai_value(line: &str, shell: ShellKind) -> Option<&str> {
+    let trimmed = line.trim();
+    match shell {
+        // `set -gx OPENAI_API_KEY <value>`
+        ShellKind::Fish => trimmed.split_whitespace().nth(3),
+        // `export OPENAI_API_KEY=<value>` / `OPENAI_API_KEY=<value>`
+        _ => trimmed.split_once('=').map(|(_, v)| v),
+    }
+}
+
+/// What `rc_with_openai_key` decided to do.
+enum RcOutcome {
+    /// The file already assigns the value we want.
+    AlreadySet,
+    /// The file assigns a value we did not write — a real key. Left untouched:
+    /// Codex works either way, and clobbering the user's key to install a
+    /// placeholder would be a bad trade.
+    ForeignValue,
+    Rewrite(String),
+}
+
+/// Rewrite an rc file so `OPENAI_API_KEY` ends up at `value`.
+///
+/// An existing *relay-written* assignment is replaced in place rather than
+/// shadowed by a new line at the bottom. Appending would work for a fresh
+/// install but not for an upgrade, where the old line still assigns the previous
+/// placeholder and a later line silently wins — leaving the file
+/// self-contradictory to read.
+fn rc_with_openai_key(existing: &str, shell: ShellKind, value: &str) -> RcOutcome {
+    let desired = shell.export_line(value);
+    let prefixes = shell.assignment_prefixes();
+
+    let mut out: Vec<String> = Vec::new();
+    let mut outcome: Option<RcOutcome> = None;
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        let is_assignment =
+            !trimmed.starts_with('#') && prefixes.iter().any(|p| trimmed.starts_with(p));
+        if is_assignment && outcome.is_none() {
+            if trimmed == desired {
+                outcome = Some(RcOutcome::AlreadySet);
+                out.push(line.to_string());
+            } else if assigned_openai_value(trimmed, shell)
+                .is_some_and(is_relay_owned_openai_value)
+            {
+                outcome = Some(RcOutcome::Rewrite(String::new())); // placeholder, filled below
+                out.push(desired.clone());
+            } else {
+                return RcOutcome::ForeignValue;
+            }
+        } else {
+            out.push(line.to_string());
+        }
+    }
+
+    match outcome {
+        Some(RcOutcome::AlreadySet) => return RcOutcome::AlreadySet,
+        Some(_) => {}
+        None => {
+            if !out.is_empty() {
+                out.push(String::new());
+            }
+            out.push("# Added by LLM Relay for Codex CLI compatibility".to_string());
+            out.push(desired);
+        }
+    }
+
+    let mut text = out.join("\n");
+    text.push('\n');
+    RcOutcome::Rewrite(text)
+}
+
+/// Put the `OPENAI_API_KEY` line into the rc file of `shell`, under whatever
+/// home directory `backend` points at — the local host's, or a WSL distro's.
+///
+/// Skips the write when the file already carries the right assignment: both
+/// backends rewrite the whole file, and the user's shell may be reading it.
+fn ensure_openai_api_key_in_rc(
+    backend: &dyn CliBackend,
+    shell: ShellKind,
+) -> Result<(), AppError> {
+    let rel = shell.rc_relative_path();
+    let existing = backend.read(&rel)?.unwrap_or_default();
+    match rc_with_openai_key(&existing, shell, OPENAI_API_KEY_PLACEHOLDER) {
+        RcOutcome::AlreadySet => Ok(()),
+        RcOutcome::ForeignValue => {
+            log::info!(
+                "~/{} already sets OPENAI_API_KEY to a value we did not write — leaving it alone",
+                rel.join("/")
+            );
+            Ok(())
+        }
+        RcOutcome::Rewrite(updated) => {
+            // Both backends mkdir the parent, which fish's ~/.config/fish needs.
+            backend.write_atomic(&rel, updated.as_bytes())?;
+            log::info!("wrote OPENAI_API_KEY to ~/{}", rel.join("/"));
+            Ok(())
+        }
+    }
+}
+
+/// Ensure `OPENAI_API_KEY` is set in the user's environment, because Codex CLI
+/// will not start without it.
+///
+/// Windows gets a user-level variable (`HKCU\Environment` via `setx`); Unix gets
+/// a line in the rc file belonging to the shell the user actually logs into.
+///
+/// Host-only. WSL distros are handled per-target in `write_one_target`, since
+/// each has its own home directory and its own login shell.
+pub(crate) fn ensure_openai_api_key_env() -> Result<(), AppError> {
+    // Set in this process too, so anything we spawn inherits it without waiting
+    // for a new login session — unless the user already has a real key in the
+    // environment, in which case theirs wins here as well.
+    let inherited = std::env::var("OPENAI_API_KEY").ok();
+    let ours = inherited
+        .as_deref()
+        .is_none_or(is_relay_owned_openai_value);
+    if ours {
+        std::env::set_var("OPENAI_API_KEY", OPENAI_API_KEY_PLACEHOLDER);
     }
 
     #[cfg(target_os = "macos")]
-    {
-        // launchctl setenv makes it available to GUI apps (Finder, Spotlight launches)
+    if ours {
+        // launchctl covers GUI-launched processes, which never read a shell rc.
         let _ = std::process::Command::new("launchctl")
-            .args(["setenv", "OPENAI_API_KEY", "dummy"])
+            .args(["setenv", "OPENAI_API_KEY", OPENAI_API_KEY_PLACEHOLDER])
             .output();
-
-        // Also write to shell rc for terminal sessions
-        let home = home_dir();
-        let rc_path = if home.join(".zshrc").exists() {
-            home.join(".zshrc")
-        } else {
-            home.join(".bashrc")
-        };
-
-        let marker = "export OPENAI_API_KEY=";
-        let content = if rc_path.exists() {
-            fs::read_to_string(&rc_path)?
-        } else {
-            String::new()
-        };
-
-        if !content.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with(marker) && !trimmed.starts_with('#')
-        }) {
-            use std::io::Write;
-            let mut f = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&rc_path)?;
-            writeln!(f)?;
-            writeln!(f, "# Added by LLM Relay for Codex CLI compatibility")?;
-            writeln!(f, "export OPENAI_API_KEY=dummy")?;
-        }
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(unix)]
     {
-        let home = home_dir();
-        let rc_path = if home.join(".zshrc").exists() {
-            home.join(".zshrc")
-        } else {
-            home.join(".bashrc")
-        };
-
-        let marker = "export OPENAI_API_KEY=";
-        let content = if rc_path.exists() {
-            fs::read_to_string(&rc_path)?
-        } else {
-            String::new()
-        };
-
-        if !content.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with(marker) && !trimmed.starts_with('#')
-        }) {
-            use std::io::Write;
-            let mut f = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&rc_path)?;
-            writeln!(f)?;
-            writeln!(f, "# Added by LLM Relay for Codex CLI compatibility")?;
-            writeln!(f, "export OPENAI_API_KEY=dummy")?;
-        }
+        let shell = detect_shell(std::env::var("SHELL").ok().as_deref());
+        ensure_openai_api_key_in_rc(&crate::cli_target::WindowsFsBackend::new(), shell)?;
     }
 
     #[cfg(windows)]
     {
-        // On Windows, set a persistent user environment variable via the registry
         use std::process::Command;
-        // Check if already set in user env via `reg query`
-        let check = Command::new("reg")
+        // `reg query` prints "    OPENAI_API_KEY    REG_SZ    <value>".
+        let current = Command::new("reg")
             .args(["query", "HKCU\\Environment", "/v", "OPENAI_API_KEY"])
-            .output();
-        if let Ok(output) = check {
-            if output.status.success() {
-                // Already set, skip
-                return Ok(());
-            }
-        }
-        // Set via setx (persists across reboots, user-level, writes to HKCU\Environment)
-        let result = Command::new("setx")
-            .args(["OPENAI_API_KEY", "dummy"])
             .output()
-            .map_err(|e| AppError::Config(format!("Failed to run setx: {e}")))?;
-        if !result.status.success() {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            log::warn!("setx OPENAI_API_KEY failed: {stderr}");
-        } else {
-            // Also set in current process so child processes inherit it immediately
-            std::env::set_var("OPENAI_API_KEY", "dummy");
-            // Broadcast WM_SETTINGCHANGE so Explorer and other apps pick up the change
-            broadcast_env_change();
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let stored: Option<String> = current
+            .lines()
+            .find(|l| l.contains("OPENAI_API_KEY"))
+            .and_then(|l| l.split_whitespace().nth(2))
+            .map(|v| v.to_string());
+
+        match stored.as_deref() {
+            // Already ours and already right.
+            Some(v) if v == OPENAI_API_KEY_PLACEHOLDER => {}
+            // A real key the user set. Codex works with it, so don't clobber it.
+            Some(v) if !is_relay_owned_openai_value(v) => {
+                log::info!(
+                    "HKCU\\Environment already sets OPENAI_API_KEY to a value we did not write — leaving it alone"
+                );
+            }
+            // Absent, or an older release's `dummy`.
+            _ => {
+                let result = Command::new("setx")
+                    .args(["OPENAI_API_KEY", OPENAI_API_KEY_PLACEHOLDER])
+                    .output()
+                    .map_err(|e| AppError::Config(format!("Failed to run setx: {e}")))?;
+                if !result.status.success() {
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    log::warn!("setx OPENAI_API_KEY failed: {stderr}");
+                } else {
+                    // Tell Explorer and friends, so new terminals see it without
+                    // a logout.
+                    broadcast_env_change();
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod openai_env_tests {
+    use super::*;
+
+    const V: &str = OPENAI_API_KEY_PLACEHOLDER;
+
+    /// The rewritten file, or a panic naming what happened instead.
+    fn rewritten(existing: &str, shell: ShellKind) -> String {
+        match rc_with_openai_key(existing, shell, V) {
+            RcOutcome::Rewrite(s) => s,
+            RcOutcome::AlreadySet => panic!("expected a rewrite, got AlreadySet"),
+            RcOutcome::ForeignValue => panic!("expected a rewrite, got ForeignValue"),
+        }
+    }
+
+    #[test]
+    fn shell_is_read_from_the_binary_name_not_the_path() {
+        assert_eq!(detect_shell(Some("/bin/zsh")), ShellKind::Zsh);
+        assert_eq!(detect_shell(Some("/opt/homebrew/bin/zsh")), ShellKind::Zsh);
+        assert_eq!(detect_shell(Some("/bin/bash")), ShellKind::Bash);
+        assert_eq!(detect_shell(Some("/usr/bin/fish")), ShellKind::Fish);
+        // Anything we don't know gets the portable treatment rather than a guess.
+        assert_eq!(detect_shell(Some("/bin/ksh")), ShellKind::Posix);
+        assert_eq!(detect_shell(None), ShellKind::Posix);
+    }
+
+    #[test]
+    fn each_shell_gets_its_own_rc_file() {
+        assert_eq!(ShellKind::Zsh.rc_relative_path(), vec![".zshrc"]);
+        assert_eq!(ShellKind::Posix.rc_relative_path(), vec![".profile"]);
+        assert_eq!(
+            ShellKind::Fish.rc_relative_path(),
+            vec![".config", "fish", "config.fish"]
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(ShellKind::Bash.rc_relative_path(), vec![".bash_profile"]);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(ShellKind::Bash.rc_relative_path(), vec![".bashrc"]);
+    }
+
+    #[test]
+    fn a_fresh_file_gets_the_export_appended_with_a_marker() {
+        let out = rewritten("", ShellKind::Zsh);
+        assert_eq!(
+            out,
+            "# Added by LLM Relay for Codex CLI compatibility\nexport OPENAI_API_KEY=llm-relay-ignore\n"
+        );
+    }
+
+    #[test]
+    fn existing_content_is_kept_and_separated_by_a_blank_line() {
+        let out = rewritten("export PATH=/x:$PATH", ShellKind::Zsh);
+        assert_eq!(
+            out,
+            "export PATH=/x:$PATH\n\n# Added by LLM Relay for Codex CLI compatibility\nexport OPENAI_API_KEY=llm-relay-ignore\n"
+        );
+    }
+
+    #[test]
+    fn an_older_value_is_replaced_in_place_not_shadowed() {
+        // The upgrade case: v0.4.0 and earlier wrote `dummy`. Appending a second
+        // line would leave the file saying two different things.
+        let rc = "export OPENAI_API_KEY=dummy\nexport EDITOR=vim\n";
+        let out = rewritten(rc, ShellKind::Zsh);
+        assert_eq!(
+            out,
+            "export OPENAI_API_KEY=llm-relay-ignore\nexport EDITOR=vim\n"
+        );
+        assert!(!out.contains("dummy"));
+    }
+
+    #[test]
+    fn a_real_key_the_user_set_is_never_overwritten() {
+        // Codex runs fine with the user's own key — the proxy replaces it on the
+        // wire either way — so there is nothing to gain by destroying it.
+        for rc in [
+            "export OPENAI_API_KEY=sk-proj-realkey\n",
+            "export OPENAI_API_KEY=\"sk-proj-realkey\"\n",
+            "OPENAI_API_KEY=sk-proj-realkey\n",
+        ] {
+            assert!(
+                matches!(
+                    rc_with_openai_key(rc, ShellKind::Zsh, V),
+                    RcOutcome::ForeignValue
+                ),
+                "should have left {rc:?} alone"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_relay_values_are_still_recognised_as_ours() {
+        let out = rewritten("export OPENAI_API_KEY=\"dummy\"\n", ShellKind::Zsh);
+        assert_eq!(out, "export OPENAI_API_KEY=llm-relay-ignore\n");
+    }
+
+    #[test]
+    fn a_file_that_already_says_the_right_thing_is_not_rewritten() {
+        let rc = "export OPENAI_API_KEY=llm-relay-ignore\n";
+        assert!(matches!(
+            rc_with_openai_key(rc, ShellKind::Zsh, V),
+            RcOutcome::AlreadySet
+        ));
+    }
+
+    #[test]
+    fn commented_out_assignments_are_not_mistaken_for_real_ones() {
+        let rc = "# export OPENAI_API_KEY=old\n";
+        let out = rewritten(rc, ShellKind::Zsh);
+        assert!(out.contains("# export OPENAI_API_KEY=old"));
+        assert!(out.contains("\nexport OPENAI_API_KEY=llm-relay-ignore\n"));
+    }
+
+    #[test]
+    fn fish_gets_fish_syntax_because_export_is_a_syntax_error_there() {
+        let out = rewritten("", ShellKind::Fish);
+        assert!(out.contains("set -gx OPENAI_API_KEY llm-relay-ignore"));
+        assert!(!out.contains("export"));
+        // …and it recognises its own prior line rather than appending a second.
+        assert!(matches!(
+            rc_with_openai_key(&out, ShellKind::Fish, V),
+            RcOutcome::AlreadySet
+        ));
+    }
+
+    #[test]
+    fn fish_also_leaves_a_real_key_alone() {
+        assert!(matches!(
+            rc_with_openai_key("set -gx OPENAI_API_KEY sk-real\n", ShellKind::Fish, V),
+            RcOutcome::ForeignValue
+        ));
+    }
+
+    #[test]
+    fn writes_land_in_the_backends_home() {
+        use crate::cli_target::WindowsFsBackend;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let b = WindowsFsBackend { home: tmp.path().to_path_buf() };
+        ensure_openai_api_key_in_rc(&b, ShellKind::Fish).unwrap();
+        // fish's config dir does not exist beforehand; the backend must create it.
+        let written = b.read(&[".config", "fish", "config.fish"]).unwrap().unwrap();
+        assert!(written.contains("set -gx OPENAI_API_KEY llm-relay-ignore"));
+    }
 }
 
 /// Broadcast WM_SETTINGCHANGE after modifying environment variables,
@@ -790,6 +1094,62 @@ pub fn write_claude_config_with(
 
     let json_str = serde_json::to_string_pretty(&settings)?;
     backend.write_atomic(rel, json_str.as_bytes())
+}
+
+/// Ensure `~/.claude.json` carries `"hasCompletedOnboarding": true`.
+///
+/// Separate file from `~/.claude/settings.json`: this one is Claude Code's own
+/// state (onboarding, projects, MCP servers), and without the flag it opens the
+/// first-run wizard instead of honouring the relay's just-written endpoint.
+///
+/// Two deliberate asymmetries with the rest of this module:
+///
+/// * A malformed file is left alone rather than replaced with `{}` — everywhere
+///   else that fallback costs a few env vars we are about to rewrite anyway,
+///   whereas here it would discard the user's Claude Code state. Better to skip
+///   the flag and say so in the log.
+/// * Nothing here is snapshotted or undone on disable. The flag only records
+///   that onboarding happened, which stays true afterwards; restoring it to
+///   absent would push the user back through the wizard for no reason.
+///
+/// Writes only when the flag is actually missing or false. Claude Code rewrites
+/// this file constantly, so a no-op write is a chance to clobber whatever it
+/// stored between our read and our write.
+pub fn ensure_claude_onboarded_with(backend: &dyn CliBackend) -> Result<(), AppError> {
+    let rel: &[&str] = &[".claude.json"];
+
+    let mut settings: Value = match backend.read(rel)? {
+        Some(content) => match serde_json::from_str(&content) {
+            Ok(v @ Value::Object(_)) => v,
+            Ok(other) => {
+                log::warn!(
+                    "~/.claude.json is {}, not an object — leaving it alone",
+                    match other {
+                        Value::Array(_) => "an array",
+                        Value::Null => "null",
+                        _ => "a scalar",
+                    }
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                log::warn!("~/.claude.json is not valid JSON ({e}) — leaving it alone");
+                return Ok(());
+            }
+        },
+        None => serde_json::json!({}),
+    };
+
+    if settings.get("hasCompletedOnboarding") == Some(&Value::Bool(true)) {
+        return Ok(());
+    }
+
+    settings
+        .as_object_mut()
+        .expect("checked to be an object above")
+        .insert("hasCompletedOnboarding".to_string(), Value::Bool(true));
+
+    backend.write_atomic(rel, serde_json::to_string_pretty(&settings)?.as_bytes())
 }
 
 pub fn clear_claude_config_with(backend: &dyn CliBackend) -> Result<(), AppError> {
@@ -969,6 +1329,77 @@ mod backend_tests {
     }
 
     #[test]
+    fn onboarding_flag_is_created_when_the_file_is_absent() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        ensure_claude_onboarded_with(&b).unwrap();
+        let v: Value = serde_json::from_str(&b.read(&[".claude.json"]).unwrap().unwrap()).unwrap();
+        assert_eq!(v["hasCompletedOnboarding"], Value::Bool(true));
+    }
+
+    #[test]
+    fn onboarding_flag_is_added_without_disturbing_existing_state() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        b.write_atomic(
+            &[".claude.json"],
+            br#"{"numStartups":7,"mcpServers":{"x":{"command":"y"}}}"#,
+        )
+        .unwrap();
+
+        ensure_claude_onboarded_with(&b).unwrap();
+
+        let v: Value = serde_json::from_str(&b.read(&[".claude.json"]).unwrap().unwrap()).unwrap();
+        assert_eq!(v["hasCompletedOnboarding"], Value::Bool(true));
+        // The rest of Claude Code's state must survive — this file holds more
+        // than the flag we care about.
+        assert_eq!(v["numStartups"], 7);
+        assert_eq!(v["mcpServers"]["x"]["command"], "y");
+    }
+
+    #[test]
+    fn onboarding_flag_false_is_flipped_to_true() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        b.write_atomic(&[".claude.json"], br#"{"hasCompletedOnboarding":false}"#).unwrap();
+        ensure_claude_onboarded_with(&b).unwrap();
+        let v: Value = serde_json::from_str(&b.read(&[".claude.json"]).unwrap().unwrap()).unwrap();
+        assert_eq!(v["hasCompletedOnboarding"], Value::Bool(true));
+    }
+
+    #[test]
+    fn already_onboarded_is_left_byte_for_byte_alone() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        // Deliberately compact and oddly ordered: if we rewrote it, pretty
+        // printing would reorder/reformat and this comparison would fail.
+        let original = r#"{"hasCompletedOnboarding":true,"numStartups":3}"#;
+        b.write_atomic(&[".claude.json"], original.as_bytes()).unwrap();
+
+        ensure_claude_onboarded_with(&b).unwrap();
+
+        assert_eq!(
+            b.read(&[".claude.json"]).unwrap().unwrap(),
+            original,
+            "a no-op write races Claude Code, which rewrites this file constantly"
+        );
+    }
+
+    #[test]
+    fn malformed_file_is_left_alone_rather_than_reset() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        let broken = r#"{"numStartups": 7,,,"#;
+        b.write_atomic(&[".claude.json"], broken.as_bytes()).unwrap();
+
+        // Not an error: the endpoint config still applied, and clobbering the
+        // user's Claude Code state would cost far more than the missing flag.
+        ensure_claude_onboarded_with(&b).unwrap();
+
+        assert_eq!(b.read(&[".claude.json"]).unwrap().unwrap(), broken);
+    }
+
+    #[test]
     fn gemini_round_trip_via_backend() {
         let tmp = TempDir::new().unwrap();
         let b = fake_home(&tmp);
@@ -1091,9 +1522,28 @@ fn write_one_target(
     let b = &*target.backend;
     if target.installed.claude {
         write_claude_config_with(b, &target.base_url, api_key, claude_model, claude_small_model)?;
+        // Non-fatal: a settings.json pointing at the relay is still useful even
+        // if this one file could not be touched, and failing the whole target
+        // would also skip codex/gemini below.
+        if let Err(e) = ensure_claude_onboarded_with(b) {
+            log::warn!("could not set hasCompletedOnboarding in ~/.claude.json: {e}");
+        }
     }
     if target.installed.codex {
         write_codex_config_with(b, &target.base_url, api_key, codex_model)?;
+        // Codex CLI refuses to start without OPENAI_API_KEY. The local host is
+        // handled once in `ensure_openai_api_key_env` (which also covers the
+        // Windows registry and macOS launchctl); a WSL distro has its own home
+        // and its own login shell, so it needs its own rc line. Non-fatal for
+        // the same reason as the claude case above.
+        if target.snapshot_meta.target_type == crate::cli_target::TargetType::Wsl {
+            if let Some(distro) = target.snapshot_meta.distro_name.as_deref() {
+                let shell = detect_shell(crate::wsl::distro::login_shell(distro).as_deref());
+                if let Err(e) = ensure_openai_api_key_in_rc(b, shell) {
+                    log::warn!("could not set OPENAI_API_KEY in {}: {e}", target.label);
+                }
+            }
+        }
     }
     if target.installed.gemini {
         write_gemini_config_with(b, &target.base_url, api_key)?;

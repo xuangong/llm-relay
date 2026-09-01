@@ -305,9 +305,13 @@ impl Service {
             models.codex.as_deref(),
             models.gemini.as_deref(),
         )?;
-        // Windows-host shell env (OPENAI_API_KEY=dummy in shell rc / registry)
-        // is unrelated to per-target writes — keep this side-effect.
-        crate::config_writer::ensure_openai_api_key_in_shell_rc()?;
+        // Host-level shell env for Codex CLI, which will not start without
+        // OPENAI_API_KEY set. Unrelated to the per-target file writes above —
+        // it lands in the registry / a shell rc, not in a CLI's config. WSL
+        // targets get their own rc line inside `apply_to_targets`.
+        if targets.iter().any(|t| t.installed.codex) {
+            crate::config_writer::ensure_openai_api_key_env()?;
+        }
 
         crate::events::emit_typed(
             &*self.sink,

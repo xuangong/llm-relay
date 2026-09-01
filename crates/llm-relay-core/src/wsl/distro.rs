@@ -204,6 +204,31 @@ pub fn probe_distro(_name: &str) -> Result<ProbeResult, AppError> {
     Err(AppError::Config("probe_distro: Windows only".into()))
 }
 
+/// The distro user's login shell, e.g. `/usr/bin/zsh`.
+///
+/// Read from passwd rather than `$SHELL`: we reach the distro through
+/// `wsl.exe -e sh -c`, and `$SHELL` there reflects whatever WSL happened to
+/// export, not the shell the user's own terminal starts. Not cached — this
+/// runs once per apply, and a distro that changed its shell should not need
+/// an app restart to be written correctly.
+#[cfg(target_os = "windows")]
+pub fn login_shell(name: &str) -> Option<String> {
+    let out = crate::wsl::fs::__wsl_run_script(name, r#"getent passwd "$(id -u)" | cut -d: -f7"#)
+        .map_err(|e| log::warn!("could not read login shell for {name}: {e}"))
+        .ok()?;
+    let shell = out.trim().to_string();
+    if shell.is_empty() {
+        None
+    } else {
+        Some(shell)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn login_shell(_name: &str) -> Option<String> {
+    None
+}
+
 /// Only reachable from the Windows `probe_distro`; the parser itself is
 /// platform-independent, so keep it compiled for tests everywhere.
 #[cfg(any(target_os = "windows", test))]
