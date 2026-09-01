@@ -31,11 +31,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Second instance launched — bring existing window to front
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -50,7 +46,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                hide_main_window(window);
             }
         })
         .setup(move |app| {
@@ -123,14 +119,36 @@ pub fn run() {
             // Build tray
             let menu = tray::create_tray_menu(app.handle(), &state)?;
             let icon = app.default_window_icon().cloned().unwrap();
-            let _tray = TrayIconBuilder::with_id("main")
+            let tray_builder = TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     tray::handle_tray_menu_event(app, &event.id.0);
                 })
-                .show_menu_on_left_click(true)
-                .build(app)?;
+                // Windows convention: left-click opens the window, right-click
+                // opens the menu. Worth honouring because with the window closed
+                // the tray icon is the only way back in. macOS menu-bar extras
+                // have no such split — one click *is* the menu — and Linux tray
+                // backends deliver no click events at all, so both keep the
+                // default of showing the menu on either button.
+                .show_menu_on_left_click(!cfg!(target_os = "windows"));
+            // Only registered where it can fire: Linux emits no click events,
+            // and elsewhere an always-on handler would also be woken by every
+            // Move event as the pointer crosses the icon.
+            #[cfg(target_os = "windows")]
+            let tray_builder = tray_builder.on_tray_icon_event(|tray, event| {
+                // On the release edge, not the press: Windows sends Down and Up
+                // as separate events, so matching either would open twice.
+                if let tauri::tray::TrayIconEvent::Click {
+                    button: tauri::tray::MouseButton::Left,
+                    button_state: tauri::tray::MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    show_main_window(tray.app_handle());
+                }
+            });
+            let _tray = tray_builder.build(app)?;
 
             app.manage(state);
 
@@ -210,15 +228,46 @@ pub fn run() {
     app.run(|app_handle, event| {
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = event {
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app_handle);
         }
         #[cfg(not(target_os = "macos"))]
         let _ = (app_handle, event);
     });
+}
+
+/// Closing the window parks the app in the tray / menu bar instead of quitting
+/// — the proxy has to keep serving whether or not anyone is looking at it.
+///
+/// Hiding is the whole story on Windows and Linux: a hidden window has no
+/// taskbar button, and the tray icon is already there. macOS keeps the Dock
+/// icon for as long as the process is a regular app, so it also has to drop to
+/// UIElement (accessory) — that leaves only the menu-bar item, which is what a
+/// background app should look like there.
+fn hide_main_window(window: &tauri::Window) {
+    let _ = window.hide();
+    #[cfg(target_os = "macos")]
+    {
+        // tao swallows a hide that lands within a second of the last show, to
+        // dodge a macOS bug that strands duplicate Dock icons. So open-then-
+        // immediately-close keeps the icon until the next close — rare enough,
+        // and far better than the duplicates.
+        let _ = window.app_handle().set_dock_visibility(false);
+    }
+}
+
+/// Bring the main window back from the tray / menu bar.
+///
+/// On macOS the Dock icon has to return *before* the window is shown: a
+/// UIElement app cannot become frontmost, so `set_focus` alone would leave the
+/// window sitting behind whatever the user was actually looking at.
+pub(crate) fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(true);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 fn get_app_config_dir() -> std::path::PathBuf {

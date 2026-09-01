@@ -109,11 +109,7 @@ pub fn create_tray_menu(
 pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
     match event_id {
         "show_main" => {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            crate::show_main_window(app);
         }
         "quit" => {
             app.exit(0);
