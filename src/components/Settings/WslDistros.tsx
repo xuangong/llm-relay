@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ChevronDown } from "lucide-react";
 
 type WslDistroStatus = "ready" | "unreachable" | "unknown";
 
@@ -22,10 +23,18 @@ const isWindows = (() => {
   return /Windows/i.test(ua) || /Win/i.test(plat);
 })();
 
+/// Most people pick their distros once and never look again, so the section
+/// stays out of the way until asked for. Remembered across launches: someone
+/// who opens it is usually mid-way through setting something up.
+const OPEN_KEY = "wslDistrosOpen";
+
 export function WslDistros() {
   const [distros, setDistros] = useState<WslDistroInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [open, setOpen] = useState(
+    () => localStorage.getItem(OPEN_KEY) === "1"
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -70,20 +79,60 @@ export function WslDistros() {
 
   if (!isWindows) return null;
 
+  const toggleOpen = () => {
+    setOpen((prev) => {
+      localStorage.setItem(OPEN_KEY, prev ? "0" : "1");
+      return !prev;
+    });
+  };
+
+  // Shown while collapsed, so the section still answers "is this set up?"
+  // without being expanded. `list_wsl_distros` is a plain DB read, so the data
+  // is loaded on mount either way.
+  const selectedCount = distros.filter((d) => d.selected).length;
+  const summary = loading
+    ? "…"
+    : distros.length === 0
+      ? "none detected"
+      : `${selectedCount}/${distros.length} selected`;
+
   return (
-    <section className="space-y-3 rounded-lg border border-border/60 bg-card/30 p-4">
-      <header className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">WSL2 Distros</h3>
+    <section
+      className={`space-y-3 rounded-lg border border-border/60 bg-card/30 px-4 ${
+        open ? "py-4" : "py-2.5"
+      }`}
+    >
+      <header className="flex items-center justify-between gap-2">
         <button
-          className="rounded border border-border/60 bg-secondary/60 px-2 py-1 text-xs hover:bg-secondary disabled:opacity-50"
-          onClick={handleRefresh}
-          disabled={refreshing || loading}
+          type="button"
+          onClick={toggleOpen}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
         >
-          {refreshing ? "Refreshing…" : "🔄 Refresh"}
+          <ChevronDown
+            className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${
+              open ? "" : "-rotate-90"
+            }`}
+          />
+          <h3 className="text-sm font-semibold">WSL2 Distros</h3>
+          {!open && (
+            <span className="truncate text-xs text-muted-foreground">
+              {summary}
+            </span>
+          )}
         </button>
+        {open && (
+          <button
+            className="shrink-0 rounded border border-border/60 bg-secondary/60 px-2 py-1 text-xs hover:bg-secondary disabled:opacity-50"
+            onClick={handleRefresh}
+            disabled={refreshing || loading}
+          >
+            {refreshing ? "Refreshing…" : "🔄 Refresh"}
+          </button>
+        )}
       </header>
 
-      {loading ? (
+      {!open ? null : loading ? (
         <p className="text-xs text-muted-foreground">Loading…</p>
       ) : distros.length === 0 ? (
         <div className="space-y-1 text-xs text-muted-foreground">
