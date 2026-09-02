@@ -7,18 +7,16 @@ import { AddGatewayCard } from "@/components/AddGatewayCard";
 import { TrafficLogPanel } from "@/components/TrafficLogPanel";
 import { UsagePanel } from "@/components/UsagePanel";
 import { DisableRelayDialog } from "@/components/DisableRelayDialog";
-import { WslDistros } from "@/components/Settings/WslDistros";
+import { SettingsSheet } from "@/components/Settings/SettingsSheet";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
 import * as api from "@/lib/api";
 import type { GatewayWithHealth, ActiveConfig } from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n } from "@/lib/i18n";
-import { RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle, PowerOff } from "lucide-react";
+import { RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle, Menu, ZapOff } from "lucide-react";
 
 function App() {
-  const { t, lang, toggleLang } = useI18n();
+  const { t } = useI18n();
   const [gateways, setGateways] = useState<GatewayWithHealth[]>([]);
   const [activeConfig, setActiveConfig] = useState<ActiveConfig | null>(null);
   const [autoSwitch, setAutoSwitch] = useState(true);
@@ -49,10 +47,8 @@ function App() {
     loadSuppressed();
   }, [loadSuppressed]);
   const [clientName, setClientName] = useState("");
-  const [editingClientName, setEditingClientName] = useState(false);
-  const [clientNameDraft, setClientNameDraft] = useState("");
-  const clientNameInputRef = useRef<HTMLInputElement>(null);
   const [disableOpen, setDisableOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const loadGateways = useCallback(async () => {
     try {
@@ -171,24 +167,6 @@ function App() {
     }
   };
 
-  const handleSaveClientName = async () => {
-    const name = clientNameDraft.trim();
-    if (!name) return;
-    try {
-      await api.setClientName(name);
-      setClientName(name);
-      setEditingClientName(false);
-    } catch (err) {
-      toast.error(`Failed to save client name: ${extractErrorMessage(err)}`);
-    }
-  };
-
-  const handleEditClientName = () => {
-    setClientNameDraft(clientName);
-    setEditingClientName(true);
-    setTimeout(() => clientNameInputRef.current?.focus(), 50);
-  };
-
   const healthySummary = gateways.filter((g) => g.isHealthy).length;
   const totalGateways = gateways.length;
 
@@ -208,65 +186,34 @@ function App() {
                 {t('header.online', { healthy: String(healthySummary), total: String(totalGateways) })}
               </span>
             )}
-            {/* Client name display/editor */}
-            {!loading && (
-              editingClientName ? (
-                <form
-                  className="flex items-center gap-1"
-                  onSubmit={(e) => { e.preventDefault(); handleSaveClientName(); }}
-                >
-                  <input
-                    ref={clientNameInputRef}
-                    value={clientNameDraft}
-                    onChange={(e) => setClientNameDraft(e.target.value)}
-                    onBlur={handleSaveClientName}
-                    onKeyDown={(e) => { if (e.key === "Escape") setEditingClientName(false); }}
-                    className="text-xs h-5 px-1.5 rounded border border-border bg-background text-foreground outline-none focus:border-primary/50 w-28"
-                    maxLength={32}
-                  />
-                </form>
-              ) : (
-                <button
-                  onClick={handleEditClientName}
-                  className={`text-xs transition-colors cursor-pointer ${
-                    clientName
-                      ? "text-muted-foreground hover:text-foreground"
-                      : // Never named: without a label the button would render
-                        // zero-width, leaving no way to ever set a name.
-                        "px-1.5 py-0.5 rounded border border-dashed border-border/70 text-muted-foreground/70 hover:text-foreground hover:border-border"
-                  }`}
-                  title={t('header.renameClient')}
-                >
-                  {clientName || t('header.nameThisDevice')}
-                </button>
-              )
+            {/* Name only, no inline editor — renaming lives in the settings
+                drawer, so an unnamed device no longer needs a placeholder
+                button here to stay reachable. */}
+            {!loading && clientName && (
+              <button
+                onClick={() => setSettingsOpen(true)}
+                className="text-xs text-muted-foreground transition-colors cursor-pointer hover:text-foreground"
+                title={t('header.renameClient')}
+              >
+                {clientName}
+              </button>
             )}
           </div>
 
           <div className="flex items-center gap-2 animate-fade-in" style={{ animationDelay: '0.1s' }}>
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary/60 transition-elegant hover:bg-secondary">
-              <Label htmlFor="auto-switch" className="text-xs font-medium cursor-pointer">
-                {t('header.autoFailover')}
-              </Label>
-              <Switch
-                id="auto-switch"
-                checked={autoSwitch}
-                onCheckedChange={handleAutoSwitchChange}
-                className="scale-75"
-              />
-            </div>
-
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary/60 transition-elegant hover:bg-secondary">
-              <Label htmlFor="autostart" className="text-xs font-medium cursor-pointer">
-                {t('header.launchAtLogin')}
-              </Label>
-              <Switch
-                id="autostart"
-                checked={autostart}
-                onCheckedChange={handleAutostartChange}
-                className="scale-75"
-              />
-            </div>
+            {/* Only surfaced in the state that can surprise you. Failover on is
+                the default and needs no reminder; failover off is why a dead
+                gateway stays selected, so it says so and links to the switch. */}
+            {!loading && !autoSwitch && (
+              <button
+                onClick={() => setSettingsOpen(true)}
+                className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-600 transition-elegant hover:bg-amber-500/20 dark:text-amber-400"
+                title={t('header.autoFailoverOffHint')}
+              >
+                <ZapOff className="h-3 w-3" />
+                {t('header.autoFailoverOff')}
+              </button>
+            )}
 
             <Button
               variant="ghost"
@@ -276,28 +223,6 @@ function App() {
               title={t('header.howToUse')}
             >
               <HelpCircle className="h-3.5 w-3.5" />
-            </Button>
-
-            {activeConfig?.gatewayId && (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setDisableOpen(true)}
-                className="h-7 w-7 transition-elegant hover:bg-destructive/10 hover:text-destructive"
-                title={t('header.disableRelay')}
-              >
-                <PowerOff className="h-3.5 w-3.5" />
-              </Button>
-            )}
-
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={toggleLang}
-              className="h-7 w-7 transition-elegant hover:bg-secondary"
-              title={lang === 'zh' ? 'Switch to English' : '切换到中文'}
-            >
-              <span className="text-xs font-medium">{lang === 'zh' ? 'EN' : '中'}</span>
             </Button>
 
             <Button
@@ -312,6 +237,18 @@ function App() {
               ) : (
                 <RefreshCw className="h-3.5 w-3.5" />
               )}
+            </Button>
+
+            {/* Last in the row, hard against the edge the drawer slides in
+                from — the hamburger reads as "more, over there". */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setSettingsOpen(true)}
+              className="h-7 w-7 transition-elegant hover:bg-secondary"
+              title={t('settings.title')}
+            >
+              <Menu className="h-3.5 w-3.5" />
             </Button>
           </div>
         </div>
@@ -343,8 +280,6 @@ function App() {
             />
 
             <AddGatewayCard onAdded={loadAll} />
-
-            <WslDistros />
           </div>
         )}
       </main>
@@ -415,6 +350,25 @@ function App() {
           </div>
         )}
       </div>
+
+      <SettingsSheet
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        autoSwitch={autoSwitch}
+        onAutoSwitchChange={handleAutoSwitchChange}
+        autostart={autostart}
+        onAutostartChange={handleAutostartChange}
+        clientName={clientName}
+        onClientNameChange={setClientName}
+        canDisable={!!activeConfig?.gatewayId}
+        onDisable={() => {
+          // Let the drawer finish sliding out before the dialog takes over,
+          // rather than stacking two Radix overlays. Matches the 200ms
+          // sheetSlideOutRight in index.css.
+          setSettingsOpen(false);
+          setTimeout(() => setDisableOpen(true), 200);
+        }}
+      />
 
       <DisableRelayDialog
         open={disableOpen}

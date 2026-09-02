@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown } from "lucide-react";
+import { RefreshCw, Loader2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { useI18n } from "@/lib/i18n";
 
 type WslDistroStatus = "ready" | "unreachable" | "unknown";
 
@@ -16,25 +18,21 @@ interface WslDistroInfo {
   status: WslDistroStatus;
 }
 
-const isWindows = (() => {
+export const isWindows = (() => {
   if (typeof navigator === "undefined") return false;
   const ua = navigator.userAgent || "";
   const plat = (navigator as { platform?: string }).platform || "";
   return /Windows/i.test(ua) || /Win/i.test(plat);
 })();
 
-/// Most people pick their distros once and never look again, so the section
-/// stays out of the way until asked for. Remembered across launches: someone
-/// who opens it is usually mid-way through setting something up.
-const OPEN_KEY = "wslDistrosOpen";
-
+/// Lives in the settings drawer rather than the main list: most people pick
+/// their distros once during setup and never look again, and on macOS the
+/// section doesn't exist at all.
 export function WslDistros() {
+  const { t } = useI18n();
   const [distros, setDistros] = useState<WslDistroInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [open, setOpen] = useState(
-    () => localStorage.getItem(OPEN_KEY) === "1"
-  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -79,68 +77,43 @@ export function WslDistros() {
 
   if (!isWindows) return null;
 
-  const toggleOpen = () => {
-    setOpen((prev) => {
-      localStorage.setItem(OPEN_KEY, prev ? "0" : "1");
-      return !prev;
-    });
-  };
-
-  // Shown while collapsed, so the section still answers "is this set up?"
-  // without being expanded. `list_wsl_distros` is a plain DB read, so the data
-  // is loaded on mount either way.
-  const selectedCount = distros.filter((d) => d.selected).length;
-  const summary = loading
-    ? "…"
-    : distros.length === 0
-      ? "none detected"
-      : `${selectedCount}/${distros.length} selected`;
+  // Split rather than dangerouslySetInnerHTML so the command keeps its <code>
+  // styling without the translation carrying markup.
+  const [hintBefore, hintAfter] = t("wsl.installHint").split("{cmd}");
 
   return (
-    <section
-      className={`space-y-3 rounded-lg border border-border/60 bg-card/30 px-4 ${
-        open ? "py-4" : "py-2.5"
-      }`}
-    >
+    <section className="space-y-3 border-t border-border/60 pt-4">
       <header className="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={toggleOpen}
-          aria-expanded={open}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {t("wsl.title")}
+        </h3>
+        {/* Same shape as the header's health refresh — ghost icon button,
+            spinner in place of the arrows while it runs. */}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleRefresh}
+          disabled={refreshing || loading}
+          className="h-7 w-7 shrink-0 transition-elegant hover:bg-secondary"
+          title={refreshing ? t("wsl.refreshing") : t("wsl.refresh")}
         >
-          <ChevronDown
-            className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${
-              open ? "" : "-rotate-90"
-            }`}
-          />
-          <h3 className="text-sm font-semibold">WSL2 Distros</h3>
-          {!open && (
-            <span className="truncate text-xs text-muted-foreground">
-              {summary}
-            </span>
+          {refreshing ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5" />
           )}
-        </button>
-        {open && (
-          <button
-            className="shrink-0 rounded border border-border/60 bg-secondary/60 px-2 py-1 text-xs hover:bg-secondary disabled:opacity-50"
-            onClick={handleRefresh}
-            disabled={refreshing || loading}
-          >
-            {refreshing ? "Refreshing…" : "🔄 Refresh"}
-          </button>
-        )}
+        </Button>
       </header>
 
-      {!open ? null : loading ? (
-        <p className="text-xs text-muted-foreground">Loading…</p>
+      {loading ? (
+        <p className="text-xs text-muted-foreground">{t("common.loading")}</p>
       ) : distros.length === 0 ? (
         <div className="space-y-1 text-xs text-muted-foreground">
-          <p>No WSL2 distros detected.</p>
+          <p>{t("wsl.noneDetected")}</p>
           <p>
-            Install one via Microsoft Store or{" "}
-            <code className="rounded bg-secondary px-1">wsl --install</code>, then
-            Refresh.
+            {hintBefore}
+            <code className="rounded bg-secondary px-1">wsl --install</code>
+            {hintAfter}
           </p>
         </div>
       ) : (
@@ -157,11 +130,13 @@ export function WslDistros() {
                 <div>
                   <span className="font-medium">{d.name}</span>
                   {d.isDefault && (
-                    <span className="ml-1 text-muted-foreground">(default)</span>
+                    <span className="ml-1 text-muted-foreground">
+                      {t("wsl.default")}
+                    </span>
                   )}
                 </div>
                 <div className="text-muted-foreground">
-                  {d.home ?? "(home unknown)"} ·{" "}
+                  {d.home ?? t("wsl.homeUnknown")} ·{" "}
                   <span className={d.hasClaude ? "" : "opacity-40"}>
                     claude {d.hasClaude ? "✓" : "✗"}
                   </span>{" "}
@@ -189,17 +164,13 @@ function StatusLine({
   status: WslDistroStatus;
   url: string | null;
 }) {
+  const { t } = useI18n();
   switch (status) {
     case "ready":
       return <div className="text-emerald-500">→ {url}</div>;
     case "unreachable":
-      return (
-        <div className="text-amber-500">
-          Unreachable — ensure curl or wget is installed in this distro, then
-          Refresh.
-        </div>
-      );
+      return <div className="text-amber-500">{t("wsl.unreachable")}</div>;
     case "unknown":
-      return <div className="text-muted-foreground">Not yet probed.</div>;
+      return <div className="text-muted-foreground">{t("wsl.notProbed")}</div>;
   }
 }

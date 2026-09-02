@@ -178,3 +178,38 @@
 .animate-pulse-subtle {
   animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
+
+/* Side sheet. Written by hand rather than with the `animate-in` /
+   `slide-in-from-right` utilities: `tailwindcss-animate` is not among the
+   plugins, so those classes (including the ones already in ui/dialog.tsx)
+   compile to nothing. Radix keeps the element mounted until `animationend`,
+   so the closing half plays too. */
+@keyframes sheetOverlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes sheetOverlayOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes sheetSlideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes sheetSlideOutRight {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+
+[data-sheet-overlay][data-state="open"] {
+  animation: sheetOverlayIn 200ms ease-out;
+}
+[data-sheet-overlay][data-state="closed"] {
+  animation: sheetOverlayOut 180ms ease-in;
+}
+[data-sheet-content][data-state="open"] {
+  animation: sheetSlideInRight 220ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+[data-sheet-content][data-state="closed"] {
+  animation: sheetSlideOutRight 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
