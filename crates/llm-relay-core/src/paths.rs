@@ -69,3 +69,7 @@ pub fn legacy_cli_config_backup_file() -> PathBuf {
 pub fn cli_file_lifecycle_manifest() -> PathBuf {
     config_dir().join("cli-file-lifecycle.json")
 }
+
+pub fn cli_file_lifecycle_blocked() -> PathBuf {
+    config_dir().join("cli-file-lifecycle.blocked")
+}

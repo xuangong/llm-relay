@@ -186,6 +186,10 @@ pub fn load_or_quarantine() -> Result<Option<LifecycleManifest>, AppError> {
                 let quarantined =
                     path.with_file_name(format!("cli-file-lifecycle.quarantine-{stamp}.json"));
                 std::fs::rename(&path, &quarantined)?;
+                crate::cli_target::atomic_write(
+                    &crate::paths::cli_file_lifecycle_blocked(),
+                    format!("unsafe lifecycle metadata quarantined: {error}").as_bytes(),
+                )?;
                 return Err(AppError::Config(format!(
                     "CLI lifecycle metadata was quarantined because it is unsafe: {error}"
                 )));
@@ -238,6 +242,11 @@ pub fn prepare_use(
     pending: &[crate::service::PendingWslTarget],
     shell_paths: &BTreeMap<String, Vec<String>>,
 ) -> Result<LifecycleManifest, AppError> {
+    if crate::paths::cli_file_lifecycle_blocked().exists() {
+        return Err(AppError::Config(
+            "CLI lifecycle recovery is blocked; reset lifecycle ownership before Use".into(),
+        ));
+    }
     let previous = load()?;
     let mut manifest = LifecycleManifest {
         version: MANIFEST_VERSION,
@@ -435,7 +444,19 @@ pub fn mark_targets_active(
 }
 
 pub fn recover(db_active: bool) -> Result<(), AppError> {
+    let blocked = crate::paths::cli_file_lifecycle_blocked();
+    if blocked.exists() {
+        return Err(AppError::Config(
+            "CLI lifecycle recovery is blocked; reset lifecycle ownership before applying changes"
+                .into(),
+        ));
+    }
     let Some(mut manifest) = load_or_quarantine()? else {
+        if db_active {
+            return Err(AppError::Config(
+                "Active Relay configuration has no trusted full-file origin manifest".into(),
+            ));
+        }
         return Ok(());
     };
     match manifest.phase {
