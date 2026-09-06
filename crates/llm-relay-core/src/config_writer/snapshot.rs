@@ -7,7 +7,7 @@
 //! don't collide).
 
 use super::{parse_env_file, serialize_env_file, ClaudeSnapshot, CodexSnapshot, GeminiSnapshot};
-use crate::cli_target::{CliBackend, CliTarget, SnapshotMeta, TargetType};
+use crate::cli_target::{CliBackend, CliTarget, InstalledTools, SnapshotMeta, TargetType};
 use crate::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -188,6 +188,32 @@ pub fn build_index() -> Result<std::collections::HashMap<String, SnapshotMeta>, 
         map.insert(key, meta);
     }
     Ok(map)
+}
+
+/// Whether an older field-level snapshot is available for an active install
+/// that predates the full-file lifecycle manifest.
+pub fn has_legacy_snapshots() -> Result<bool, AppError> {
+    Ok(!build_index()?.is_empty())
+}
+
+/// Restore clients that are no longer managed while upgrading an active
+/// pre-manifest installation. Full-file lifecycle restores handle this for
+/// newer installs; this is the compatibility path for older snapshots.
+pub fn restore_unmanaged(
+    snap: &TargetSnapshot,
+    backend: &dyn CliBackend,
+    managed: InstalledTools,
+) -> Result<(), AppError> {
+    if !managed.claude {
+        restore_claude_backend(&snap.claude, backend)?;
+    }
+    if !managed.codex {
+        restore_codex_backend(&snap.codex, backend)?;
+    }
+    if !managed.gemini {
+        restore_gemini_backend(&snap.gemini, backend)?;
+    }
+    Ok(())
 }
 
 /// Walk the backup directory and return every snapshot, parsed. Used by
@@ -728,6 +754,67 @@ mod tests {
         assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "before-haiku");
         assert_eq!(env["ANTHROPIC_CUSTOM_HEADERS"], "before-header");
         assert_eq!(env["ANTHROPIC_SMALL_FAST_MODEL"], "before-small");
+    }
+
+    #[test]
+    fn legacy_compat_restores_only_clients_no_longer_managed() {
+        let tmp = TempDir::new().unwrap();
+        let backend = fake_backend(&tmp);
+        backend
+            .write_atomic(
+                &[".claude", "settings.json"],
+                br#"{"env":{"ANTHROPIC_BASE_URL":"http://relay"}}"#,
+            )
+            .unwrap();
+        backend
+            .write_atomic(
+                &[".codex", "auth.json"],
+                br#"{"OPENAI_API_KEY":"relay-key"}"#,
+            )
+            .unwrap();
+
+        let snap = TargetSnapshot {
+            target_type: "windows".into(),
+            distro_name: None,
+            home: None,
+            captured_at: "now".into(),
+            claude: ClaudeSnapshot {
+                anthropic_base_url: Some("http://original".into()),
+                ..ClaudeSnapshot::default()
+            },
+            codex: CodexSnapshot {
+                openai_api_key: Some("original-key".into()),
+                ..CodexSnapshot::default()
+            },
+            gemini: GeminiSnapshot::default(),
+        };
+
+        restore_unmanaged(
+            &snap,
+            &backend,
+            InstalledTools {
+                claude: false,
+                codex: true,
+                gemini: true,
+            },
+        )
+        .unwrap();
+
+        let claude: Value = serde_json::from_str(
+            &backend
+                .read(&[".claude", "settings.json"])
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            claude["env"]["ANTHROPIC_BASE_URL"],
+            Value::String("http://original".into())
+        );
+        let codex: Value =
+            serde_json::from_str(&backend.read(&[".codex", "auth.json"]).unwrap().unwrap())
+                .unwrap();
+        assert_eq!(codex["OPENAI_API_KEY"], Value::String("relay-key".into()));
     }
 
     #[test]

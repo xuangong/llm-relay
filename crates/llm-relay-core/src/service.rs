@@ -530,6 +530,7 @@ impl Service {
         // Back up the current Relay working files before restoring the exact
         // files captured when this inactive → Use cycle began. The legacy
         // field-level snapshot path remains a fallback for pre-lifecycle users.
+        #[cfg(target_os = "windows")]
         let lifecycle_distros: std::collections::HashSet<String> =
             crate::config_writer::lifecycle::load()
                 .ok()
@@ -538,13 +539,20 @@ impl Service {
                 .flat_map(|manifest| manifest.targets)
                 .filter_map(|target| target.distro_name)
                 .collect();
-        if !crate::config_writer::lifecycle::manifest_exists() {
+        if crate::config_writer::lifecycle::manifest_exists() {
+            crate::config_writer::lifecycle::disable()?;
+        } else if crate::config_writer::snapshot::has_legacy_snapshots()? {
+            // Upgrade compatibility: releases before the full-file lifecycle
+            // still have authoritative field snapshots. Restore those rather
+            // than trapping an active user in a configuration they cannot
+            // disable.
+            crate::config_writer::clear_targets_from_snapshots()?;
+        } else {
             return Err(AppError::Config(
-                "No full-file origin manifest exists; refusing to restore legacy field snapshots"
+                "No trusted full-file origin manifest or legacy snapshot exists; refusing to disable"
                     .into(),
             ));
         }
-        crate::config_writer::lifecycle::disable()?;
 
         self.db.set_active_config(&config)?;
 

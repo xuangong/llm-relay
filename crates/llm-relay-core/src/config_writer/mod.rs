@@ -2033,9 +2033,10 @@ pub fn apply_to_targets(
 ) -> Result<ApplyReport, AppError> {
     use crate::cli_target::TargetType;
 
-    // Legacy field snapshots are retained only for compatibility diagnostics.
-    // Full-file origin sidecars are the sole restoration authority.
+    // Legacy field snapshots remain a restoration authority only for active
+    // installations that predate the full-file lifecycle manifest.
     let prev_index = snapshot::build_index()?;
+    let legacy_compat = !lifecycle::manifest_exists();
     let current_keys: std::collections::HashSet<String> =
         retained_keys.cloned().unwrap_or_else(|| {
             targets
@@ -2108,6 +2109,17 @@ pub fn apply_to_targets(
             .unwrap_or_else(|| "windows".to_string());
         let is_windows = matches!(target.snapshot_meta.target_type, TargetType::Windows);
         if !prev_index.contains_key(&key) {
+            if legacy_compat {
+                let error = format!(
+                    "active pre-manifest target {key} has no legacy snapshot; refusing to capture Relay-written files as origin"
+                );
+                log::warn!("{error}");
+                report.failed.insert(key, error);
+                if is_windows {
+                    windows_failed = true;
+                }
+                continue;
+            }
             if let Err(e) = snapshot::capture(target) {
                 log::warn!("snapshot capture failed for {key}: {e}");
                 if is_windows {
@@ -2132,6 +2144,11 @@ pub fn apply_to_targets(
             continue;
         }
         let original_snapshot = snapshot::read(&target.snapshot_meta)?;
+        if legacy_compat {
+            if let Some(snapshot) = original_snapshot.as_ref() {
+                snapshot::restore_unmanaged(snapshot, &*target.backend, target.installed)?;
+            }
+        }
         match write_one_target(
             target,
             api_key,

@@ -452,9 +452,10 @@ pub fn recover(db_active: bool) -> Result<(), AppError> {
         ));
     }
     let Some(mut manifest) = load_or_quarantine()? else {
-        if db_active {
+        if db_active && !super::snapshot::has_legacy_snapshots()? {
             return Err(AppError::Config(
-                "Active Relay configuration has no trusted full-file origin manifest".into(),
+                "Active Relay configuration has no trusted full-file origin manifest or legacy snapshot"
+                    .into(),
             ));
         }
         return Ok(());
@@ -1096,6 +1097,44 @@ mod tests {
         assert!(!absent.exists);
         assert!(empty.exists);
         assert_eq!(absent.sha256, empty.sha256);
+    }
+
+    #[test]
+    fn active_pre_manifest_recovery_requires_a_legacy_snapshot() {
+        let _env_guard = env_lock();
+        let manifest_home = TempDir::new().unwrap();
+        let previous_home = std::env::var_os("LLM_RELAY_HOME");
+        std::env::set_var("LLM_RELAY_HOME", manifest_home.path());
+
+        let error = recover(true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no trusted full-file origin manifest"));
+
+        if let Some(value) = previous_home {
+            std::env::set_var("LLM_RELAY_HOME", value);
+        } else {
+            std::env::remove_var("LLM_RELAY_HOME");
+        }
+    }
+
+    #[test]
+    fn active_pre_manifest_recovery_accepts_a_legacy_snapshot() {
+        let _env_guard = env_lock();
+        let tmp = TempDir::new().unwrap();
+        let manifest_home = TempDir::new().unwrap();
+        let previous_home = std::env::var_os("LLM_RELAY_HOME");
+        std::env::set_var("LLM_RELAY_HOME", manifest_home.path());
+
+        super::super::snapshot::capture(&target(tmp.path())).unwrap();
+        recover(true).unwrap();
+        assert!(!manifest_exists());
+
+        if let Some(value) = previous_home {
+            std::env::set_var("LLM_RELAY_HOME", value);
+        } else {
+            std::env::remove_var("LLM_RELAY_HOME");
+        }
     }
 
     #[test]
