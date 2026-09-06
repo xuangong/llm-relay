@@ -15,6 +15,8 @@ interface SettingsSheetProps {
   onOpenChange: (open: boolean) => void;
   autoSwitch: boolean;
   onAutoSwitchChange: (checked: boolean) => void;
+  managedClients: api.ManagedClients;
+  onManagedClientsChange: (clients: api.ManagedClients) => void;
   autostart: boolean;
   onAutostartChange: (checked: boolean) => void;
   clientName: string;
@@ -32,6 +34,8 @@ export function SettingsSheet({
   onOpenChange,
   autoSwitch,
   onAutoSwitchChange,
+  managedClients,
+  onManagedClientsChange,
   autostart,
   onAutostartChange,
   clientName,
@@ -62,6 +66,15 @@ export function SettingsSheet({
       toast.error(`Failed to save client name: ${extractErrorMessage(err)}`);
       setNameDraft(clientName);
     }
+  };
+
+  const toggleManagedClient = (client: keyof api.ManagedClients, checked: boolean) => {
+    const next = { ...managedClients, [client]: checked };
+    if (!next.claude && !next.codex && !next.gemini) {
+      toast.error(t("settings.clientsAtLeastOne"));
+      return;
+    }
+    onManagedClientsChange(next);
   };
 
   const langs: { value: Lang; label: string }[] = [
@@ -153,6 +166,26 @@ export function SettingsSheet({
             <p className="text-[11px] text-muted-foreground">
               {t("settings.autoFailoverHint")}
             </p>
+          </div>
+
+          <div className="space-y-2 border-t border-border/60 pt-3">
+            <div>
+              <Label className="text-xs font-medium">{t("settings.managedClients")}</Label>
+              <p className="text-[11px] text-muted-foreground">{t("settings.managedClientsHint")}</p>
+            </div>
+            {(["codex", "claude", "gemini"] as const).map((client) => (
+              <div key={client} className="flex items-center justify-between gap-3">
+                <Label htmlFor={`settings-client-${client}`} className="cursor-pointer text-xs">
+                  {t(`settings.client${client[0].toUpperCase()}${client.slice(1)}`)}
+                </Label>
+                <Switch
+                  id={`settings-client-${client}`}
+                  checked={managedClients[client]}
+                  onCheckedChange={(checked) => toggleManagedClient(client, checked)}
+                  className="scale-75"
+                />
+              </div>
+            ))}
           </div>
 
           {/* Windows only; renders nothing elsewhere, border included. */}

@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 
 // Types matching Rust structs
 
+export const DEFAULT_CLAUDE_EXTRA_CONFIG_ID = "00000000-0000-0000-0000-000000000001";
+export const MINIMAL_CLAUDE_EXTRA_CONFIG_ID = "00000000-0000-0000-0000-000000000002";
+
 export interface Gateway {
   id: string;
   name: string;
@@ -14,26 +17,15 @@ export interface Gateway {
   sortOrder: number;
   createdAt: string;
   claudeModel: string | null;
+  claudeSubagentModel: string | null;
   claudeSmallModel: string | null;
   codexModel: string | null;
+  codexSubagentModel: string | null;
   geminiModel: string | null;
+  claudeExtraConfigId: string | null;
 }
 
-export interface GatewayWithHealth {
-  id: string;
-  name: string;
-  url: string;
-  authKey: string;
-  isAdmin: boolean;
-  sessionToken: string | null;
-  userId: string | null;
-  userName: string | null;
-  sortOrder: number;
-  createdAt: string;
-  claudeModel: string | null;
-  claudeSmallModel: string | null;
-  codexModel: string | null;
-  geminiModel: string | null;
+export interface GatewayWithHealth extends Gateway {
   isHealthy: boolean;
   latencyMs: number | null;
   modelCount: number | null;
@@ -77,15 +69,25 @@ export interface ActiveConfig {
   keyName: string | null;
   keyValue: string | null;
   claudeModel: string | null;
+  claudeSubagentModel: string | null;
   claudeSmallModel: string | null;
   codexModel: string | null;
+  codexSubagentModel: string | null;
   geminiModel: string | null;
+  claudeExtraConfigId: string | null;
   autoSwitch: boolean;
   appliedAt: string | null;
 }
 
+export interface ManagedClients {
+  claude: boolean;
+  codex: boolean;
+  gemini: boolean;
+}
+
 export interface AppSettings {
   autoSwitch: boolean;
+  managedClients: ManagedClients;
 }
 
 export interface CurrentCliConfig {
@@ -164,6 +166,29 @@ export const fetchKeys = (gatewayId: string) =>
 export const fetchModels = (gatewayId: string, keyValue?: string) =>
   invoke<ModelList>("fetch_models", { gatewayId, keyValue });
 
+export interface ClaudeExtraConfig {
+  id: string;
+  name: string;
+  env: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const listClaudeExtraConfigs = () =>
+  invoke<ClaudeExtraConfig[]>("list_claude_extra_configs");
+
+export const createClaudeExtraConfig = (name: string, env: Record<string, string>) =>
+  invoke<ClaudeExtraConfig>("create_claude_extra_config", { name, env });
+
+export const updateClaudeExtraConfig = (
+  id: string,
+  name: string,
+  env: Record<string, string>,
+) => invoke<ClaudeExtraConfig>("update_claude_extra_config", { id, name, env });
+
+export const deleteClaudeExtraConfig = (id: string) =>
+  invoke<void>("delete_claude_extra_config", { id });
+
 // ─── Health ───
 
 export const checkAllHealth = () =>
@@ -197,9 +222,13 @@ export interface ApplyConfigParams {
   keyName?: string;
   keyValue?: string;
   claudeModel?: string;
+  claudeSubagentModel?: string;
   claudeSmallModel?: string;
   codexModel?: string;
+  codexSubagentModel?: string;
   geminiModel?: string;
+  claudeExtraConfigId?: string;
+  claudeExtraConfigSet?: boolean;
 }
 
 export const applyConfig = (params: ApplyConfigParams) =>
@@ -211,41 +240,34 @@ export const readCurrentConfig = () =>
 export const clearConfig = () =>
   invoke<void>("clear_config");
 
-export interface ClaudeSnapshot {
-  anthropicBaseUrl: string | null;
-  anthropicModel: string | null;
-  anthropicSmallFastModel: string | null;
-  anthropicAuthToken: string | null;
+export type LifecyclePhase =
+  | "inactive"
+  | "preparing_use"
+  | "active"
+  | "capturing_disable_backup"
+  | "restoring_origin"
+  | "cleanup_pending";
+
+export interface LifecycleFileStatus {
+  relativePath: string;
+  provider: "claude" | "codex" | "gemini";
+  originExists: boolean;
+  backupExists: boolean | null;
+  error: string | null;
 }
 
-export interface CodexSnapshot {
-  openaiApiKey: string | null;
-  model: string | null;
-  modelProvider: string | null;
-  copilotGatewayProviderToml: string | null;
-}
-
-export interface GeminiSnapshot {
-  geminiApiKey: string | null;
-  googleGeminiBaseUrl: string | null;
-  geminiApiBaseUrl: string | null;
-  selectedAuthType: string | null;
-}
-
-/// One row per CLI snapshot under cli-config-backup/. `targetType` is
-/// "windows" or "wsl"; `distroName` is set only for wsl targets.
-export interface TargetSnapshot {
-  targetType: "windows" | "wsl";
+export interface LifecycleTargetStatus {
+  targetType: "native" | "wsl";
   distroName: string | null;
-  home: string | null;
-  capturedAt: string;
-  claude: ClaudeSnapshot;
-  codex: CodexSnapshot;
-  gemini: GeminiSnapshot;
+  label: string;
+  phase: LifecyclePhase;
+  files: LifecycleFileStatus[];
+  pending: boolean;
+  pendingReason: string | null;
 }
 
-export const listTargetSnapshots = () =>
-  invoke<TargetSnapshot[]>("list_target_snapshots");
+export const listCliLifecycleStatus = () =>
+  invoke<LifecycleTargetStatus[]>("list_cli_lifecycle_status");
 
 // ─── Settings ───
 
@@ -255,8 +277,10 @@ export const getActiveConfig = () =>
 export const getSettings = () =>
   invoke<AppSettings>("get_settings");
 
-export const updateSettings = (autoSwitch: boolean) =>
-  invoke<void>("update_settings", { autoSwitch });
+export const updateSettings = (
+  autoSwitch: boolean,
+  managedClients?: ManagedClients,
+) => invoke<void>("update_settings", { autoSwitch, managedClients });
 
 // ─── Client Identity ───
 

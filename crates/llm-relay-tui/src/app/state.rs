@@ -52,8 +52,10 @@ pub struct GatewayRow {
     pub needs_login: bool,
     pub active_key_name: Option<String>,
     pub claude_model: Option<String>,
+    pub claude_subagent_model: Option<String>,
     pub claude_small_model: Option<String>,
     pub codex_model: Option<String>,
+    pub codex_subagent_model: Option<String>,
     pub gemini_model: Option<String>,
     pub user_name: Option<String>,
 }

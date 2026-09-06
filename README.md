@@ -6,7 +6,7 @@
   <img src="icon-source.svg" width="128" height="128" alt="LLM Relay Logo" />
 </div>
 
-> **v0.4.1 新增**：设置侧边抽屉——设备名、语言、开机启动、自动故障转移、WSL2 发行版、停用中继全部收进右侧抽屉，主界面只留下你盯着网关列表时真正会用的东西。关闭窗口后不再在 Dock / 任务栏留图标。
+> **v0.5.0 新增**：设置侧边抽屉——设备名、语言、开机启动、自动故障转移、WSL2 发行版、停用中继全部收进右侧抽屉，主界面只留下你盯着网关列表时真正会用的东西。关闭窗口后不再在 Dock / 任务栏留图标。
 
 ---
 
@@ -93,8 +93,8 @@ LLM Relay 在本地启动一个 HTTP 代理（`127.0.0.1:18080`），CLI 工具�
 
 从 [Releases](https://github.com/xuangong/llm-relay/releases) 页面下载适合你平台的安装包：
 
-- **macOS GUI**: `LLM Relay_0.4.1_universal.dmg`（Universal，支持 Apple Silicon + Intel）
-- **Windows GUI**: `LLM Relay_0.4.1_x64-setup.exe`（NSIS 安装器）
+- **macOS GUI**: `LLM Relay_0.5.0_universal.dmg`（Universal，支持 Apple Silicon + Intel）
+- **Windows GUI**: `LLM Relay_0.5.0_x64-setup.exe`（NSIS 安装器）
 - **纯 TUI / 服务器部署**：按平台下载下面列出的 agent + TUI 二进制：
   - Linux x64: `llm-relay-agent-x86_64-unknown-linux-gnu` + `llm-relay-tui-x86_64-unknown-linux-gnu`
   - macOS Apple Silicon: `llm-relay-agent-aarch64-apple-darwin` + `llm-relay-tui-aarch64-apple-darwin`

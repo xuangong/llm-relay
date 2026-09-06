@@ -3,16 +3,14 @@ mod tauri_sink;
 mod tray;
 
 use std::sync::Arc;
-use tauri::Manager;
 use tauri::tray::TrayIconBuilder;
+use tauri::Manager;
 
-pub use llm_relay_core::Database;
 pub use llm_relay_core::AppError;
+pub use llm_relay_core::Database;
 
 pub struct AppState {
     pub db: Arc<Database>,
-    /// Held during any gateway switch to prevent concurrent switches.
-    pub switch_lock: Arc<tokio::sync::Mutex<()>>,
     pub service: Arc<llm_relay_core::Service>,
 }
 
@@ -79,12 +77,17 @@ pub fn run() {
             std::fs::create_dir_all(&app_config_dir).ok();
             llm_relay_core::keystore::init(&app_config_dir);
             let db = Arc::new(Database::init(&app_config_dir)?);
+            let db_active = db.get_active_config()?.gateway_id.is_some();
+            if let Err(error) = llm_relay_core::config_writer::lifecycle::recover(db_active) {
+                log::warn!("CLI lifecycle recovery blocked: {error}");
+            }
 
             // Build the shared event sink (Tauri implementation).
             let sink: llm_relay_core::SharedEventSink =
                 std::sync::Arc::new(tauri_sink::TauriSink::new(app.handle().clone()));
 
-            let service = std::sync::Arc::new(llm_relay_core::Service::new(db.clone(), sink.clone()));
+            let service =
+                std::sync::Arc::new(llm_relay_core::Service::new(db.clone(), sink.clone()));
 
             // Spawn proxy server with both listeners. ProxyState is built
             // directly from the same three Arcs Service holds, so the
@@ -112,7 +115,6 @@ pub fn run() {
 
             let state = AppState {
                 db: db.clone(),
-                switch_lock: Arc::new(tokio::sync::Mutex::new(())),
                 service: service.clone(),
             };
 
@@ -177,7 +179,9 @@ pub fn run() {
                 (*service).clone().with_proxy(proxy_handle.clone());
             if let Some(sm) = svc_for_wsl.spawn_wsl_state_machine() {
                 let sm_run = sm.clone();
-                tauri::async_runtime::spawn(async move { sm_run.run().await; });
+                tauri::async_runtime::spawn(async move {
+                    sm_run.run().await;
+                });
                 app.manage(sm);
             }
 
@@ -192,12 +196,16 @@ pub fn run() {
             commands::login_gateway,
             commands::fetch_keys,
             commands::fetch_models,
+            commands::list_claude_extra_configs,
+            commands::create_claude_extra_config,
+            commands::update_claude_extra_config,
+            commands::delete_claude_extra_config,
             commands::check_all_health,
             commands::test_heartbeat,
             commands::apply_config,
             commands::read_current_config,
             commands::clear_config,
-            commands::list_target_snapshots,
+            commands::list_cli_lifecycle_status,
             commands::get_active_config_cmd,
             commands::get_settings,
             commands::update_settings,

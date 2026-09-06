@@ -10,7 +10,7 @@ import { DisableRelayDialog } from "@/components/DisableRelayDialog";
 import { SettingsSheet } from "@/components/Settings/SettingsSheet";
 import { Button } from "@/components/ui/button";
 import * as api from "@/lib/api";
-import type { GatewayWithHealth, ActiveConfig } from "@/lib/api";
+import type { GatewayWithHealth, ActiveConfig, ClaudeExtraConfig } from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n } from "@/lib/i18n";
 import { RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle, Menu, ZapOff } from "lucide-react";
@@ -18,8 +18,14 @@ import { RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle, 
 function App() {
   const { t } = useI18n();
   const [gateways, setGateways] = useState<GatewayWithHealth[]>([]);
+  const [extraConfigs, setExtraConfigs] = useState<ClaudeExtraConfig[]>([]);
   const [activeConfig, setActiveConfig] = useState<ActiveConfig | null>(null);
   const [autoSwitch, setAutoSwitch] = useState(true);
+  const [managedClients, setManagedClients] = useState<api.ManagedClients>({
+    claude: false,
+    codex: true,
+    gemini: false,
+  });
   const [autostart, setAutostart] = useState(false);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
@@ -66,6 +72,7 @@ function App() {
         api.getAutostart(),
       ]);
       setAutoSwitch(settings.autoSwitch);
+      setManagedClients(settings.managedClients);
       setAutostart(autostartEnabled);
     } catch (err) {
       console.error("Failed to load settings:", err);
@@ -81,15 +88,23 @@ function App() {
     }
   }, []);
 
+  const loadExtraConfigs = useCallback(async () => {
+    try {
+      setExtraConfigs(await api.listClaudeExtraConfigs());
+    } catch (err) {
+      console.error("Failed to load Claude Extra configs:", err);
+    }
+  }, []);
+
   const loadAll = useCallback(async () => {
-    await Promise.all([loadGateways(), loadSettings(), loadClientName()]);
+    await Promise.all([loadGateways(), loadSettings(), loadClientName(), loadExtraConfigs()]);
     try {
       const config = await api.getActiveConfig();
       setActiveConfig(config);
     } catch {
       // no active config yet
     }
-  }, [loadGateways, loadSettings, loadClientName]);
+  }, [loadGateways, loadSettings, loadClientName, loadExtraConfigs]);
 
   useEffect(() => {
     const init = async () => {
@@ -113,7 +128,7 @@ function App() {
       const { gatewayId, gatewayName } = event.payload;
       console.log("[App] gateway-switched event received:", gatewayId, gatewayName);
       // Immediately update the active gateway without waiting for loadAll
-      setActiveConfig((prev) => prev ? { ...prev, gatewayId } : { gatewayId, keyId: null, keyName: null, keyValue: null, claudeModel: null, claudeSmallModel: null, codexModel: null, geminiModel: null, autoSwitch: true, appliedAt: null });
+      setActiveConfig((prev) => prev ? { ...prev, gatewayId } : { gatewayId, keyId: null, keyName: null, keyValue: null, claudeModel: null, claudeSubagentModel: null, claudeSmallModel: null, codexModel: null, codexSubagentModel: null, geminiModel: null, claudeExtraConfigId: null, autoSwitch: true, appliedAt: null });
       toast.success(`Switched to ${gatewayName || "new gateway"}`);
       loadAll();
     });
@@ -140,6 +155,18 @@ function App() {
       console.error("Failed to update settings:", err);
       toast.error(`Failed to update settings: ${extractErrorMessage(err)}`);
       setAutoSwitch(!checked);
+    }
+  };
+
+  const handleManagedClientsChange = async (next: api.ManagedClients) => {
+    const previous = managedClients;
+    setManagedClients(next);
+    try {
+      await api.updateSettings(autoSwitch, next);
+      await loadAll();
+    } catch (err) {
+      toast.error(`Failed to update client mode: ${extractErrorMessage(err)}`);
+      setManagedClients(previous);
     }
   };
 
@@ -270,16 +297,26 @@ function App() {
               activeGatewayId={activeConfig?.gatewayId ?? null}
               activeKeyId={activeConfig?.keyId ?? null}
               activeKeyName={activeConfig?.keyName ?? null}
+              extraConfigs={extraConfigs}
+              onExtraConfigsChanged={setExtraConfigs}
+              managedClients={managedClients}
               activeModels={{
                 claude: activeConfig?.claudeModel ?? null,
+                claudeSubagent: activeConfig?.claudeSubagentModel ?? null,
                 claudeSmall: activeConfig?.claudeSmallModel ?? null,
                 codex: activeConfig?.codexModel ?? null,
+                codexSubagent: activeConfig?.codexSubagentModel ?? null,
                 gemini: activeConfig?.geminiModel ?? null,
               }}
               onRefresh={loadAll}
             />
 
-            <AddGatewayCard onAdded={loadAll} />
+            <AddGatewayCard
+              onAdded={loadAll}
+              extraConfigs={extraConfigs}
+              onExtraConfigsChanged={setExtraConfigs}
+              managedClients={managedClients}
+            />
           </div>
         )}
       </main>
@@ -356,6 +393,8 @@ function App() {
         onOpenChange={setSettingsOpen}
         autoSwitch={autoSwitch}
         onAutoSwitchChange={handleAutoSwitchChange}
+        managedClients={managedClients}
+        onManagedClientsChange={handleManagedClientsChange}
         autostart={autostart}
         onAutostartChange={handleAutostartChange}
         clientName={clientName}

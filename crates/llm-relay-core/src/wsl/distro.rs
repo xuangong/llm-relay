@@ -235,7 +235,9 @@ pub fn login_shell(_name: &str) -> Option<String> {
 fn parse_probe_output(text: &str) -> ProbeResult {
     let mut r = ProbeResult::default();
     for line in text.lines() {
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         match k.trim() {
             "home" => r.home = Some(v.trim().to_string()).filter(|s| !s.is_empty()),
             "user" => r.user = Some(v.trim().to_string()).filter(|s| !s.is_empty()),
@@ -288,10 +290,14 @@ pub fn refresh_distros_in_db(db: &crate::Database) -> Result<Vec<DistroRow>, App
 
     use std::collections::HashSet;
     let discovered_names: HashSet<&str> = discovered.iter().map(|d| d.name.as_str()).collect();
-    for ex in &existing {
-        if !discovered_names.contains(ex.name.as_str()) {
-            log::info!("WSL distro removed: {}", ex.name);
-            db.delete_wsl_distro(&ex.name)?;
+    // An empty result is commonly transient while WSL is starting. Preserve
+    // selected rows so lifecycle-pending distros remain discoverable/retryable.
+    if !discovered.is_empty() {
+        for ex in &existing {
+            if !discovered_names.contains(ex.name.as_str()) && !ex.selected {
+                log::info!("WSL distro removed: {}", ex.name);
+                db.delete_wsl_distro(&ex.name)?;
+            }
         }
     }
 

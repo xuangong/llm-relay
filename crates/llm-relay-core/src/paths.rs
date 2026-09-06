@@ -10,7 +10,9 @@ pub fn config_dir() -> PathBuf {
     if let Ok(p) = std::env::var("LLM_RELAY_HOME") {
         return PathBuf::from(p);
     }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".llm-relay")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".llm-relay")
 }
 
 /// Runtime directory for sockets, PID files, and lock files.
@@ -23,11 +25,21 @@ pub fn runtime_dir() -> PathBuf {
     config_dir()
 }
 
-pub fn pid_file() -> PathBuf { runtime_dir().join("agent.pid") }
-pub fn lock_file() -> PathBuf { runtime_dir().join("agent.lock") }
-pub fn sock_file() -> PathBuf { runtime_dir().join("agent.sock") }
-pub fn log_file() -> PathBuf { runtime_dir().join("agent.log") }
-pub fn db_file() -> PathBuf { runtime_dir().join("config.db") }
+pub fn pid_file() -> PathBuf {
+    runtime_dir().join("agent.pid")
+}
+pub fn lock_file() -> PathBuf {
+    runtime_dir().join("agent.lock")
+}
+pub fn sock_file() -> PathBuf {
+    runtime_dir().join("agent.sock")
+}
+pub fn log_file() -> PathBuf {
+    runtime_dir().join("agent.log")
+}
+pub fn db_file() -> PathBuf {
+    runtime_dir().join("config.db")
+}
 
 pub const PROXY_PORT: u16 = 18080;
 
@@ -52,4 +64,8 @@ pub fn cli_config_backup_dir() -> PathBuf {
 /// migration in `config_writer::snapshot::migrate_legacy_if_needed()`.
 pub fn legacy_cli_config_backup_file() -> PathBuf {
     config_dir().join("cli-config-backup.json")
+}
+
+pub fn cli_file_lifecycle_manifest() -> PathBuf {
+    config_dir().join("cli-file-lifecycle.json")
 }

@@ -9,7 +9,22 @@ use crate::AppError;
 use std::path::PathBuf;
 
 pub trait CliBackend: Send + Sync {
-    fn read(&self, rel_path: &[&str]) -> Result<Option<String>, AppError>;
+    fn root_hint(&self) -> Option<String> {
+        None
+    }
+    fn read_bytes(&self, rel_path: &[&str]) -> Result<Option<Vec<u8>>, AppError>;
+    fn read(&self, rel_path: &[&str]) -> Result<Option<String>, AppError> {
+        self.read_bytes(rel_path)?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|error| {
+                    AppError::Config(format!(
+                        "CLI config {} is not valid UTF-8: {error}",
+                        rel_path.join("/")
+                    ))
+                })
+            })
+            .transpose()
+    }
     fn write_atomic(&self, rel_path: &[&str], bytes: &[u8]) -> Result<(), AppError>;
     fn remove(&self, rel_path: &[&str]) -> Result<(), AppError>;
     fn exists(&self, rel_path: &[&str]) -> Result<bool, AppError>;
@@ -31,6 +46,45 @@ pub struct SnapshotMeta {
     /// For WSL: the probed `$HOME`. Stored in the snapshot JSON so a
     /// later restore doesn't need to re-probe a possibly-stopped distro.
     pub home: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedClients {
+    pub claude: bool,
+    pub codex: bool,
+    pub gemini: bool,
+}
+
+impl ManagedClients {
+    pub const CODEX_ONLY: Self = Self {
+        claude: false,
+        codex: true,
+        gemini: false,
+    };
+    pub const ALL: Self = Self {
+        claude: true,
+        codex: true,
+        gemini: true,
+    };
+
+    pub fn any(self) -> bool {
+        self.claude || self.codex || self.gemini
+    }
+
+    pub fn intersect(self, installed: InstalledTools) -> InstalledTools {
+        InstalledTools {
+            claude: self.claude && installed.claude,
+            codex: self.codex && installed.codex,
+            gemini: self.gemini && installed.gemini,
+        }
+    }
+}
+
+impl Default for ManagedClients {
+    fn default() -> Self {
+        Self::ALL
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,12 +141,15 @@ impl Default for WindowsFsBackend {
 }
 
 impl CliBackend for WindowsFsBackend {
-    fn read(&self, rel: &[&str]) -> Result<Option<String>, AppError> {
+    fn root_hint(&self) -> Option<String> {
+        Some(self.home.to_string_lossy().into_owned())
+    }
+    fn read_bytes(&self, rel: &[&str]) -> Result<Option<Vec<u8>>, AppError> {
         let p = self.full_path(rel);
         if !p.exists() {
             return Ok(None);
         }
-        Ok(Some(std::fs::read_to_string(p)?))
+        Ok(Some(std::fs::read(p)?))
     }
     fn write_atomic(&self, rel: &[&str], bytes: &[u8]) -> Result<(), AppError> {
         let p = self.full_path(rel);
@@ -166,7 +223,8 @@ mod tests {
             home: tmp.path().to_path_buf(),
         };
         assert!(!b.exists(&[".claude", "settings.json"]).unwrap());
-        b.write_atomic(&[".claude", "settings.json"], b"{}").unwrap();
+        b.write_atomic(&[".claude", "settings.json"], b"{}")
+            .unwrap();
         assert!(b.exists(&[".claude", "settings.json"]).unwrap());
         assert_eq!(
             b.read(&[".claude", "settings.json"]).unwrap().as_deref(),
@@ -198,8 +256,8 @@ impl WslBackend {
 }
 
 impl CliBackend for WslBackend {
-    fn read(&self, rel: &[&str]) -> Result<Option<String>, AppError> {
-        crate::wsl::fs::wsl_read(&self.distro, &self.full_path(rel))
+    fn read_bytes(&self, rel: &[&str]) -> Result<Option<Vec<u8>>, AppError> {
+        crate::wsl::fs::wsl_read_bytes(&self.distro, &self.full_path(rel))
     }
     fn write_atomic(&self, rel: &[&str], bytes: &[u8]) -> Result<(), AppError> {
         crate::wsl::fs::wsl_atomic_write(&self.distro, &self.full_path(rel), bytes)

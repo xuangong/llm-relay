@@ -11,7 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import * as api from "@/lib/api";
-import type { TargetSnapshot } from "@/lib/api";
+import type { LifecycleTargetStatus } from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n } from "@/lib/i18n";
 
@@ -21,34 +21,9 @@ interface Props {
   onDisabled: () => void;
 }
 
-function snapshotRows(snap: TargetSnapshot): Array<{ label: string; value: string | null }> {
-  return [
-    { label: "Claude · ANTHROPIC_BASE_URL", value: snap.claude.anthropicBaseUrl },
-    { label: "Claude · ANTHROPIC_MODEL", value: snap.claude.anthropicModel },
-    { label: "Claude · ANTHROPIC_SMALL_FAST_MODEL", value: snap.claude.anthropicSmallFastModel },
-    { label: "Claude · ANTHROPIC_AUTH_TOKEN", value: snap.claude.anthropicAuthToken },
-    { label: "Codex · model", value: snap.codex.model },
-    { label: "Codex · model_provider", value: snap.codex.modelProvider },
-    { label: "Codex · OPENAI_API_KEY", value: snap.codex.openaiApiKey },
-    {
-      label: "Codex · [model_providers.copilot_gateway]",
-      value: snap.codex.copilotGatewayProviderToml,
-    },
-    { label: "Gemini · GEMINI_API_KEY", value: snap.gemini.geminiApiKey },
-    { label: "Gemini · GOOGLE_GEMINI_BASE_URL", value: snap.gemini.googleGeminiBaseUrl },
-    { label: "Gemini · GEMINI_API_BASE_URL", value: snap.gemini.geminiApiBaseUrl },
-    { label: "Gemini · security.auth.selectedType", value: snap.gemini.selectedAuthType },
-  ];
-}
-
-function truncate(s: string, max = 80): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
-}
-
 export function DisableRelayDialog({ open, onOpenChange, onDisabled }: Props) {
   const { t } = useI18n();
-  const [snapshots, setSnapshots] = useState<TargetSnapshot[]>([]);
+  const [targets, setTargets] = useState<LifecycleTargetStatus[]>([]);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -56,26 +31,27 @@ export function DisableRelayDialog({ open, onOpenChange, onDisabled }: Props) {
     if (!open) return;
     setLoading(true);
     api
-      .listTargetSnapshots()
-      .then((list) => setSnapshots(list))
+      .listCliLifecycleStatus()
+      .then(setTargets)
       .catch((err) => {
-        console.error("Failed to list snapshots:", err);
-        setSnapshots([]);
+        console.error("Failed to list CLI lifecycle status:", err);
+        setTargets([]);
       })
       .finally(() => setLoading(false));
   }, [open]);
-
-  const hasSnapshots = snapshots.length > 0;
 
   const handleConfirm = async () => {
     setSubmitting(true);
     try {
       await api.clearConfig();
-      toast.success(hasSnapshots ? t("disable.success") : t("disable.successCleared"));
+      toast.success(t("disable.success"));
       onDisabled();
       onOpenChange(false);
     } catch (err) {
       toast.error(t("disable.failed", { error: extractErrorMessage(err) }));
+      try {
+        setTargets(await api.listCliLifecycleStatus());
+      } catch {}
     } finally {
       setSubmitting(false);
     }
@@ -93,83 +69,45 @@ export function DisableRelayDialog({ open, onOpenChange, onDisabled }: Props) {
           <div className="flex items-center justify-center py-6">
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
           </div>
-        ) : hasSnapshots ? (
-          <div className="space-y-3">
-            <p className="text-xs font-medium text-muted-foreground">
-              {t("disable.restoreHeading")}
-            </p>
-            <div className="max-h-72 overflow-y-auto space-y-3">
-              {snapshots.map((snap) => {
-                const targetLabel =
-                  snap.targetType === "windows"
-                    ? t("disable.targetWindows")
-                    : t("disable.targetWsl", { distro: snap.distroName ?? "" });
-                const rows = snapshotRows(snap);
-                const key =
-                  snap.targetType === "windows"
-                    ? "windows"
-                    : `wsl:${snap.distroName ?? ""}`;
-                return (
-                  <div
-                    key={key}
-                    className="rounded-md border border-border/60 overflow-hidden"
-                  >
-                    <div className="bg-muted/40 px-3 py-1.5 text-[11px] font-semibold text-foreground/80 flex items-center justify-between">
-                      <span>{targetLabel}</span>
-                      <span className="text-muted-foreground font-normal">
-                        {t("disable.capturedAt", {
-                          time: new Date(snap.capturedAt).toLocaleString(),
-                        })}
-                      </span>
+        ) : targets.length > 0 ? (
+          <div className="max-h-72 space-y-3 overflow-y-auto">
+            {targets.map((target) => (
+              <div key={`${target.targetType}:${target.distroName ?? "native"}`} className="overflow-hidden rounded-md border border-border/60">
+                <div className="flex items-center justify-between bg-muted/40 px-3 py-1.5 text-[11px] font-semibold">
+                  <span>{target.label}</span>
+                  <span className="font-normal text-muted-foreground">{target.phase}</span>
+                </div>
+                {target.pending && target.pendingReason && (
+                  <p className="border-t border-border/40 px-3 py-2 text-[11px] text-amber-600 dark:text-amber-400">
+                    {target.pendingReason}
+                  </p>
+                )}
+                <div className="divide-y divide-border/40">
+                  {target.files.map((file) => (
+                    <div key={file.relativePath} className="px-3 py-2 text-[11px]">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="truncate font-mono">{file.relativePath}</span>
+                        <span className="shrink-0 text-muted-foreground">
+                          origin: {file.originExists ? t("disable.present") : t("disable.absent")}
+                          {file.backupExists !== null && ` · bak: ${file.backupExists ? t("disable.present") : t("disable.absent")}`}
+                        </span>
+                      </div>
+                      {file.error && <p className="mt-1 text-destructive">{file.error}</p>}
                     </div>
-                    <div className="divide-y divide-border/40 text-xs">
-                      {rows.map((row) => (
-                        <div
-                          key={row.label}
-                          className="flex flex-col gap-0.5 px-3 py-2"
-                        >
-                          <span className="font-mono text-[11px] text-foreground/90">
-                            {row.label}
-                          </span>
-                          {row.value === null ? (
-                            <span className="text-[11px] text-muted-foreground italic">
-                              {t("disable.removed")}
-                            </span>
-                          ) : (
-                            <span className="text-[11px] text-muted-foreground">
-                              <span className="opacity-70">{t("disable.setTo")} </span>
-                              <span className="font-mono break-all">
-                                {truncate(row.value)}
-                              </span>
-                            </span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">{t("disable.nothingToRestore")}</p>
         )}
 
         <DialogFooter>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onOpenChange(false)}
-            disabled={submitting}
-          >
+          <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} disabled={submitting}>
             {t("disable.cancel")}
           </Button>
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={handleConfirm}
-            disabled={submitting || loading}
-          >
+          <Button variant="destructive" size="sm" onClick={handleConfirm} disabled={submitting || loading}>
             {submitting && <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />}
             {t("disable.confirm")}
           </Button>

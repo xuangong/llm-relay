@@ -96,11 +96,9 @@ pub async fn check_and_switch(service: &crate::Service) {
     }
 
     // Find the first healthy gateway by sort_order (priority)
-    let best_healthy = gateways.iter().find(|gw| {
-        results
-            .iter()
-            .any(|(id, healthy)| id == &gw.id && *healthy)
-    });
+    let best_healthy = gateways
+        .iter()
+        .find(|gw| results.iter().any(|(id, healthy)| id == &gw.id && *healthy));
 
     let current_gw_id = config.gateway_id.as_deref();
 
@@ -151,11 +149,7 @@ fn should_switch_now(config: &ActiveConfig) -> bool {
     elapsed.num_seconds() >= SWITCH_HYSTERESIS_SECS
 }
 
-pub async fn do_switch(
-    service: &crate::Service,
-    new_gw_id: &str,
-    current_config: &ActiveConfig,
-) {
+pub async fn do_switch(service: &crate::Service, new_gw_id: &str, current_config: &ActiveConfig) {
     let gw = match service.db.get_gateway(new_gw_id) {
         Ok(Some(gw)) => gw,
         _ => return,
@@ -193,9 +187,12 @@ pub async fn do_switch(
     // Use per-gateway model preferences captured at last apply.
     let models = ModelSelection {
         claude: gw.claude_model.clone(),
+        claude_subagent: gw.claude_subagent_model.clone(),
         claude_small: gw.claude_small_model.clone(),
         codex: gw.codex_model.clone(),
+        codex_subagent: gw.codex_subagent_model.clone(),
         gemini: gw.gemini_model.clone(),
+        claude_extra: crate::ipc::protocol::ClaudeExtraSelection::Inherit,
     };
 
     if let Err(e) = service.set_active(gw_uuid, key_uuid, models).await {
@@ -213,7 +210,9 @@ pub async fn do_switch(
     }
 
     // Signal tray refresh (Tauri sink intercepts this)
-    service.sink.emit(crate::TRAY_REFRESH_EVENT, serde_json::Value::Null);
+    service
+        .sink
+        .emit(crate::TRAY_REFRESH_EVENT, serde_json::Value::Null);
 
     let event_payload = serde_json::json!({
         "gatewayId": gw.id,
@@ -316,7 +315,12 @@ pub async fn send_heartbeat(db: Arc<Database>) {
                 log::info!("Heartbeat successful to {} (status: {})", gw.name, status);
             } else {
                 let body = resp.text().await.unwrap_or_default();
-                log::warn!("Heartbeat failed to {} (status: {}, body: {})", gw.name, status, body);
+                log::warn!(
+                    "Heartbeat failed to {} (status: {}, body: {})",
+                    gw.name,
+                    status,
+                    body
+                );
             }
         }
         Err(e) => {

@@ -1,9 +1,13 @@
-use crate::AppError;
 use crate::keystore;
+use crate::AppError;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
+
+pub const DEFAULT_CLAUDE_EXTRA_CONFIG_ID: &str = "00000000-0000-0000-0000-000000000001";
+pub const MINIMAL_CLAUDE_EXTRA_CONFIG_ID: &str = "00000000-0000-0000-0000-000000000002";
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -24,10 +28,23 @@ pub struct Gateway {
     pub created_at: String,
     // Per-gateway model preferences (persisted so each gateway remembers its own choices)
     pub claude_model: Option<String>,
+    pub claude_subagent_model: Option<String>,
     pub claude_small_model: Option<String>,
     pub codex_model: Option<String>,
+    pub codex_subagent_model: Option<String>,
     pub gemini_model: Option<String>,
     pub preferred_key_id: Option<String>,
+    pub claude_extra_config_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeExtraConfig {
+    pub id: String,
+    pub name: String,
+    pub env: BTreeMap<String, String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,9 +66,12 @@ pub struct ActiveConfig {
     pub key_name: Option<String>,
     pub key_value: Option<String>,
     pub claude_model: Option<String>,
+    pub claude_subagent_model: Option<String>,
     pub claude_small_model: Option<String>,
     pub codex_model: Option<String>,
+    pub codex_subagent_model: Option<String>,
     pub gemini_model: Option<String>,
+    pub claude_extra_config_id: Option<String>,
     pub auto_switch: bool,
     pub applied_at: Option<String>,
     pub last_switched_at: Option<String>,
@@ -124,9 +144,13 @@ pub struct UsageSummaryByGateway {
 impl Database {
     pub fn init(config_dir: &Path) -> Result<Self, AppError> {
         let db_path = config_dir.join("config.db");
+        let existed = db_path.exists();
         let conn = Connection::open(db_path)?;
         Self::apply_schema_and_migrations(&conn)?;
-        Ok(Database { conn: Mutex::new(conn) })
+        Self::initialize_managed_clients(&conn, existed)?;
+        Ok(Database {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Test-only constructor: in-memory SQLite with full schema and
@@ -153,10 +177,13 @@ impl Database {
                 user_id TEXT,
                 user_name TEXT,
                 claude_model TEXT,
+                claude_subagent_model TEXT,
                 claude_small_model TEXT,
                 codex_model TEXT,
+                codex_subagent_model TEXT,
                 gemini_model TEXT,
-                preferred_key_id TEXT
+                preferred_key_id TEXT,
+                claude_extra_config_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS active_config (
@@ -166,9 +193,12 @@ impl Database {
                 key_name TEXT,
                 key_value TEXT,
                 claude_model TEXT,
+                claude_subagent_model TEXT,
                 claude_small_model TEXT,
                 codex_model TEXT,
+                codex_subagent_model TEXT,
                 gemini_model TEXT,
+                claude_extra_config_id TEXT,
                 auto_switch INTEGER DEFAULT 1,
                 applied_at TEXT,
                 last_switched_at TEXT
@@ -185,6 +215,14 @@ impl Database {
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS claude_extra_configs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                env_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS health_check_log (
@@ -236,10 +274,14 @@ impl Database {
             );
 
             INSERT OR IGNORE INTO active_config (id, auto_switch) VALUES (1, 1);
-            PRAGMA user_version = 11;
+            PRAGMA user_version = 14;
             ",
         )?;
-        Ok(Database { conn: Mutex::new(conn) })
+        Self::seed_claude_extra_configs(&conn)?;
+        Self::initialize_managed_clients(&conn, false)?;
+        Ok(Database {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn apply_schema_and_migrations(conn: &Connection) -> Result<(), AppError> {
@@ -294,9 +336,7 @@ impl Database {
             .unwrap_or(0);
 
         if version < 1 {
-            conn.execute_batch(
-                "ALTER TABLE active_config ADD COLUMN last_switched_at TEXT;",
-            )?;
+            conn.execute_batch("ALTER TABLE active_config ADD COLUMN last_switched_at TEXT;")?;
             conn.execute_batch("PRAGMA user_version = 1")?;
         }
 
@@ -389,7 +429,11 @@ impl Database {
             // Migrate active key_value
             {
                 let kv: Option<String> = conn
-                    .query_row("SELECT key_value FROM active_config WHERE id = 1", [], |row| row.get(0))
+                    .query_row(
+                        "SELECT key_value FROM active_config WHERE id = 1",
+                        [],
+                        |row| row.get(0),
+                    )
                     .ok()
                     .flatten();
                 if let Some(ref v) = kv {
@@ -430,12 +474,26 @@ impl Database {
                  ALTER TABLE gateways ADD COLUMN gemini_model TEXT;",
             )?;
 
-            let active: Option<(Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+            let active: Option<(
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            )> = conn
                 .query_row(
                     "SELECT gateway_id, claude_model, claude_small_model, codex_model, gemini_model
                      FROM active_config WHERE id = 1",
                     [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
                 )
                 .ok();
             if let Some((Some(gw_id), c, cs, cx, g)) = active {
@@ -451,9 +509,7 @@ impl Database {
 
         // v9: per-gateway preferred_key_id so config can be saved without activating.
         if version < 9 {
-            conn.execute_batch(
-                "ALTER TABLE gateways ADD COLUMN preferred_key_id TEXT;",
-            )?;
+            conn.execute_batch("ALTER TABLE gateways ADD COLUMN preferred_key_id TEXT;")?;
             // Back-fill from active_config if the gateway matches.
             let active: Option<(Option<String>, Option<String>)> = conn
                 .query_row(
@@ -504,6 +560,122 @@ impl Database {
             conn.execute_batch("PRAGMA user_version = 11")?;
         }
 
+        if version < 12 {
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE gateways ADD COLUMN claude_subagent_model TEXT;
+                 ALTER TABLE active_config ADD COLUMN claude_subagent_model TEXT;
+                 PRAGMA user_version = 12;
+                 COMMIT;",
+            )?;
+        }
+
+        if version < 13 {
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE gateways ADD COLUMN codex_subagent_model TEXT;
+                 ALTER TABLE active_config ADD COLUMN codex_subagent_model TEXT;
+                 PRAGMA user_version = 13;
+                 COMMIT;",
+            )?;
+        }
+
+        if version < 14 {
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE claude_extra_configs (
+                     id TEXT PRIMARY KEY,
+                     name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                     env_json TEXT NOT NULL,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+                 ALTER TABLE gateways ADD COLUMN claude_extra_config_id TEXT;
+                 ALTER TABLE active_config ADD COLUMN claude_extra_config_id TEXT;
+                 PRAGMA user_version = 14;
+                 COMMIT;",
+            )?;
+        }
+
+        if version < 14 {
+            Self::seed_claude_extra_configs(conn)?;
+        }
+        Ok(())
+    }
+
+    fn initialize_managed_clients(
+        conn: &Connection,
+        existing_database: bool,
+    ) -> Result<(), AppError> {
+        let value = if existing_database {
+            r#"{"claude":true,"codex":true,"gemini":true}"#
+        } else {
+            r#"{"claude":false,"codex":true,"gemini":false}"#
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('managed_clients', ?1)",
+            params![value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_managed_clients(&self) -> Result<crate::cli_target::ManagedClients, AppError> {
+        let value = self
+            .get_setting("managed_clients")?
+            .ok_or_else(|| AppError::Config("managed_clients is not initialized".into()))?;
+        let clients: crate::cli_target::ManagedClients = serde_json::from_str(&value)?;
+        if !clients.any() {
+            return Err(AppError::Config(
+                "At least one managed client must be selected".into(),
+            ));
+        }
+        Ok(clients)
+    }
+
+    pub fn set_managed_clients(
+        &self,
+        clients: crate::cli_target::ManagedClients,
+    ) -> Result<(), AppError> {
+        if !clients.any() {
+            return Err(AppError::Config(
+                "At least one managed client must be selected".into(),
+            ));
+        }
+        self.set_setting("managed_clients", &serde_json::to_string(&clients)?)
+    }
+
+    fn seed_claude_extra_configs(conn: &Connection) -> Result<(), AppError> {
+        let full = serde_json::json!({
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "2",
+            "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
+            "CLAUDE_CODE_FORK_SUBAGENT": "0",
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "DISABLE_AUTOUPDATER": "1",
+            "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
+        });
+        let minimal = serde_json::json!({
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "DISABLE_AUTOUPDATER": "1",
+        });
+        conn.execute(
+            "INSERT OR IGNORE INTO claude_extra_configs
+             (id, name, env_json, created_at, updated_at) VALUES (?1, '配置项一', ?2, ?3, ?3)",
+            params![
+                DEFAULT_CLAUDE_EXTRA_CONFIG_ID,
+                serde_json::to_string(&full)?,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO claude_extra_configs
+             (id, name, env_json, created_at, updated_at) VALUES (?1, '配置项二', ?2, ?3, ?3)",
+            params![
+                MINIMAL_CLAUDE_EXTRA_CONFIG_ID,
+                serde_json::to_string(&minimal)?,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
         Ok(())
     }
 
@@ -518,8 +690,8 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO gateways (id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at,
-                                   claude_model, claude_small_model, codex_model, gemini_model, preferred_key_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                   claude_model, claude_subagent_model, claude_small_model, codex_model, codex_subagent_model, gemini_model, preferred_key_id, claude_extra_config_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 gw.id,
                 gw.name,
@@ -532,10 +704,13 @@ impl Database {
                 gw.sort_order,
                 gw.created_at,
                 gw.claude_model,
+                gw.claude_subagent_model,
                 gw.claude_small_model,
                 gw.codex_model,
+                gw.codex_subagent_model,
                 gw.gemini_model,
                 gw.preferred_key_id,
+                gw.claude_extra_config_id,
             ],
         )?;
         Ok(())
@@ -545,7 +720,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at,
-                    claude_model, claude_small_model, codex_model, gemini_model, preferred_key_id
+                    claude_model, claude_subagent_model, claude_small_model, codex_model, codex_subagent_model, gemini_model, preferred_key_id, claude_extra_config_id
              FROM gateways ORDER BY sort_order ASC, created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -561,10 +736,13 @@ impl Database {
                 sort_order: row.get(8)?,
                 created_at: row.get(9)?,
                 claude_model: row.get(10)?,
-                claude_small_model: row.get(11)?,
-                codex_model: row.get(12)?,
-                gemini_model: row.get(13)?,
-                preferred_key_id: row.get(14)?,
+                claude_subagent_model: row.get(11)?,
+                claude_small_model: row.get(12)?,
+                codex_model: row.get(13)?,
+                codex_subagent_model: row.get(14)?,
+                gemini_model: row.get(15)?,
+                preferred_key_id: row.get(16)?,
+                claude_extra_config_id: row.get(17)?,
             })
         })?;
         let mut gateways: Vec<Gateway> = rows.filter_map(|r| r.ok()).collect();
@@ -584,7 +762,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, url, auth_key, is_admin, session_token, user_id, user_name, sort_order, created_at,
-                    claude_model, claude_small_model, codex_model, gemini_model, preferred_key_id
+                    claude_model, claude_subagent_model, claude_small_model, codex_model, codex_subagent_model, gemini_model, preferred_key_id, claude_extra_config_id
              FROM gateways WHERE id = ?1",
         )?;
         let result = stmt.query_row(params![id], |row| {
@@ -600,10 +778,13 @@ impl Database {
                 sort_order: row.get(8)?,
                 created_at: row.get(9)?,
                 claude_model: row.get(10)?,
-                claude_small_model: row.get(11)?,
-                codex_model: row.get(12)?,
-                gemini_model: row.get(13)?,
-                preferred_key_id: row.get(14)?,
+                claude_subagent_model: row.get(11)?,
+                claude_small_model: row.get(12)?,
+                codex_model: row.get(13)?,
+                codex_subagent_model: row.get(14)?,
+                gemini_model: row.get(15)?,
+                preferred_key_id: row.get(16)?,
+                claude_extra_config_id: row.get(17)?,
             })
         });
         match result {
@@ -661,8 +842,14 @@ impl Database {
         keystore::delete_secret(&keystore::gw_auth_key(id));
         keystore::delete_secret(&keystore::gw_session_token(id));
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM health_cache WHERE gateway_id = ?1", params![id])?;
-        conn.execute("DELETE FROM health_check_log WHERE gateway_id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM health_cache WHERE gateway_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM health_check_log WHERE gateway_id = ?1",
+            params![id],
+        )?;
         conn.execute("DELETE FROM gateways WHERE id = ?1", params![id])?;
         conn.execute(
             "UPDATE active_config SET gateway_id = NULL, key_id = NULL, key_name = NULL, key_value = NULL
@@ -691,22 +878,183 @@ impl Database {
         id: &str,
         preferred_key_id: Option<&str>,
         claude: Option<&str>,
+        claude_subagent: Option<&str>,
         claude_small: Option<&str>,
         codex: Option<&str>,
+        codex_subagent: Option<&str>,
         gemini: Option<&str>,
+        claude_extra_config_id: Option<&str>,
     ) -> Result<(), AppError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE gateways SET
-                preferred_key_id   = COALESCE(?1, preferred_key_id),
-                claude_model       = COALESCE(?2, claude_model),
-                claude_small_model = COALESCE(?3, claude_small_model),
-                codex_model        = COALESCE(?4, codex_model),
-                gemini_model       = COALESCE(?5, gemini_model)
-             WHERE id = ?6",
-            params![preferred_key_id, claude, claude_small, codex, gemini, id],
+                preferred_key_id      = COALESCE(?1, preferred_key_id),
+                claude_model          = ?2,
+                claude_subagent_model = ?3,
+                claude_small_model    = ?4,
+                codex_model           = ?5,
+                codex_subagent_model  = ?6,
+                gemini_model          = ?7,
+                claude_extra_config_id = ?8
+             WHERE id = ?9",
+            params![
+                preferred_key_id,
+                claude,
+                claude_subagent,
+                claude_small,
+                codex,
+                codex_subagent,
+                gemini,
+                claude_extra_config_id,
+                id,
+            ],
         )?;
         Ok(())
+    }
+
+    // ─── Claude Extra Configs ───
+
+    pub fn list_claude_extra_configs(&self) -> Result<Vec<ClaudeExtraConfig>, AppError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, env_json, created_at, updated_at
+             FROM claude_extra_configs ORDER BY created_at, name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let env_json: String = row.get(2)?;
+            let env = serde_json::from_str(&env_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(ClaudeExtraConfig {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                env,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_claude_extra_config(&self, id: &str) -> Result<Option<ClaudeExtraConfig>, AppError> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT id, name, env_json, created_at, updated_at
+             FROM claude_extra_configs WHERE id = ?1",
+            params![id],
+            |row| {
+                let env_json: String = row.get(2)?;
+                let env = serde_json::from_str(&env_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(ClaudeExtraConfig {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    env,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        );
+        match result {
+            Ok(config) => Ok(Some(config)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn create_claude_extra_config(
+        &self,
+        name: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<ClaudeExtraConfig, AppError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let config = ClaudeExtraConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            env: env.clone(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let env_json = serde_json::to_string(&config.env)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO claude_extra_configs (id, name, env_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                config.id,
+                config.name,
+                env_json,
+                config.created_at,
+                config.updated_at
+            ],
+        )?;
+        Ok(config)
+    }
+
+    pub fn update_claude_extra_config(
+        &self,
+        id: &str,
+        name: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<ClaudeExtraConfig, AppError> {
+        let updated_at = chrono::Utc::now().to_rfc3339();
+        let env_json = serde_json::to_string(env)?;
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE claude_extra_configs SET name = ?1, env_json = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![name, env_json, updated_at, id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::Config(format!(
+                "Claude Extra config {id} not found"
+            )));
+        }
+        drop(conn);
+        self.get_claude_extra_config(id)?.ok_or_else(|| {
+            AppError::Config(format!("Claude Extra config {id} not found after update"))
+        })
+    }
+
+    pub fn delete_claude_extra_config(&self, id: &str) -> Result<(), AppError> {
+        let conn = self.conn.lock().unwrap();
+        let references: i64 = conn.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM gateways WHERE claude_extra_config_id = ?1) +
+                 (SELECT COUNT(*) FROM active_config WHERE claude_extra_config_id = ?1)",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if references > 0 {
+            return Err(AppError::Config(
+                "This Claude Extra config is still selected by a gateway".into(),
+            ));
+        }
+        let changed = conn.execute(
+            "DELETE FROM claude_extra_configs WHERE id = ?1",
+            params![id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::Config(format!(
+                "Claude Extra config {id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn default_claude_extra_config_id(&self) -> Result<Option<String>, AppError> {
+        Ok(self
+            .get_claude_extra_config(DEFAULT_CLAUDE_EXTRA_CONFIG_ID)?
+            .map(|config| config.id))
     }
 
     // ─── Active Config ───
@@ -715,8 +1063,9 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut result = conn.query_row(
             "SELECT gateway_id, key_id, key_name, key_value,
-                    claude_model, claude_small_model, codex_model, gemini_model,
-                    auto_switch, applied_at, last_switched_at
+                    claude_model, claude_subagent_model, claude_small_model,
+                    codex_model, codex_subagent_model, gemini_model,
+                    claude_extra_config_id, auto_switch, applied_at, last_switched_at
              FROM active_config WHERE id = 1",
             [],
             |row| {
@@ -726,12 +1075,15 @@ impl Database {
                     key_name: row.get(2)?,
                     key_value: row.get(3)?,
                     claude_model: row.get(4)?,
-                    claude_small_model: row.get(5)?,
-                    codex_model: row.get(6)?,
-                    gemini_model: row.get(7)?,
-                    auto_switch: row.get::<_, i32>(8)? != 0,
-                    applied_at: row.get(9)?,
-                    last_switched_at: row.get(10)?,
+                    claude_subagent_model: row.get(5)?,
+                    claude_small_model: row.get(6)?,
+                    codex_model: row.get(7)?,
+                    codex_subagent_model: row.get(8)?,
+                    gemini_model: row.get(9)?,
+                    claude_extra_config_id: row.get(10)?,
+                    auto_switch: row.get::<_, i32>(11)? != 0,
+                    applied_at: row.get(12)?,
+                    last_switched_at: row.get(13)?,
                 })
             },
         )?;
@@ -743,33 +1095,42 @@ impl Database {
     }
 
     pub fn set_active_config(&self, config: &ActiveConfig) -> Result<(), AppError> {
-        // Store key_value in keychain
-        if let Some(ref kv) = config.key_value {
-            keystore::set_secret(&keystore::active_key_value(), kv);
-        } else {
-            keystore::delete_secret(&keystore::active_key_value());
-        }
+        // Publish the fallible SQLite row first. Callers coordinate readers with
+        // the switch lock, and keychain mutations do not return errors, so a SQL
+        // failure must leave the previous active secret untouched.
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE active_config SET
                 gateway_id = ?1, key_id = ?2, key_name = ?3, key_value = ?4,
-                claude_model = ?5, claude_small_model = ?6, codex_model = ?7, gemini_model = ?8,
-                auto_switch = ?9, applied_at = ?10, last_switched_at = ?11
+                claude_model = ?5, claude_subagent_model = ?6, claude_small_model = ?7,
+                codex_model = ?8, codex_subagent_model = ?9, gemini_model = ?10,
+                claude_extra_config_id = ?11,
+                auto_switch = ?12, applied_at = ?13, last_switched_at = ?14
              WHERE id = 1",
             params![
                 config.gateway_id,
                 config.key_id,
                 config.key_name,
-                Option::<String>::None,  // empty — real value in keychain
+                Option::<String>::None, // empty — real value in keychain
                 config.claude_model,
+                config.claude_subagent_model,
                 config.claude_small_model,
                 config.codex_model,
+                config.codex_subagent_model,
                 config.gemini_model,
+                config.claude_extra_config_id,
                 config.auto_switch as i32,
                 config.applied_at,
                 config.last_switched_at,
             ],
         )?;
+        drop(conn);
+
+        if let Some(ref kv) = config.key_value {
+            keystore::set_secret(&keystore::active_key_value(), kv);
+        } else {
+            keystore::delete_secret(&keystore::active_key_value());
+        }
         Ok(())
     }
 
@@ -832,7 +1193,12 @@ impl Database {
 
     // ─── Health Log ───
 
-    pub fn add_health_log(&self, gateway_id: &str, is_healthy: bool, latency_ms: Option<i64>) -> Result<(), AppError> {
+    pub fn add_health_log(
+        &self,
+        gateway_id: &str,
+        is_healthy: bool,
+        latency_ms: Option<i64>,
+    ) -> Result<(), AppError> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -852,7 +1218,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_health_log(&self, gateway_id: &str, limit: usize) -> Result<Vec<HealthLogEntry>, AppError> {
+    pub fn get_health_log(
+        &self,
+        gateway_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HealthLogEntry>, AppError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT is_healthy, latency_ms, checked_at
@@ -944,19 +1314,22 @@ impl Database {
                AND (?2 OR NOT EXISTS (SELECT 1 FROM suppressed_paths s WHERE s.path = t.path))
              ORDER BY t.logged_at DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![gateway_id, include_suppressed, limit as i64], |row| {
-            Ok(TrafficLogEntry {
-                id: row.get(0)?,
-                gateway_id: row.get(1)?,
-                gateway_name: row.get(2)?,
-                path: row.get(3)?,
-                status: row.get::<_, i32>(4)? as u16,
-                latency_ms: row.get::<_, i64>(5)? as u64,
-                error_detail: row.get(6)?,
-                logged_at: row.get(7)?,
-                suppressed: row.get(8)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![gateway_id, include_suppressed, limit as i64],
+            |row| {
+                Ok(TrafficLogEntry {
+                    id: row.get(0)?,
+                    gateway_id: row.get(1)?,
+                    gateway_name: row.get(2)?,
+                    path: row.get(3)?,
+                    status: row.get::<_, i32>(4)? as u16,
+                    latency_ms: row.get::<_, i64>(5)? as u64,
+                    error_detail: row.get(6)?,
+                    logged_at: row.get(7)?,
+                    suppressed: row.get(8)?,
+                })
+            },
+        )?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -964,8 +1337,8 @@ impl Database {
 
     pub fn list_suppressed_paths(&self) -> Result<Vec<SuppressedPath>, AppError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT path, created_at FROM suppressed_paths ORDER BY created_at DESC")?;
+        let mut stmt =
+            conn.prepare("SELECT path, created_at FROM suppressed_paths ORDER BY created_at DESC")?;
         let rows = stmt.query_map([], |row| {
             Ok(SuppressedPath {
                 path: row.get(0)?,
@@ -990,7 +1363,10 @@ impl Database {
     /// the 24h purge), so they reappear immediately.
     pub fn unsuppress_path(&self, path: &str) -> Result<(), AppError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM suppressed_paths WHERE path = ?1", params![path])?;
+        conn.execute(
+            "DELETE FROM suppressed_paths WHERE path = ?1",
+            params![path],
+        )?;
         Ok(())
     }
 
@@ -1021,8 +1397,15 @@ impl Database {
                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
                 cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
                 requests = requests + 1",
-            params![gateway_id, model, hour, input_tokens, output_tokens,
-                    cache_read_tokens, cache_creation_tokens],
+            params![
+                gateway_id,
+                model,
+                hour,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens
+            ],
         )?;
         Ok(())
     }
@@ -1036,11 +1419,11 @@ impl Database {
         period: &str,
     ) -> Result<Vec<UsageSummary>, AppError> {
         let since = match period {
-            "today"  => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
-            "week"   => "strftime('%Y-%m-%dT%H', date('now', 'weekday 1', '-7 days'))".to_string(),
-            "7d"     => "strftime('%Y-%m-%dT%H', datetime('now', '-7 days'))".to_string(),
-            "30d"    => "strftime('%Y-%m-%dT%H', datetime('now', '-30 days'))".to_string(),
-            _        => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
+            "today" => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
+            "week" => "strftime('%Y-%m-%dT%H', date('now', 'weekday 1', '-7 days'))".to_string(),
+            "7d" => "strftime('%Y-%m-%dT%H', datetime('now', '-7 days'))".to_string(),
+            "30d" => "strftime('%Y-%m-%dT%H', datetime('now', '-30 days'))".to_string(),
+            _ => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
         };
 
         let conn = self.conn.lock().unwrap();
@@ -1054,7 +1437,11 @@ impl Database {
              GROUP BY model
              ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC",
             since = since,
-            gw_filter = if gateway_id.is_some() { " AND gateway_id = ?1" } else { "" },
+            gw_filter = if gateway_id.is_some() {
+                " AND gateway_id = ?1"
+            } else {
+                ""
+            },
         );
 
         let entries = if let Some(gid) = gateway_id {
@@ -1093,11 +1480,11 @@ impl Database {
         period: &str,
     ) -> Result<Vec<UsageSummaryByGateway>, AppError> {
         let since = match period {
-            "today"  => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
-            "7d"     => "strftime('%Y-%m-%dT%H', datetime('now', '-7 days'))".to_string(),
-            "30d"    => "strftime('%Y-%m-%dT%H', datetime('now', '-30 days'))".to_string(),
-            "all"    => "'0000'".to_string(),
-            _        => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
+            "today" => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
+            "7d" => "strftime('%Y-%m-%dT%H', datetime('now', '-7 days'))".to_string(),
+            "30d" => "strftime('%Y-%m-%dT%H', datetime('now', '-30 days'))".to_string(),
+            "all" => "'0000'".to_string(),
+            _ => "strftime('%Y-%m-%dT%H', 'now', 'start of day')".to_string(),
         };
 
         let conn = self.conn.lock().unwrap();
@@ -1131,20 +1518,24 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT name, is_default, selected, home, user, has_claude, has_codex,
                     has_gemini, resolved_url, probed_at
-             FROM wsl_distros ORDER BY name"
+             FROM wsl_distros ORDER BY name",
         )?;
-        let rows = stmt.query_map([], |r| Ok(crate::wsl::distro::DistroRow {
-            name: r.get(0)?,
-            is_default: r.get::<_, i64>(1)? != 0,
-            selected: r.get::<_, i64>(2)? != 0,
-            home: r.get(3)?,
-            user: r.get(4)?,
-            has_claude: r.get::<_, i64>(5)? != 0,
-            has_codex: r.get::<_, i64>(6)? != 0,
-            has_gemini: r.get::<_, i64>(7)? != 0,
-            resolved_url: r.get(8)?,
-            probed_at: r.get(9)?,
-        }))?.collect::<Result<Vec<_>, _>>()?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(crate::wsl::distro::DistroRow {
+                    name: r.get(0)?,
+                    is_default: r.get::<_, i64>(1)? != 0,
+                    selected: r.get::<_, i64>(2)? != 0,
+                    home: r.get(3)?,
+                    user: r.get(4)?,
+                    has_claude: r.get::<_, i64>(5)? != 0,
+                    has_codex: r.get::<_, i64>(6)? != 0,
+                    has_gemini: r.get::<_, i64>(7)? != 0,
+                    resolved_url: r.get(8)?,
+                    probed_at: r.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
@@ -1198,6 +1589,221 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v12_migration_adds_subagent_columns_without_changing_small_model() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE gateways (
+                 id TEXT PRIMARY KEY,
+                 claude_small_model TEXT
+             );
+             CREATE TABLE active_config (
+                 id INTEGER PRIMARY KEY,
+                 auto_switch INTEGER DEFAULT 1,
+                 claude_small_model TEXT
+             );
+             INSERT INTO gateways (id, claude_small_model) VALUES ('gw', 'claude-haiku');
+             INSERT INTO active_config (id, claude_small_model) VALUES (1, 'claude-haiku');
+             PRAGMA user_version = 11;",
+        )
+        .unwrap();
+
+        Database::apply_schema_and_migrations(&conn).unwrap();
+
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let gateway_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(gateways)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let active_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(active_config)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let old_small: String = conn
+            .query_row(
+                "SELECT claude_small_model FROM gateways WHERE id = 'gw'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(version, 14);
+        assert!(gateway_columns
+            .iter()
+            .any(|name| name == "claude_subagent_model"));
+        assert!(active_columns
+            .iter()
+            .any(|name| name == "claude_subagent_model"));
+        assert!(gateway_columns
+            .iter()
+            .any(|name| name == "codex_subagent_model"));
+        assert!(active_columns
+            .iter()
+            .any(|name| name == "codex_subagent_model"));
+        assert_eq!(old_small, "claude-haiku");
+    }
+
+    #[test]
+    fn fresh_database_defaults_to_codex_only_and_preserves_changes() {
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(
+            db.get_managed_clients().unwrap(),
+            crate::cli_target::ManagedClients::CODEX_ONLY
+        );
+        db.set_managed_clients(crate::cli_target::ManagedClients::ALL)
+            .unwrap();
+        Database::initialize_managed_clients(&db.conn.lock().unwrap(), false).unwrap();
+        assert_eq!(
+            db.get_managed_clients().unwrap(),
+            crate::cli_target::ManagedClients::ALL
+        );
+    }
+
+    #[test]
+    fn existing_database_without_setting_defaults_to_all() {
+        let db = Database::open_in_memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM settings WHERE key = 'managed_clients'", [])
+            .unwrap();
+        Database::initialize_managed_clients(&db.conn.lock().unwrap(), true).unwrap();
+        assert_eq!(
+            db.get_managed_clients().unwrap(),
+            crate::cli_target::ManagedClients::ALL
+        );
+    }
+
+    #[test]
+    fn empty_managed_client_selection_is_rejected() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db
+            .set_managed_clients(crate::cli_target::ManagedClients {
+                claude: false,
+                codex: false,
+                gemini: false,
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn claude_extra_configs_seed_once_and_support_crud() {
+        let db = Database::open_in_memory().unwrap();
+        let seeded = db.list_claude_extra_configs().unwrap();
+        assert_eq!(seeded.len(), 2);
+        assert_eq!(seeded[0].name, "配置项一");
+        assert_eq!(
+            seeded[0].env.get("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"),
+            Some(&"2".to_string())
+        );
+
+        let env = BTreeMap::from([("TEST_FLAG".to_string(), "1".to_string())]);
+        let created = db.create_claude_extra_config("Custom", &env).unwrap();
+        assert_eq!(created.env, env);
+        let updated_env = BTreeMap::from([("TEST_FLAG".to_string(), "0".to_string())]);
+        let updated = db
+            .update_claude_extra_config(&created.id, "Renamed", &updated_env)
+            .unwrap();
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.env, updated_env);
+        db.delete_claude_extra_config(&created.id).unwrap();
+        assert!(db.get_claude_extra_config(&created.id).unwrap().is_none());
+
+        Database::seed_claude_extra_configs(&db.conn.lock().unwrap()).unwrap();
+        assert_eq!(db.list_claude_extra_configs().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deleting_selected_claude_extra_config_is_rejected() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO gateways (id, name, url, auth_key, created_at, claude_extra_config_id)
+                 VALUES ('gw', 'Gateway', 'http://example.invalid', '', 'now', ?1)",
+                params![DEFAULT_CLAUDE_EXTRA_CONFIG_ID],
+            )
+            .unwrap();
+        }
+        assert!(db
+            .delete_claude_extra_config(DEFAULT_CLAUDE_EXTRA_CONFIG_ID)
+            .is_err());
+    }
+
+    #[test]
+    fn gateway_and_active_config_round_trip_subagent_model() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO gateways (
+                     id, name, url, auth_key, created_at, claude_small_model
+                 ) VALUES ('gw', 'Gateway', 'http://example.invalid', '', 'now', 'old-haiku')",
+                [],
+            )
+            .unwrap();
+        }
+
+        db.update_gateway_config(
+            "gw",
+            None,
+            Some("claude-opus"),
+            Some("claude-sonnet"),
+            Some("claude-haiku"),
+            None,
+            Some("gpt-5.6-sol-fast"),
+            None,
+            None,
+        )
+        .unwrap();
+        let conn = db.conn.lock().unwrap();
+        let (subagent, haiku, codex_subagent): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT claude_subagent_model, claude_small_model, codex_subagent_model FROM gateways WHERE id = 'gw'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(subagent.as_deref(), Some("claude-sonnet"));
+        assert_eq!(haiku.as_deref(), Some("claude-haiku"));
+        assert_eq!(codex_subagent.as_deref(), Some("gpt-5.6-sol-fast"));
+        drop(conn);
+
+        db.update_gateway_config("gw", None, None, None, None, None, None, None, None)
+            .unwrap();
+        let conn = db.conn.lock().unwrap();
+        let cleared: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT claude_subagent_model, claude_small_model FROM gateways WHERE id = 'gw'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cleared, (None, None));
+
+        conn.execute(
+            "UPDATE active_config SET claude_subagent_model = 'gpt-5.6-sol-fast' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let active_subagent: Option<String> = conn
+            .query_row(
+                "SELECT claude_subagent_model FROM active_config WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_subagent.as_deref(), Some("gpt-5.6-sol-fast"));
+    }
 
     /// `add_traffic_log` needs no gateway row — the list query left-joins, so a
     /// dangling gateway_id just yields a NULL name.
@@ -1287,11 +1893,19 @@ mod tests {
     #[test]
     fn muting_applies_across_gateways() {
         let db = Database::open_in_memory().unwrap();
-        db.add_traffic_log("gw-1", "/api/hello", 404, 10, None).unwrap();
-        db.add_traffic_log("gw-2", "/api/hello", 404, 10, None).unwrap();
+        db.add_traffic_log("gw-1", "/api/hello", 404, 10, None)
+            .unwrap();
+        db.add_traffic_log("gw-2", "/api/hello", 404, 10, None)
+            .unwrap();
         db.suppress_path("/api/hello").unwrap();
 
-        assert!(db.get_traffic_log(Some("gw-1"), 100, false).unwrap().is_empty());
-        assert!(db.get_traffic_log(Some("gw-2"), 100, false).unwrap().is_empty());
+        assert!(db
+            .get_traffic_log(Some("gw-1"), 100, false)
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .get_traffic_log(Some("gw-2"), 100, false)
+            .unwrap()
+            .is_empty());
     }
 }

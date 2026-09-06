@@ -16,6 +16,12 @@ use std::process::{Command, Stdio};
 const WSL_TIMEOUT_SECS: u64 = 5;
 
 #[cfg(not(target_os = "windows"))]
+pub fn wsl_read_bytes(_distro: &str, _path: &str) -> Result<Option<Vec<u8>>, AppError> {
+    Err(AppError::Config(
+        "WSL fs ops only available on Windows".into(),
+    ))
+}
+#[cfg(not(target_os = "windows"))]
 pub fn wsl_read(_distro: &str, _path: &str) -> Result<Option<String>, AppError> {
     Err(AppError::Config(
         "WSL fs ops only available on Windows".into(),
@@ -41,7 +47,7 @@ pub fn wsl_exists(_distro: &str, _path: &str) -> Result<bool, AppError> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn wsl_read(distro: &str, path: &str) -> Result<Option<String>, AppError> {
+pub fn wsl_read_bytes(distro: &str, path: &str) -> Result<Option<Vec<u8>>, AppError> {
     // `[ -f X ] && cat X` distinguishes "file absent" (empty stdout, exit 0)
     // from "distro broken" (non-zero exit). The exists() round-trip below
     // disambiguates "absent" vs "empty file".
@@ -50,15 +56,21 @@ pub fn wsl_read(distro: &str, path: &str) -> Result<Option<String>, AppError> {
         path = shell_escape(path),
     );
     let out = run_wsl(distro, &script, None)?;
-    if out.is_empty() {
-        if wsl_exists(distro, path)? {
-            Ok(Some(String::new()))
-        } else {
-            Ok(None)
-        }
+    if out.is_empty() && !wsl_exists(distro, path)? {
+        Ok(None)
     } else {
-        Ok(Some(String::from_utf8_lossy(&out).into_owned()))
+        Ok(Some(out))
     }
+}
+
+#[cfg(target_os = "windows")]
+pub fn wsl_read(distro: &str, path: &str) -> Result<Option<String>, AppError> {
+    wsl_read_bytes(distro, path)?
+        .map(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|error| AppError::Config(format!("WSL file {path} is not UTF-8: {error}")))
+        })
+        .transpose()
 }
 
 #[cfg(target_os = "windows")]

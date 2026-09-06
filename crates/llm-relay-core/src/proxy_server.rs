@@ -1,17 +1,17 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use axum::{
-    Router,
     body::Body,
     extract::State,
     http::{HeaderName, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get},
+    Router,
 };
 use futures_util::StreamExt;
 
-use crate::database::Database;
+use crate::database::{ActiveConfig, Database};
 use crate::events::SharedEventSink;
 
 pub const PLACEHOLDER_KEY: &str = "llm-relay-local";
@@ -192,13 +192,18 @@ impl ProxyHandle {
     /// Cancel any existing WSL listener; if `new_ip` is Some, bind it and
     /// spawn a new serve task. Returns Err on bind failure; the primary
     /// listener is never touched.
-    pub async fn rebind_wsl(self: &Arc<Self>, new_ip: Option<IpAddr>) -> Result<(), crate::AppError> {
+    pub async fn rebind_wsl(
+        self: &Arc<Self>,
+        new_ip: Option<IpAddr>,
+    ) -> Result<(), crate::AppError> {
         let old = self.wsl.lock().unwrap().take();
         if let Some(old) = old {
             old.token.cancel();
             let _ = old.join.await;
         }
-        let Some(ip) = new_ip else { return Ok(()); };
+        let Some(ip) = new_ip else {
+            return Ok(());
+        };
         let port = crate::paths::proxy_port();
         let std_listener = std::net::TcpListener::bind((ip, port))
             .map_err(|e| crate::AppError::Config(format!("WSL bind {ip}:{port} failed: {e}")))?;
@@ -241,8 +246,7 @@ pub async fn start_with_listeners(
     primary
         .set_nonblocking(true)
         .expect("primary listener nonblocking");
-    let primary_tokio =
-        tokio::net::TcpListener::from_std(primary).expect("wrap primary listener");
+    let primary_tokio = tokio::net::TcpListener::from_std(primary).expect("wrap primary listener");
     let primary_token = CancellationToken::new();
     let state_for_task = state.clone();
     let tok = primary_token.clone();
@@ -279,10 +283,7 @@ pub async fn start_with_listeners(
                             .await;
                     });
                     *handle.wsl.lock().unwrap() = Some(WslBound { ip, token, join });
-                    log::info!(
-                        "WSL listener bound on {ip}:{}",
-                        crate::paths::proxy_port()
-                    );
+                    log::info!("WSL listener bound on {ip}:{}", crate::paths::proxy_port());
                 }
                 Err(e) => log::warn!("WSL wrap failed: {e}"),
             }
@@ -300,7 +301,11 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
 
-    // Resolve active gateway + API key
+    // Resolve one consistent routing snapshot. Gateway switches hold this same
+    // lock across external config writes and DB publication; wait here only until
+    // the active gateway/key/model tuple is fully published, then release it
+    // before reading the request body or doing any network I/O.
+    let switch_guard = state.switch_lock.lock().await;
     let config = match state.db.get_active_config() {
         Ok(c) => c,
         Err(e) => {
@@ -350,8 +355,10 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             .into_response();
     }
 
-    // Build target URL
+    // Build target URL while the routing snapshot is protected, then let
+    // switches proceed while this request is read and forwarded.
     let target_url = format!("{}{}", gw.url.trim_end_matches('/'), path);
+    drop(switch_guard);
 
     // Extract method + body
     let method = req.method().clone();
@@ -380,9 +387,9 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
 
     // Build outbound request
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))  // 10 minutes total timeout (same as cc-switch)
-        .connect_timeout(std::time::Duration::from_secs(30))  // 30s connection timeout
-        .pool_idle_timeout(std::time::Duration::from_secs(90))  // Keep connections alive
+        .timeout(std::time::Duration::from_secs(600)) // 10 minutes total timeout (same as cc-switch)
+        .connect_timeout(std::time::Duration::from_secs(30)) // 30s connection timeout
+        .pool_idle_timeout(std::time::Duration::from_secs(90)) // Keep connections alive
         .build()
         .unwrap_or_default();
 
@@ -419,15 +426,17 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             }
         }
     }
-    forward_headers.insert("x-api-key", reqwest::header::HeaderValue::from_str(&api_key).unwrap());
+    forward_headers.insert(
+        "x-api-key",
+        reqwest::header::HeaderValue::from_str(&api_key).unwrap(),
+    );
 
-    // Apply Copilot variant modifiers from the active claude_model composite id
-    // (e.g. `claude-opus-4.7-xhigh-1m`). The CLI config only ever stores the
-    // bare base id; the suffixes live here on the wire so users never see
-    // ANTHROPIC_CUSTOM_HEADERS in their settings.json. Only Anthropic-shaped
-    // requests carry these headers — OpenAI/Gemini paths are untouched.
+    // Resolve variant modifiers from the selected role whose bare model id
+    // matches this request. Subagent/Haiku requests must not inherit the main
+    // model's reasoning/context flags, and GPT requests retain the beta header
+    // Claude Code derived from their `[1m]` config suffix.
     if path.contains("/messages") {
-        apply_anthropic_variant_headers(&mut forward_headers, config.claude_model.as_deref());
+        apply_selected_anthropic_variant_headers(&mut forward_headers, &config, model.as_deref());
     }
 
     // Send with one retry on network error
@@ -449,7 +458,11 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                 // Retry on 502 Bad Gateway (transient upstream error)
                 if resp.status().as_u16() == 502 && attempt == 0 {
                     last_err = "502 Bad Gateway".to_string();
-                    log::warn!("Proxy got 502 (attempt {}) → {}, will retry", attempt + 1, target_url);
+                    log::warn!(
+                        "Proxy got 502 (attempt {}) → {}, will retry",
+                        attempt + 1,
+                        target_url
+                    );
                     continue;
                 }
                 resp_result = Some(resp);
@@ -457,7 +470,12 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
             }
             Err(e) => {
                 last_err = e.to_string();
-                log::warn!("Proxy forward error (attempt {}) → {}: {}", attempt + 1, target_url, e);
+                log::warn!(
+                    "Proxy forward error (attempt {}) → {}: {}",
+                    attempt + 1,
+                    target_url,
+                    e
+                );
             }
         }
     }
@@ -471,12 +489,21 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
 
             // For errors, read the response body to get detailed error message
             if is_any_error {
-                let error_body = resp.text().await.unwrap_or_else(|_| format!("HTTP {}", status_code));
+                let error_body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| format!("HTTP {}", status_code));
 
                 // Include model in error detail for better debugging
                 let error_detail = format_error_detail(model.as_deref(), &error_body);
 
-                let _ = state.db.add_traffic_log(&gateway_id, &path, status_code, latency_ms, Some(&error_detail));
+                let _ = state.db.add_traffic_log(
+                    &gateway_id,
+                    &path,
+                    status_code,
+                    latency_ms,
+                    Some(&error_detail),
+                );
                 log::warn!(
                     "Proxy error {} → {} (model:{}): {}",
                     target_url,
@@ -552,7 +579,9 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                                 if let Ok(text) = std::str::from_utf8(&buffer) {
                                     let (inp, out, cr, cc) = parse_sse_tokens_incremental(text);
                                     // Emit event if usage changed (for real-time UI updates)
-                                    if (inp, out, cr, cc) != last_emitted_usage && (inp > 0 || out > 0) {
+                                    if (inp, out, cr, cc) != last_emitted_usage
+                                        && (inp > 0 || out > 0)
+                                    {
                                         let payload = serde_json::json!({
                                             "gatewayId": gw_id_event,
                                             "model": model_usage,
@@ -577,7 +606,13 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                 // Record stream error if any
                 if let Some(err_msg) = stream_error {
                     let latency_ms = start_error.elapsed().as_millis() as u64;
-                    let _ = db_error.add_traffic_log(&gw_error, &path_error, 502, latency_ms, Some(&err_msg));
+                    let _ = db_error.add_traffic_log(
+                        &gw_error,
+                        &path_error,
+                        502,
+                        latency_ms,
+                        Some(&err_msg),
+                    );
                     log::warn!("Stream error on {}: {}", path_error, err_msg);
                 }
 
@@ -590,7 +625,15 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
                     };
                     if inp > 0 || out > 0 {
                         let _ = db_usage.record_usage(&gw_usage, &model_usage, inp, out, cr, cc);
-                        log::debug!("Usage recorded to DB: {} in={} out={} cr={} cc={} model={}", gw_usage, inp, out, cr, cc, model_usage);
+                        log::debug!(
+                            "Usage recorded to DB: {} in={} out={} cr={} cc={} model={}",
+                            gw_usage,
+                            inp,
+                            out,
+                            cr,
+                            cc,
+                            model_usage
+                        );
                     }
                 }
             });
@@ -629,7 +672,9 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
         None => {
             let latency_ms = start.elapsed().as_millis() as u64;
 
-            let _ = state.db.add_traffic_log(&gateway_id, &path, 502, latency_ms, Some(&last_err));
+            let _ = state
+                .db
+                .add_traffic_log(&gateway_id, &path, 502, latency_ms, Some(&last_err));
 
             let count = state.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
             if count >= ERROR_FAILOVER_THRESHOLD {
@@ -648,13 +693,74 @@ async fn forward(State(state): State<ProxyState>, req: Request<Body>) -> Respons
     }
 }
 
-/// Apply Copilot variant modifiers derived from the composite active model id.
+/// Apply modifiers only when the actual request belongs to a configured Claude
+/// role. GPT and unknown models deliberately retain all client-supplied headers.
+fn apply_selected_anthropic_variant_headers(
+    headers: &mut reqwest::header::HeaderMap,
+    config: &ActiveConfig,
+    request_model: Option<&str>,
+) {
+    if let Some(active_model) = selected_claude_role_model(config, request_model) {
+        apply_anthropic_variant_headers(headers, Some(active_model));
+    }
+}
+
+/// Find the configured Claude role that owns this request model. Composite
+/// request ids identify roles exactly when multiple roles use different variants
+/// of the same bare model. A bare request is accepted only when every matching
+/// role has equivalent modifiers, so array order cannot silently choose a variant.
+fn selected_claude_role_model<'a>(
+    config: &'a ActiveConfig,
+    request_model: Option<&str>,
+) -> Option<&'a str> {
+    let request_model = request_model?;
+    let selected = [
+        config.claude_model.as_deref(),
+        config.claude_subagent_model.as_deref(),
+        config.claude_small_model.as_deref(),
+    ];
+
+    if let Some(exact) = selected
+        .into_iter()
+        .flatten()
+        .find(|model| is_claude_model(model) && model.eq_ignore_ascii_case(request_model))
+    {
+        return Some(exact);
+    }
+
+    let request_model = crate::model_id::without_context_suffix(request_model);
+    let mut matches = selected.into_iter().flatten().filter(|model| {
+        if !is_claude_model(model) {
+            return false;
+        }
+        let (model, _) = crate::model_id::split_context_suffix(model);
+        let (base, _, _) = decompose_claude_id(model);
+        base.eq_ignore_ascii_case(request_model)
+    });
+    let first = matches.next()?;
+    let (first_model, first_bracket_context) = crate::model_id::split_context_suffix(first);
+    let (_, first_effort, first_composite_context) = decompose_claude_id(first_model);
+    let first_context1m = first_bracket_context || first_composite_context;
+    matches
+        .all(|model| {
+            let (model, bracket_context) = crate::model_id::split_context_suffix(model);
+            let (_, effort, composite_context) = decompose_claude_id(model);
+            effort == first_effort && (bracket_context || composite_context) == first_context1m
+        })
+        .then_some(first)
+}
+
+fn is_claude_model(model: &str) -> bool {
+    model
+        .get(.."claude-".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-"))
+}
+
+/// Apply Copilot variant modifiers derived from a matched role's composite id.
 ///
-/// The relay's source-of-truth for "which variant" is the `claude_model` saved
-/// in `active_config` (e.g. `claude-opus-4.7-xhigh-1m`). The CLI config files
-/// only ever hold the bare base id — these headers replace the role
-/// `ANTHROPIC_CUSTOM_HEADERS` would play, but kept off-disk because it's an
-/// advanced var most users shouldn't see.
+/// The CLI config files hold bare Claude ids; suffixes stay in active_config and
+/// become request headers here. Callers invoke this only after matching the
+/// actual request model to one configured Claude role.
 ///
 /// Behavior:
 /// Truncate `s` to at most `max` **characters**, returning the slice and
@@ -694,9 +800,13 @@ fn apply_anthropic_variant_headers(
     const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 
     let (effort, context1m) = match active_model {
-        Some(m) if m.starts_with("claude-") => {
-            let (_, e, c) = decompose_claude_id(m);
-            (e, c)
+        Some(m)
+            if m.get(.."claude-".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-")) =>
+        {
+            let (model, bracket_context) = crate::model_id::split_context_suffix(m);
+            let (_, e, composite_context) = decompose_claude_id(model);
+            (e, bracket_context || composite_context)
         }
         _ => (None, false),
     };
@@ -722,10 +832,16 @@ fn apply_anthropic_variant_headers(
         .collect();
     let mut merged: Vec<String> = Vec::new();
     for b in existing {
-        if b == CONTEXT_1M_BETA { continue; } // dedupe; re-added below if needed
-        if !merged.contains(&b) { merged.push(b); }
+        if b == CONTEXT_1M_BETA {
+            continue;
+        } // dedupe; re-added below if needed
+        if !merged.contains(&b) {
+            merged.push(b);
+        }
     }
-    if context1m { merged.push(CONTEXT_1M_BETA.to_string()); }
+    if context1m {
+        merged.push(CONTEXT_1M_BETA.to_string());
+    }
     headers.remove(BETA_HEADER);
     if !merged.is_empty() {
         if let Ok(v) = reqwest::header::HeaderValue::from_str(&merged.join(",")) {
@@ -738,7 +854,10 @@ fn apply_anthropic_variant_headers(
 /// strips up to two known suffixes (`-high|-xhigh` → effort, `-1m` → context1m)
 /// from the tail in any order. Non-Claude ids pass through unchanged.
 fn decompose_claude_id(id: &str) -> (String, Option<String>, bool) {
-    if !id.starts_with("claude-") {
+    if !id
+        .get(.."claude-".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-"))
+    {
         return (id.to_string(), None, false);
     }
     let mut rest = id.to_string();
@@ -779,10 +898,7 @@ fn extract_model(body: &[u8], path: &str) -> Option<String> {
     if path.contains("/models/") {
         if let Some(model_part) = path.split("/models/").nth(1) {
             // Extract model name (stop at ':' for Gemini, or '/' for others)
-            let model_name = model_part
-                .split(&[':', '/'][..])
-                .next()
-                .unwrap_or("");
+            let model_name = model_part.split(&[':', '/'][..]).next().unwrap_or("");
             if !model_name.is_empty() {
                 log::debug!("Inferred model from path: {}", model_name);
                 return Some(model_name.to_string());
@@ -808,9 +924,7 @@ fn inject_stream_options(body: &[u8], path: &str) -> Vec<u8> {
     };
 
     // Only inject if streaming is enabled
-    let is_streaming = v.get("stream")
-        .and_then(|s| s.as_bool())
-        .unwrap_or(false);
+    let is_streaming = v.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
     if !is_streaming {
         return body.to_vec();
@@ -850,49 +964,99 @@ fn parse_sse_tokens_incremental(text: &str) -> (i64, i64, i64, i64) {
     let mut cache_creation: i64 = 0;
 
     for line in text.lines() {
-        let json_str = if let Some(s) = line.strip_prefix("data: ") { s } else { continue };
-        if json_str == "[DONE]" { continue; }
+        let json_str = if let Some(s) = line.strip_prefix("data: ") {
+            s
+        } else {
+            continue;
+        };
+        if json_str == "[DONE]" {
+            continue;
+        }
 
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) else {
+            continue;
+        };
 
         match v.get("type").and_then(|t| t.as_str()) {
             Some("message_start") => {
                 // Anthropic: message_start.message.usage
                 if let Some(usage) = v.pointer("/message/usage") {
-                    input      += usage.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-                    cache_read += usage.get("cache_read_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-                    cache_creation += usage.get("cache_creation_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+                    input += usage
+                        .get("input_tokens")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    cache_read += usage
+                        .get("cache_read_input_tokens")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    cache_creation += usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
                 }
             }
             Some("message_delta") => {
                 // Anthropic: message_delta.usage.output_tokens
                 if let Some(usage) = v.get("usage") {
-                    output += usage.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+                    output += usage
+                        .get("output_tokens")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
                 }
             }
             Some("response.completed") => {
                 // OpenAI Responses API (Codex CLI): response.completed.response.usage
                 if let Some(usage) = v.pointer("/response/usage") {
-                    let pt = usage.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-                    let ct = usage.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-                    if pt > 0 { input = pt; }
-                    if ct > 0 { output = ct; }
+                    let pt = usage
+                        .get("input_tokens")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    let ct = usage
+                        .get("output_tokens")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    if pt > 0 {
+                        input = pt;
+                    }
+                    if ct > 0 {
+                        output = ct;
+                    }
                 }
             }
             _ => {
                 // Gemini: usageMetadata (check first as it's more specific)
                 if let Some(usage_meta) = v.get("usageMetadata") {
-                    let pt = usage_meta.get("promptTokenCount").and_then(|x| x.as_i64()).unwrap_or(0);
-                    let ct = usage_meta.get("candidatesTokenCount").and_then(|x| x.as_i64()).unwrap_or(0);
-                    if pt > 0 { input = pt; }
-                    if ct > 0 { output = ct; }
+                    let pt = usage_meta
+                        .get("promptTokenCount")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    let ct = usage_meta
+                        .get("candidatesTokenCount")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    if pt > 0 {
+                        input = pt;
+                    }
+                    if ct > 0 {
+                        output = ct;
+                    }
                 }
                 // OpenAI Chat Completions streaming: last chunk may contain usage object
                 else if let Some(usage) = v.get("usage") {
-                    let pt = usage.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-                    let ct = usage.get("completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-                    if pt > 0 { input = pt; }
-                    if ct > 0 { output = ct; }
+                    let pt = usage
+                        .get("prompt_tokens")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    let ct = usage
+                        .get("completion_tokens")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    if pt > 0 {
+                        input = pt;
+                    }
+                    if ct > 0 {
+                        output = ct;
+                    }
                 }
             }
         }
@@ -910,8 +1074,14 @@ fn parse_json_tokens(data: &[u8]) -> (i64, i64, i64, i64) {
 
     // Try Gemini format first (usageMetadata)
     if let Some(usage_meta) = v.get("usageMetadata") {
-        let input = usage_meta.get("promptTokenCount").and_then(|x| x.as_i64()).unwrap_or(0);
-        let output = usage_meta.get("candidatesTokenCount").and_then(|x| x.as_i64()).unwrap_or(0);
+        let input = usage_meta
+            .get("promptTokenCount")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0);
+        let output = usage_meta
+            .get("candidatesTokenCount")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0);
         return (input, output, 0, 0);
     }
 
@@ -922,14 +1092,24 @@ fn parse_json_tokens(data: &[u8]) -> (i64, i64, i64, i64) {
 
     // Anthropic: input_tokens / output_tokens
     // OpenAI:    prompt_tokens / completion_tokens
-    let input = usage.get("input_tokens").and_then(|x| x.as_i64())
+    let input = usage
+        .get("input_tokens")
+        .and_then(|x| x.as_i64())
         .or_else(|| usage.get("prompt_tokens").and_then(|x| x.as_i64()))
         .unwrap_or(0);
-    let output = usage.get("output_tokens").and_then(|x| x.as_i64())
+    let output = usage
+        .get("output_tokens")
+        .and_then(|x| x.as_i64())
         .or_else(|| usage.get("completion_tokens").and_then(|x| x.as_i64()))
         .unwrap_or(0);
-    let cache_read = usage.get("cache_read_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-    let cache_creation = usage.get("cache_creation_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
 
     (input, output, cache_read, cache_creation)
 }
@@ -954,7 +1134,10 @@ async fn try_proxy_failover(state: &ProxyState, current_gateway_id: &str, error_
     };
 
     if !config.auto_switch {
-        log::info!("Proxy failover skipped (auto_switch disabled), status={}", error_status);
+        log::info!(
+            "Proxy failover skipped (auto_switch disabled), status={}",
+            error_status
+        );
         return;
     }
 
@@ -983,7 +1166,10 @@ async fn try_proxy_failover(state: &ProxyState, current_gateway_id: &str, error_
     if let Some(next_gw) = next {
         log::warn!(
             "Proxy failover: {} → {} after {} consecutive errors (status={})",
-            current_gateway_id, next_gw.name, ERROR_FAILOVER_THRESHOLD, error_status
+            current_gateway_id,
+            next_gw.name,
+            ERROR_FAILOVER_THRESHOLD,
+            error_status
         );
         let Some(service) = state.service.as_ref() else {
             log::warn!(
@@ -996,7 +1182,8 @@ async fn try_proxy_failover(state: &ProxyState, current_gateway_id: &str, error_
     } else {
         log::warn!(
             "Proxy failover: no healthy alternative to {} (status={})",
-            current_gateway_id, error_status
+            current_gateway_id,
+            error_status
         );
     }
 }
@@ -1007,6 +1194,191 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    fn active_config(
+        main: Option<&str>,
+        subagent: Option<&str>,
+        haiku: Option<&str>,
+    ) -> ActiveConfig {
+        ActiveConfig {
+            gateway_id: None,
+            key_id: None,
+            key_name: None,
+            key_value: None,
+            claude_model: main.map(str::to_owned),
+            claude_subagent_model: subagent.map(str::to_owned),
+            claude_small_model: haiku.map(str::to_owned),
+            codex_model: None,
+            codex_subagent_model: None,
+            gemini_model: None,
+            claude_extra_config_id: None,
+            auto_switch: false,
+            applied_at: None,
+            last_switched_at: None,
+        }
+    }
+
+    #[test]
+    fn role_specific_claude_variants_do_not_leak_between_requests() {
+        let config = active_config(
+            Some("claude-opus-4.7-xhigh-1m"),
+            Some("claude-sonnet-4.7-high"),
+            Some("claude-haiku-4.5"),
+        );
+
+        let mut subagent_headers = reqwest::header::HeaderMap::new();
+        apply_selected_anthropic_variant_headers(
+            &mut subagent_headers,
+            &config,
+            Some("claude-sonnet-4.7"),
+        );
+        assert_eq!(
+            subagent_headers
+                .get("x-copilot-reasoning-effort")
+                .and_then(|v| v.to_str().ok()),
+            Some("high")
+        );
+        assert!(subagent_headers.get("anthropic-beta").is_none());
+
+        let mut haiku_headers = reqwest::header::HeaderMap::new();
+        apply_selected_anthropic_variant_headers(
+            &mut haiku_headers,
+            &config,
+            Some("claude-haiku-4.5"),
+        );
+        assert!(haiku_headers.get("x-copilot-reasoning-effort").is_none());
+        assert!(haiku_headers.get("anthropic-beta").is_none());
+    }
+
+    #[test]
+    fn bracket_context_suffix_applies_only_to_the_matching_main_role() {
+        let config = active_config(
+            Some("claude-opus-5[1m]"),
+            Some("claude-sonnet-5"),
+            Some("claude-haiku-4-5"),
+        );
+        let mut main_headers = reqwest::header::HeaderMap::new();
+        apply_selected_anthropic_variant_headers(
+            &mut main_headers,
+            &config,
+            Some("claude-opus-5[1m]"),
+        );
+        assert_eq!(
+            main_headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok()),
+            Some("context-1m-2025-08-07")
+        );
+
+        let mut subagent_headers = reqwest::header::HeaderMap::new();
+        apply_selected_anthropic_variant_headers(
+            &mut subagent_headers,
+            &config,
+            Some("claude-sonnet-5"),
+        );
+        assert!(subagent_headers.get("anthropic-beta").is_none());
+    }
+
+    #[test]
+    fn same_base_claude_variants_are_selected_by_composite_request_id() {
+        let config = active_config(
+            Some("claude-opus-4.7-xhigh"),
+            Some("claude-opus-4.7-high"),
+            Some("claude-opus-4.7-1m"),
+        );
+
+        let mut main_headers = reqwest::header::HeaderMap::new();
+        apply_selected_anthropic_variant_headers(
+            &mut main_headers,
+            &config,
+            Some("claude-opus-4.7-xhigh"),
+        );
+        assert_eq!(
+            main_headers
+                .get("x-copilot-reasoning-effort")
+                .and_then(|value| value.to_str().ok()),
+            Some("xhigh")
+        );
+
+        let mut subagent_headers = reqwest::header::HeaderMap::new();
+        apply_selected_anthropic_variant_headers(
+            &mut subagent_headers,
+            &config,
+            Some("claude-opus-4.7-high"),
+        );
+        assert_eq!(
+            subagent_headers
+                .get("x-copilot-reasoning-effort")
+                .and_then(|value| value.to_str().ok()),
+            Some("high")
+        );
+
+        let mut haiku_headers = reqwest::header::HeaderMap::new();
+        apply_selected_anthropic_variant_headers(
+            &mut haiku_headers,
+            &config,
+            Some("claude-opus-4.7-1m"),
+        );
+        assert_eq!(
+            haiku_headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok()),
+            Some("context-1m-2025-08-07")
+        );
+
+        let mut ambiguous_headers = reqwest::header::HeaderMap::new();
+        ambiguous_headers.insert(
+            "anthropic-beta",
+            reqwest::header::HeaderValue::from_static("client-beta"),
+        );
+        apply_selected_anthropic_variant_headers(
+            &mut ambiguous_headers,
+            &config,
+            Some("claude-opus-4.7"),
+        );
+        assert_eq!(
+            ambiguous_headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok()),
+            Some("client-beta")
+        );
+    }
+
+    #[test]
+    fn gpt_request_preserves_client_context_beta() {
+        let config = active_config(
+            Some("gpt-5.6-sol-fast"),
+            Some("gpt-5.6-sol"),
+            Some("claude-haiku-4.5"),
+        );
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "anthropic-beta",
+            reqwest::header::HeaderValue::from_static("context-1m-2025-08-07"),
+        );
+
+        apply_selected_anthropic_variant_headers(&mut headers, &config, Some("gpt-5.6-sol-fast"));
+        assert_eq!(
+            headers.get("anthropic-beta").and_then(|v| v.to_str().ok()),
+            Some("context-1m-2025-08-07")
+        );
+    }
+
+    #[test]
+    fn uppercase_claude_composite_id_keeps_variant_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        apply_anthropic_variant_headers(&mut headers, Some("CLAUDE-opus-4.7-xhigh-1m"));
+        assert_eq!(
+            headers
+                .get("x-copilot-reasoning-effort")
+                .and_then(|v| v.to_str().ok()),
+            Some("xhigh")
+        );
+        assert_eq!(
+            headers.get("anthropic-beta").and_then(|v| v.to_str().ok()),
+            Some("context-1m-2025-08-07")
+        );
+    }
 
     #[test]
     fn truncate_chars_keeps_short_strings_whole() {
@@ -1026,7 +1398,10 @@ mod tests {
         let (head, cut) = truncate_chars(&body, 500);
         assert!(cut);
         assert_eq!(head.chars().count(), 500);
-        assert!(!body.is_char_boundary(500), "precondition: byte 500 is mid-char");
+        assert!(
+            !body.is_char_boundary(500),
+            "precondition: byte 500 is mid-char"
+        );
     }
 
     /// `GET /api/hello` — no body, so no model, and a gateway that doesn't
@@ -1070,7 +1445,12 @@ mod tests {
     async fn relay_ping_returns_200_ok() {
         let app = build_router(test_state());
         let resp = app
-            .oneshot(Request::builder().uri("/_relay/ping").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/_relay/ping")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1080,7 +1460,12 @@ mod tests {
     async fn relay_reserved_namespace_returns_404_locally() {
         let app = build_router(test_state());
         let resp = app
-            .oneshot(Request::builder().uri("/_relay/unknown").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/_relay/unknown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         // 404 produced by relay_reserved, NOT forwarded upstream (which

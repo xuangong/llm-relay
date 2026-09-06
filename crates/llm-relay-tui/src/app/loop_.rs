@@ -32,8 +32,10 @@ fn into_row(g: GatewaySummary) -> GatewayRow {
         needs_login: g.needs_login,
         active_key_name: g.active_key_name,
         claude_model: g.claude_model,
+        claude_subagent_model: g.claude_subagent_model,
         claude_small_model: g.claude_small_model,
         codex_model: g.codex_model,
+        codex_subagent_model: g.codex_subagent_model,
         gemini_model: g.gemini_model,
         user_name: g.user_name,
     }
@@ -49,7 +51,12 @@ fn gw_rows_from_response(resp: Response) -> Option<Vec<GatewayRow>> {
 
 /// Fetch usage rows from the agent and store them in state.
 async fn fetch_usage(client: &IpcClient, state: &mut AppState) {
-    match client.request(Request::GetUsageRows { range: state.usage.range }).await {
+    match client
+        .request(Request::GetUsageRows {
+            range: state.usage.range,
+        })
+        .await
+    {
         Ok(Response::UsageRows { rows }) => {
             state.usage.rows = rows;
             state.usage.error = None;
@@ -99,7 +106,10 @@ async fn handle_submit(client: &Arc<IpcClient>, state: &mut AppState, submit: Mo
                 f.submitting = true;
                 f.error = None;
             }
-            match client.request(Request::AddGatewaySimple { name, url }).await {
+            match client
+                .request(Request::AddGatewaySimple { name, url })
+                .await
+            {
                 Ok(Response::GatewayCreated { .. }) => {
                     state.modal = None;
                     if let Ok(resp) = client.request(Request::ListGateways).await {
@@ -124,7 +134,10 @@ async fn handle_submit(client: &Arc<IpcClient>, state: &mut AppState, submit: Mo
             }
         }
         ModalSubmit::EditGateway { id, name, url } => {
-            match client.request(Request::UpdateGatewaySimple { id, name, url }).await {
+            match client
+                .request(Request::UpdateGatewaySimple { id, name, url })
+                .await
+            {
                 Ok(Response::GatewayUpdated { .. }) => {
                     state.modal = None;
                     if let Ok(resp) = client.request(Request::ListGateways).await {
@@ -146,12 +159,23 @@ async fn handle_submit(client: &Arc<IpcClient>, state: &mut AppState, submit: Mo
                 }
             }
         }
-        ModalSubmit::SaveConfig { gateway_id, key_id, models } => {
+        ModalSubmit::SaveConfig {
+            gateway_id,
+            key_id,
+            models,
+        } => {
             if let Some(Modal::SelectKeyModel(f)) = state.modal.as_mut() {
                 f.submitting = true;
                 f.error = None;
             }
-            match client.request(Request::SaveGatewayConfig { gateway_id, key_id, models }).await {
+            match client
+                .request(Request::SaveGatewayConfig {
+                    gateway_id,
+                    key_id,
+                    models,
+                })
+                .await
+            {
                 Ok(Response::Ok) => {
                     state.modal = None;
                     state.status_message = Some("Config saved".to_string());
@@ -196,8 +220,10 @@ async fn open_select_key_model(
         selected_key_idx: 0,
         catalog: None,
         claude_idx: 0,
-        claude_small_idx: 0,
+        claude_subagent_idx: 0,
+        claude_haiku_idx: 0,
         codex_idx: 0,
+        codex_subagent_idx: 0,
         gemini_idx: 0,
         focus: SelectField::Key,
         error: None,
@@ -242,13 +268,38 @@ async fn open_select_key_model(
     }
 
     // Fetch saved config to pre-select key and models.
-    let (saved_key_id, saved_claude, saved_claude_small, saved_codex, saved_gemini) =
-        match client.request(Request::GetGatewayConfig { gateway_id }).await {
-            Ok(Response::GatewayConfig { active_key_id, claude, claude_small, codex, gemini }) => {
-                (active_key_id, claude, claude_small, codex, gemini)
-            }
-            _ => (None, None, None, None, None),
-        };
+    let (
+        saved_key_id,
+        saved_claude,
+        saved_claude_subagent,
+        saved_claude_haiku,
+        saved_codex,
+        saved_codex_subagent,
+        saved_gemini,
+    ) = match client
+        .request(Request::GetGatewayConfig { gateway_id })
+        .await
+    {
+        Ok(Response::GatewayConfig {
+            active_key_id,
+            claude,
+            claude_subagent,
+            claude_small,
+            codex,
+            codex_subagent,
+            gemini,
+            claude_extra_config_id: _,
+        }) => (
+            active_key_id,
+            claude,
+            claude_subagent,
+            claude_small,
+            codex,
+            codex_subagent,
+            gemini,
+        ),
+        _ => (None, None, None, None, None, None, None),
+    };
 
     // Pre-select the saved key, or default to first.
     let selected_key_idx = saved_key_id
@@ -256,38 +307,125 @@ async fn open_select_key_model(
         .unwrap_or(0);
     let key_id = keys[selected_key_idx].id;
 
-    let catalog = match client.request(Request::FetchModels { gateway_id, key_id }).await {
+    let catalog = match client
+        .request(Request::FetchModels { gateway_id, key_id })
+        .await
+    {
         Ok(Response::Models { catalog: c }) => Some(c),
         _ => None,
     };
 
     // Use saved models if available, otherwise auto-suggest.
-    let (claude_idx, claude_small_idx, codex_idx, gemini_idx) =
-        saved_model_indexes(&catalog, &saved_claude, &saved_claude_small, &saved_codex, &saved_gemini);
+    let (
+        claude_idx,
+        claude_subagent_idx,
+        claude_haiku_idx,
+        codex_idx,
+        codex_subagent_idx,
+        gemini_idx,
+    ) = saved_model_indexes(
+        &catalog,
+        &saved_claude,
+        &saved_claude_subagent,
+        &saved_claude_haiku,
+        &saved_codex,
+        &saved_codex_subagent,
+        &saved_gemini,
+    );
 
     if let Some(Modal::SelectKeyModel(f)) = state.modal.as_mut() {
         f.keys = keys;
         f.selected_key_idx = selected_key_idx;
         f.catalog = catalog;
         f.claude_idx = claude_idx;
-        f.claude_small_idx = claude_small_idx;
+        f.claude_subagent_idx = claude_subagent_idx;
+        f.claude_haiku_idx = claude_haiku_idx;
         f.codex_idx = codex_idx;
+        f.codex_subagent_idx = codex_subagent_idx;
         f.gemini_idx = gemini_idx;
         f.loading_models = false;
     }
     Ok(())
 }
 
+async fn refresh_select_key_models(client: &Arc<IpcClient>, state: &mut AppState) {
+    let (gateway_id, key_id, previous) = match state.modal.as_ref() {
+        Some(Modal::SelectKeyModel(form)) => match form.selected_key() {
+            Some(key) => (form.gateway_id, key.id, form.model_selection()),
+            None => return,
+        },
+        _ => return,
+    };
+
+    if let Some(Modal::SelectKeyModel(form)) = state.modal.as_mut() {
+        form.loading_models = true;
+        form.catalog = None;
+        form.error = None;
+    }
+
+    match client
+        .request(Request::FetchModels { gateway_id, key_id })
+        .await
+    {
+        Ok(Response::Models { catalog }) => {
+            let catalog = Some(catalog);
+            let indexes = saved_model_indexes(
+                &catalog,
+                &previous.claude,
+                &previous.claude_subagent,
+                &previous.claude_small,
+                &previous.codex,
+                &previous.codex_subagent,
+                &previous.gemini,
+            );
+            if let Some(Modal::SelectKeyModel(form)) = state.modal.as_mut() {
+                if form.gateway_id == gateway_id
+                    && form.selected_key().is_some_and(|key| key.id == key_id)
+                {
+                    form.catalog = catalog;
+                    form.claude_idx = indexes.0;
+                    form.claude_subagent_idx = indexes.1;
+                    form.claude_haiku_idx = indexes.2;
+                    form.codex_idx = indexes.3;
+                    form.codex_subagent_idx = indexes.4;
+                    form.gemini_idx = indexes.5;
+                    form.loading_models = false;
+                }
+            }
+        }
+        Ok(Response::Error { message }) => {
+            if let Some(Modal::SelectKeyModel(form)) = state.modal.as_mut() {
+                form.loading_models = false;
+                form.error = Some(format!("FetchModels: {message}"));
+            }
+        }
+        Ok(_) => {
+            if let Some(Modal::SelectKeyModel(form)) = state.modal.as_mut() {
+                form.loading_models = false;
+                form.error = Some("FetchModels: unexpected response".into());
+            }
+        }
+        Err(error) => {
+            if let Some(Modal::SelectKeyModel(form)) = state.modal.as_mut() {
+                form.loading_models = false;
+                form.error = Some(format!("FetchModels: {error}"));
+            }
+        }
+    }
+}
+
 fn saved_model_indexes(
     catalog: &Option<llm_relay_core::ipc::ModelCatalog>,
     saved_claude: &Option<String>,
-    saved_claude_small: &Option<String>,
+    saved_claude_subagent: &Option<String>,
+    saved_claude_haiku: &Option<String>,
     saved_codex: &Option<String>,
+    saved_codex_subagent: &Option<String>,
     saved_gemini: &Option<String>,
-) -> (usize, usize, usize, usize) {
+) -> (usize, usize, usize, usize, usize, usize) {
     let cat = match catalog {
         Some(c) => c,
-        None => return (0, 0, 0, 0),
+        None => return (0, 0, 0, 0, 0, 0),
     };
     let find = |list: &[String], saved: &Option<String>, fallback: &str| -> usize {
         if let Some(s) = saved {
@@ -295,12 +433,29 @@ fn saved_model_indexes(
                 return pos;
             }
         }
-        list.iter().position(|m| m.contains(fallback)).unwrap_or(0)
+        list.iter()
+            .position(|m| m.to_lowercase().contains(fallback))
+            .unwrap_or(0)
     };
     (
         find(&cat.claude, saved_claude, "opus"),
-        find(&cat.claude, saved_claude_small, "haiku"),
+        find(&cat.claude, saved_claude_subagent, "sonnet"),
+        find(&cat.claude, saved_claude_haiku, "haiku"),
         find(&cat.codex, saved_codex, ""),
+        saved_codex_subagent
+            .as_ref()
+            .and_then(|saved| cat.codex.iter().position(|model| model == saved))
+            .or_else(|| {
+                cat.codex
+                    .iter()
+                    .position(|model| model.starts_with("gpt-") && model.ends_with("-fast"))
+            })
+            .or_else(|| {
+                saved_codex
+                    .as_ref()
+                    .and_then(|main| cat.codex.iter().position(|model| model == main))
+            })
+            .unwrap_or(0),
         find(&cat.gemini, saved_gemini, ""),
     )
 }
@@ -376,7 +531,9 @@ pub async fn run(
         // so without this the bus pump would drop every event before it reaches
         // the writer. (See `bootstrap::default_topics` for the canonical set.)
         let _ = client
-            .request(Request::Subscribe { topics: bootstrap::default_topics() })
+            .request(Request::Subscribe {
+                topics: bootstrap::default_topics(),
+            })
             .await;
         if let Ok(resp) = client.request(Request::ListGateways).await {
             if let Some(rows) = gw_rows_from_response(resp) {
@@ -472,9 +629,27 @@ pub async fn run(
                         }
                     }
 
+                    let key_before = match state.modal.as_ref() {
+                        Some(Modal::SelectKeyModel(form)) if form.focus == SelectField::Key => {
+                            form.selected_key().map(|key| key.id)
+                        }
+                        _ => None,
+                    };
                     let outcome = state.modal.as_mut().unwrap().handle(&evt);
+                    let key_after = match state.modal.as_ref() {
+                        Some(Modal::SelectKeyModel(form)) if form.focus == SelectField::Key => {
+                            form.selected_key().map(|key| key.id)
+                        }
+                        _ => None,
+                    };
+                    let key_changed = key_before != key_after
+                        && matches!(&evt, AppEvent::Left | AppEvent::Right);
                     match outcome {
-                        ModalOutcome::Consumed => {}
+                        ModalOutcome::Consumed => {
+                            if key_changed {
+                                refresh_select_key_models(&client, &mut state).await;
+                            }
+                        }
                         ModalOutcome::Close => {
                             // If closing a Login modal while still pending, cancel it.
                             if let Some(Modal::Login(f)) = &state.modal {
@@ -610,9 +785,24 @@ pub async fn run(
                     if let Some(row) = state.gateways.get(state.selected_row) {
                         let gid = row.id;
                         match client.request(Request::GetGatewayConfig { gateway_id: gid }).await {
-                            Ok(Response::GatewayConfig { active_key_id: Some(key_id), claude, claude_small, codex, gemini }) => {
+                            Ok(Response::GatewayConfig {
+                                active_key_id: Some(key_id),
+                                claude,
+                                claude_subagent,
+                                claude_small,
+                                codex,
+                                codex_subagent,
+                                gemini,
+                                claude_extra_config_id: _,
+                            }) => {
                                 let models = llm_relay_core::ipc::ModelSelection {
-                                    claude, claude_small, codex, gemini,
+                                    claude,
+                                    claude_subagent,
+                                    claude_small,
+                                    codex,
+                                    codex_subagent,
+                                    gemini,
+                                    claude_extra: llm_relay_core::ipc::ClaudeExtraSelection::Inherit,
                                 };
                                 match client.request(Request::SetActive { gateway_id: gid, key_id, models }).await {
                                     Ok(Response::Ok) => {

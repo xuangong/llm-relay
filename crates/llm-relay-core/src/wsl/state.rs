@@ -22,6 +22,7 @@ pub enum Mode {
 }
 
 pub struct StateMachine {
+    service: Arc<crate::Service>,
     db: Arc<crate::Database>,
     proxy: Arc<crate::proxy_server::ProxyHandle>,
     mode: tokio::sync::Mutex<Mode>,
@@ -30,11 +31,12 @@ pub struct StateMachine {
 
 impl StateMachine {
     pub fn new(
-        db: Arc<crate::Database>,
+        service: Arc<crate::Service>,
         proxy: Arc<crate::proxy_server::ProxyHandle>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            db,
+            db: service.db.clone(),
+            service,
             proxy,
             mode: tokio::sync::Mutex::new(Mode::Lazy),
             refresh_signal: tokio::sync::Notify::new(),
@@ -146,8 +148,16 @@ impl StateMachine {
             }
         }
 
-        // 4. Update mode based on what we found.
-        let mode_new = if distros.is_empty() {
+        if has_active_gateway && crate::config_writer::lifecycle::has_pending_wsl() {
+            if let Err(error) = self.service.retry_pending_wsl_apply().await {
+                log::warn!("retry pending WSL apply: {error}");
+            }
+        }
+
+        // 4. Keep probing while a selected lifecycle target is pending, even
+        // when one transient discovery call returned no distros.
+        let mode_new = if distros.is_empty() && !crate::config_writer::lifecycle::has_pending_wsl()
+        {
             Mode::Lazy
         } else {
             Mode::Active

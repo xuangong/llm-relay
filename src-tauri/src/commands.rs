@@ -1,9 +1,16 @@
 use tauri::State;
 
-use llm_relay_core::config_writer;
-use llm_relay_core::database::{ActiveConfig, Gateway, GatewayWithHealth, HealthCache, HealthLogEntry, TrafficLogEntry, UsageSummary};
-use llm_relay_core::gateway::{self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList};
 use crate::AppState;
+use llm_relay_core::config_writer;
+use llm_relay_core::database::{
+    ActiveConfig, ClaudeExtraConfig, Gateway, GatewayWithHealth, HealthCache, HealthLogEntry,
+    TrafficLogEntry, UsageSummary,
+};
+use llm_relay_core::gateway::{
+    self, ApiKey, DeviceCodeResponse, DevicePollResponse, LoginResult, ModelList,
+};
+use llm_relay_core::ipc::protocol::ClaudeExtraSelection;
+use std::collections::BTreeMap;
 
 // ─── Gateway CRUD ───
 
@@ -30,10 +37,16 @@ pub async fn add_gateway(
         sort_order: 999,
         created_at: chrono::Utc::now().to_rfc3339(),
         claude_model: None,
+        claude_subagent_model: None,
         claude_small_model: None,
         codex_model: None,
+        codex_subagent_model: None,
         gemini_model: None,
         preferred_key_id: None,
+        claude_extra_config_id: state
+            .db
+            .default_claude_extra_config_id()
+            .map_err(|e| e.to_string())?,
     };
     state.db.add_gateway(&gw).map_err(|e| e.to_string())?;
 
@@ -70,9 +83,7 @@ pub async fn add_gateway(
 }
 
 #[tauri::command]
-pub async fn list_gateways(
-    state: State<'_, AppState>,
-) -> Result<Vec<GatewayWithHealth>, String> {
+pub async fn list_gateways(state: State<'_, AppState>) -> Result<Vec<GatewayWithHealth>, String> {
     state
         .db
         .list_gateways_with_health()
@@ -113,10 +124,7 @@ pub async fn reorder_gateways(
     app_handle: tauri::AppHandle,
     ids: Vec<String>,
 ) -> Result<(), String> {
-    state
-        .db
-        .reorder_gateways(&ids)
-        .map_err(|e| e.to_string())?;
+    state.db.reorder_gateways(&ids).map_err(|e| e.to_string())?;
 
     // Refresh tray menu after reordering
     crate::tray::refresh_tray_menu(&app_handle);
@@ -128,7 +136,9 @@ pub async fn reorder_gateways(
 
 #[tauri::command]
 pub async fn login_gateway(url: String, key: String) -> Result<LoginResult, String> {
-    let result = gateway::login(&url, &key).await.map_err(|e| e.to_string())?;
+    let result = gateway::login(&url, &key)
+        .await
+        .map_err(|e| e.to_string())?;
 
     if !result.ok {
         return Err("Login failed".to_string());
@@ -168,7 +178,8 @@ pub async fn fetch_models(
         .map_err(|e| e.to_string())?
         .ok_or("Gateway not found")?;
 
-    let auth = key_value.as_deref()
+    let auth = key_value
+        .as_deref()
         .or(gw.session_token.as_deref())
         .unwrap_or(&gw.auth_key);
     gateway::fetch_models(&gw.url, auth)
@@ -201,6 +212,51 @@ pub async fn test_heartbeat(state: State<'_, AppState>) -> Result<String, String
 // ─── Config ───
 
 #[tauri::command]
+pub fn list_claude_extra_configs(
+    state: State<'_, AppState>,
+) -> Result<Vec<ClaudeExtraConfig>, String> {
+    state
+        .service
+        .list_claude_extra_configs()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_claude_extra_config(
+    state: State<'_, AppState>,
+    name: String,
+    env: BTreeMap<String, String>,
+) -> Result<ClaudeExtraConfig, String> {
+    state
+        .service
+        .create_claude_extra_config(name, env)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_claude_extra_config(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    env: BTreeMap<String, String>,
+) -> Result<ClaudeExtraConfig, String> {
+    let id = uuid::Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    state
+        .service
+        .update_claude_extra_config(id, name, env)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_claude_extra_config(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let id = uuid::Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    state
+        .service
+        .delete_claude_extra_config(id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn apply_config(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
@@ -209,9 +265,13 @@ pub async fn apply_config(
     key_name: Option<String>,
     key_value: Option<String>,
     claude_model: Option<String>,
+    claude_subagent_model: Option<String>,
     claude_small_model: Option<String>,
     codex_model: Option<String>,
+    codex_subagent_model: Option<String>,
     gemini_model: Option<String>,
+    claude_extra_config_id: Option<String>,
+    claude_extra_config_set: Option<bool>,
 ) -> Result<(), String> {
     let _ = (key_name, key_value); // service.set_active fetches fresh key info from gateway
 
@@ -242,24 +302,80 @@ pub async fn apply_config(
     //   3. Active config value (only on same-gateway re-apply)
     let merged_claude = claude_model
         .or_else(|| gw.claude_model.clone())
-        .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.claude_model.clone()) } else { None });
+        .or_else(|| {
+            if same_gateway {
+                existing.as_ref().and_then(|c| c.claude_model.clone())
+            } else {
+                None
+            }
+        });
+    let merged_claude_subagent = claude_subagent_model
+        .or_else(|| gw.claude_subagent_model.clone())
+        .or_else(|| {
+            if same_gateway {
+                existing
+                    .as_ref()
+                    .and_then(|c| c.claude_subagent_model.clone())
+            } else {
+                None
+            }
+        });
     let merged_claude_small = claude_small_model
         .or_else(|| gw.claude_small_model.clone())
-        .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.claude_small_model.clone()) } else { None });
-    let merged_codex = codex_model
-        .or_else(|| gw.codex_model.clone())
-        .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.codex_model.clone()) } else { None });
+        .or_else(|| {
+            if same_gateway {
+                existing.as_ref().and_then(|c| c.claude_small_model.clone())
+            } else {
+                None
+            }
+        });
+    let merged_codex = codex_model.or_else(|| gw.codex_model.clone()).or_else(|| {
+        if same_gateway {
+            existing.as_ref().and_then(|c| c.codex_model.clone())
+        } else {
+            None
+        }
+    });
+    let merged_codex_subagent = codex_subagent_model
+        .or_else(|| gw.codex_subagent_model.clone())
+        .or_else(|| {
+            if same_gateway {
+                existing
+                    .as_ref()
+                    .and_then(|c| c.codex_subagent_model.clone())
+            } else {
+                None
+            }
+        });
     let merged_gemini = gemini_model
         .or_else(|| gw.gemini_model.clone())
-        .or_else(|| if same_gateway { existing.as_ref().and_then(|c| c.gemini_model.clone()) } else { None });
+        .or_else(|| {
+            if same_gateway {
+                existing.as_ref().and_then(|c| c.gemini_model.clone())
+            } else {
+                None
+            }
+        });
 
     let gw_uuid = uuid::Uuid::parse_str(&gateway_id).map_err(|e| e.to_string())?;
     let key_uuid = uuid::Uuid::parse_str(&resolved_key_id).map_err(|e| e.to_string())?;
+    let claude_extra = match claude_extra_config_set {
+        Some(false) | None => ClaudeExtraSelection::Inherit,
+        Some(true) => match claude_extra_config_id {
+            Some(id) => {
+                ClaudeExtraSelection::Preset(uuid::Uuid::parse_str(&id).map_err(|e| e.to_string())?)
+            }
+            None => ClaudeExtraSelection::Disabled,
+        },
+    };
     let models = llm_relay_core::ipc::protocol::ModelSelection {
         claude: merged_claude,
+        claude_subagent: merged_claude_subagent,
         claude_small: merged_claude_small,
         codex: merged_codex,
+        codex_subagent: merged_codex_subagent,
         gemini: merged_gemini,
+        claude_extra,
     };
 
     state
@@ -279,10 +395,9 @@ pub fn read_current_config() -> Result<config_writer::CurrentCliConfig, String> 
 }
 
 #[tauri::command]
-pub fn list_target_snapshots()
-    -> Result<Vec<config_writer::snapshot::TargetSnapshot>, String>
-{
-    config_writer::snapshot::list_all().map_err(|e| e.to_string())
+pub fn list_cli_lifecycle_status(
+) -> Result<Vec<config_writer::lifecycle::LifecycleTargetStatus>, String> {
+    config_writer::lifecycle::status().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -304,9 +419,7 @@ pub async fn clear_config(
 // ─── Settings ───
 
 #[tauri::command]
-pub async fn get_active_config_cmd(
-    state: State<'_, AppState>,
-) -> Result<ActiveConfig, String> {
+pub async fn get_active_config_cmd(state: State<'_, AppState>) -> Result<ActiveConfig, String> {
     state.db.get_active_config().map_err(|e| e.to_string())
 }
 
@@ -314,6 +427,7 @@ pub async fn get_active_config_cmd(
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub auto_switch: bool,
+    pub managed_clients: llm_relay_core::cli_target::ManagedClients,
 }
 
 #[tauri::command]
@@ -321,6 +435,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, Str
     let config = state.db.get_active_config().map_err(|e| e.to_string())?;
     Ok(AppSettings {
         auto_switch: config.auto_switch,
+        managed_clients: state.db.get_managed_clients().map_err(|e| e.to_string())?,
     })
 }
 
@@ -329,8 +444,16 @@ pub async fn update_settings(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     auto_switch: bool,
+    managed_clients: Option<llm_relay_core::cli_target::ManagedClients>,
 ) -> Result<(), String> {
     let mut config = state.db.get_active_config().map_err(|e| e.to_string())?;
+    if let Some(clients) = managed_clients {
+        state
+            .service
+            .set_managed_clients(clients)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     config.auto_switch = auto_switch;
     state
         .db
@@ -357,7 +480,10 @@ pub async fn get_health_log(
     state: State<'_, AppState>,
     gateway_id: String,
 ) -> Result<Vec<HealthLogEntry>, String> {
-    state.db.get_health_log(&gateway_id, 1440).map_err(|e| e.to_string())
+    state
+        .db
+        .get_health_log(&gateway_id, 1440)
+        .map_err(|e| e.to_string())
 }
 
 // ─── Client Name ───
@@ -372,11 +498,11 @@ pub async fn get_client_name(state: State<'_, AppState>) -> Result<String, Strin
 }
 
 #[tauri::command]
-pub async fn set_client_name(
-    state: State<'_, AppState>,
-    name: String,
-) -> Result<(), String> {
-    state.db.set_setting("client_name", &name).map_err(|e| e.to_string())
+pub async fn set_client_name(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    state
+        .db
+        .set_setting("client_name", &name)
+        .map_err(|e| e.to_string())
 }
 
 // ─── Autostart ───
@@ -384,7 +510,10 @@ pub async fn set_client_name(
 #[tauri::command]
 pub async fn get_autostart(app_handle: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;
-    app_handle.autolaunch().is_enabled().map_err(|e| e.to_string())
+    app_handle
+        .autolaunch()
+        .is_enabled()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -472,10 +601,7 @@ pub async fn poll_device_login(
 }
 
 #[tauri::command]
-pub async fn fetch_keys_with_token(
-    url: String,
-    token: String,
-) -> Result<Vec<ApiKey>, String> {
+pub async fn fetch_keys_with_token(url: String, token: String) -> Result<Vec<ApiKey>, String> {
     gateway::fetch_keys(&url, &token)
         .await
         .map_err(|e| e.to_string())

@@ -12,7 +12,10 @@ async fn round_trip_request_and_event() {
         payload: Request::SetActive {
             gateway_id: Uuid::new_v4(),
             key_id: Uuid::new_v4(),
-            models: ModelSelection { claude: Some("sonnet".into()), ..Default::default() },
+            models: ModelSelection {
+                claude: Some("sonnet".into()),
+                ..Default::default()
+            },
         },
     };
     write_frame(&mut a, &req).await.unwrap();
@@ -24,6 +27,29 @@ async fn round_trip_request_and_event() {
         Request::SetActive { models, .. } => assert_eq!(models.claude.as_deref(), Some("sonnet")),
         _ => panic!("wrong variant"),
     }
+}
+
+#[test]
+fn legacy_model_selection_defaults_extra_to_inherit() {
+    let models: ModelSelection = serde_json::from_value(serde_json::json!({
+        "claude": "claude-opus-5"
+    }))
+    .unwrap();
+    assert_eq!(models.claude_extra, ClaudeExtraSelection::Inherit);
+
+    let preset = Uuid::new_v4();
+    let round_trip: ModelSelection = serde_json::from_value(
+        serde_json::to_value(ModelSelection {
+            claude_extra: ClaudeExtraSelection::Preset(preset),
+            ..Default::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        round_trip.claude_extra,
+        ClaudeExtraSelection::Preset(preset)
+    );
 }
 
 #[tokio::test]
@@ -62,7 +88,10 @@ async fn server_frame_response_carries_request_id() {
 
     let got: ServerFrame = read_frame(&mut b).await.unwrap();
     match got {
-        ServerFrame::Response { request_id, payload: Response::LoginInitiated { user_code, .. } } => {
+        ServerFrame::Response {
+            request_id,
+            payload: Response::LoginInitiated { user_code, .. },
+        } => {
             assert_eq!(request_id, 7);
             assert_eq!(user_code, "ABCD-1234");
         }

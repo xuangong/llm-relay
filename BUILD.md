@@ -108,7 +108,7 @@ src-tauri/target/universal-apple-darwin/release/bundle/
 ├── macos/
 │   └── LLM Relay.app
 └── dmg/
-    └── LLM Relay_0.4.1_universal.dmg
+    └── LLM Relay_0.5.0_universal.dmg
 ```
 
 ### 为不同架构构建
@@ -130,7 +130,7 @@ pnpm tauri build --target universal-apple-darwin
 ```
 
 Universal DMG 会落在：
-- `src-tauri/target/universal-apple-darwin/release/bundle/dmg/LLM Relay_0.4.1_universal.dmg`
+- `src-tauri/target/universal-apple-darwin/release/bundle/dmg/LLM Relay_0.5.0_universal.dmg`
 
 如需本地调试单架构包，也可以分别使用 `aarch64-apple-darwin` 或 `x86_64-apple-darwin` 目标构建；这些单架构 DMG 不是官方 release 资产。
 
@@ -179,9 +179,9 @@ pnpm run tauri build
 ```
 src-tauri\target\release\bundle\
 ├── nsis\
-│   └── LLM Relay_0.4.1_x64-setup.exe     # NSIS 安装器（推荐）
+│   └── LLM Relay_0.5.0_x64-setup.exe     # NSIS 安装器（推荐）
 └── msi\
-    └── LLM Relay_0.4.1_x64_en-US.msi     # MSI 安装器
+    └── LLM Relay_0.5.0_x64_en-US.msi     # MSI 安装器
 ```
 
 ### 选择安装器类型
@@ -246,11 +246,11 @@ pnpm run tauri build
 ```
 src-tauri/target/release/bundle/
 ├── deb/
-│   └── llm-relay_0.4.1_amd64.deb      # Debian/Ubuntu 包
+│   └── llm-relay_0.5.0_amd64.deb      # Debian/Ubuntu 包
 ├── rpm/
-│   └── llm-relay-0.4.1-1.x86_64.rpm   # Fedora/RHEL 包
+│   └── llm-relay-0.5.0-1.x86_64.rpm   # Fedora/RHEL 包
 └── appimage/
-    └── llm-relay_0.4.1_amd64.AppImage # AppImage
+    └── llm-relay_0.5.0_amd64.AppImage # AppImage
 ```
 
 ### 选择打包格式
@@ -322,9 +322,9 @@ pnpm tauri build
 
 ```
 \\wsl$\Ubuntu-22.04\home\<你的 WSL 用户>\llm-relay\src-tauri\target\release\bundle\
-├── deb/llm-relay_0.4.1_amd64.deb
-├── rpm/llm-relay-0.4.1-1.x86_64.rpm
-└── appimage/llm-relay_0.4.1_amd64.AppImage
+├── deb/llm-relay_0.5.0_amd64.deb
+├── rpm/llm-relay-0.5.0-1.x86_64.rpm
+└── appimage/llm-relay_0.5.0_amd64.AppImage
 ```
 
 可以直接在 Windows 资源管理器里把 `.deb` / `.AppImage` 拖出来上传到 Release。
@@ -367,8 +367,8 @@ gh auth login
 cd llm-relay
 
 # 1. 确认 tag 已推（CI 会尝试跑，失败没关系）
-git tag v0.4.1        # 已打过就跳过
-git push origin v0.4.1
+git tag v0.5.0        # 已打过就跳过
+git push origin v0.5.0
 
 # 2. 本地构建 Universal GUI
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -376,15 +376,15 @@ pnpm install
 pnpm tauri build --target universal-apple-darwin
 
 # 3. 把 DMG 传到 release（release 不存在时会自动创建）
-gh release create v0.4.1 \
-  --title "v0.4.1" \
+gh release create v0.5.0 \
+  --title "v0.5.0" \
   --notes-file RELEASE_NOTES.md \
   --draft \
-  "src-tauri/target/universal-apple-darwin/release/bundle/dmg/LLM Relay_0.4.1_universal.dmg"
+  "src-tauri/target/universal-apple-darwin/release/bundle/dmg/LLM Relay_0.5.0_universal.dmg"
 
 # release 已存在时追加资产
-gh release upload v0.4.1 \
-  "src-tauri/target/universal-apple-darwin/release/bundle/dmg/LLM Relay_0.4.1_universal.dmg" \
+gh release upload v0.5.0 \
+  "src-tauri/target/universal-apple-darwin/release/bundle/dmg/LLM Relay_0.5.0_universal.dmg" \
   --clobber
 ```
 
@@ -396,7 +396,7 @@ mkdir -p release-assets
 cp target/x86_64-unknown-linux-gnu/release/llm-relay-agent release-assets/llm-relay-agent-x86_64-unknown-linux-gnu
 cp target/x86_64-unknown-linux-gnu/release/llm-relay-tui release-assets/llm-relay-tui-x86_64-unknown-linux-gnu
 
-gh release upload v0.4.1 release-assets/* --clobber
+gh release upload v0.5.0 release-assets/* --clobber
 ```
 
 ### Windows 本地构建 + 上传
@@ -404,8 +404,8 @@ gh release upload v0.4.1 release-assets/* --clobber
 ```powershell
 pnpm tauri build
 
-gh release upload v0.4.1 `
-  "src-tauri\target\release\bundle\nsis\LLM Relay_0.4.1_x64-setup.exe" `
+gh release upload v0.5.0 `
+  "src-tauri\target\release\bundle\nsis\LLM Relay_0.5.0_x64-setup.exe" `
   --clobber
 ```
 
@@ -421,7 +421,7 @@ cp target/aarch64-apple-darwin/release/llm-relay-tui release-assets/llm-relay-tu
 cp target/x86_64-apple-darwin/release/llm-relay-agent release-assets/llm-relay-agent-x86_64-apple-darwin
 cp target/x86_64-apple-darwin/release/llm-relay-tui release-assets/llm-relay-tui-x86_64-apple-darwin
 
-gh release upload v0.4.1 release-assets/* --clobber
+gh release upload v0.5.0 release-assets/* --clobber
 ```
 
 ### 发布前 smoke test
@@ -445,7 +445,7 @@ gh release upload v0.4.1 release-assets/* --clobber
 - [ ] Windows NSIS exe 上传
 - [ ] Linux x64 TUI/agent 二进制上传
 - [ ] macOS Apple Silicon + Intel TUI/agent 二进制上传
-- [ ] draft → publish（在 GitHub web UI 或 `gh release edit v0.4.1 --draft=false`）
+- [ ] draft → publish（在 GitHub web UI 或 `gh release edit v0.5.0 --draft=false`）
 
 ---
 
@@ -559,20 +559,20 @@ pnpm tauri build --target x86_64-pc-windows-msvc
 ```json
 // package.json
 {
-  "version": "0.4.1"
+  "version": "0.5.0"
 }
 
 // Cargo.toml
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 
 // src-tauri/Cargo.toml
 [package]
-version = "0.4.1"
+version = "0.5.0"
 
 // src-tauri/tauri.conf.json
 {
-  "version": "0.4.1"
+  "version": "0.5.0"
 }
 ```
 

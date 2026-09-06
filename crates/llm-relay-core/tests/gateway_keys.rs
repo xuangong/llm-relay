@@ -88,7 +88,10 @@ async fn serve(script: Script) -> (String, Arc<Mutex<Vec<String>>>) {
 async fn falls_back_when_the_session_cannot_see_the_wanted_key() {
     let (url, seen) = serve(HashMap::from([
         ("sess".into(), Ok(vec![])),
-        ("admin".into(), Ok(vec![key("k1", "xian"), key("k2", "liang")])),
+        (
+            "admin".into(),
+            Ok(vec![key("k1", "xian"), key("k2", "liang")]),
+        ),
     ]))
     .await;
 
@@ -107,7 +110,10 @@ async fn falls_back_when_the_session_cannot_see_the_wanted_key() {
 #[tokio::test]
 async fn stops_at_the_session_when_it_answers() {
     let (url, seen) = serve(HashMap::from([
-        ("sess".into(), Ok(vec![key("k1", "xian"), key("k2", "liang")])),
+        (
+            "sess".into(),
+            Ok(vec![key("k1", "xian"), key("k2", "liang")]),
+        ),
         ("apikey".into(), Ok(vec![key("k2", "liang")])),
     ]))
     .await;
@@ -229,10 +235,13 @@ fn gateway(id: &str, preferred: Option<&str>) -> Gateway {
         sort_order: 0,
         created_at: "2026-01-01T00:00:00Z".into(),
         claude_model: None,
+        claude_subagent_model: None,
         claude_small_model: None,
         codex_model: None,
+        codex_subagent_model: None,
         gemini_model: None,
         preferred_key_id: preferred.map(str::to_string),
+        claude_extra_config_id: None,
     }
 }
 
@@ -243,9 +252,12 @@ fn active(gateway_id: &str, key_id: &str) -> ActiveConfig {
         key_name: None,
         key_value: None,
         claude_model: None,
+        claude_subagent_model: None,
         claude_small_model: None,
         codex_model: None,
+        codex_subagent_model: None,
         gemini_model: None,
+        claude_extra_config_id: None,
         auto_switch: false,
         applied_at: None,
         last_switched_at: None,

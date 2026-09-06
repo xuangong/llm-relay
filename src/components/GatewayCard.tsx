@@ -4,6 +4,8 @@ import { toast } from "sonner";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { ClaudeExtraConfigDialog } from "@/components/ClaudeExtraConfigDialog";
+import { ModelSettings } from "@/components/ModelSettings";
 import {
   Select,
   SelectContent,
@@ -17,10 +19,21 @@ import {
   ModelList,
   ApplyConfigParams,
   HealthLogEntry,
+  ClaudeExtraConfig,
 } from "@/lib/api";
 import * as api from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n } from "@/lib/i18n";
+import {
+  claudeRoleModels,
+  codexModels as getCodexModels,
+  geminiModels as getGeminiModels,
+  preferredClaudeCodeModel,
+  preferredCodexModel,
+  preferredCodexSubagentModel,
+  preferredGeminiModel,
+  reconcileModelSelection,
+} from "@/lib/models";
 import { SignInDialog } from "./SignInDialog";
 
 interface ProxyTrafficEntry {
@@ -49,10 +62,15 @@ interface GatewayCardProps {
   isActive: boolean;
   activeKeyId: string | null;
   activeKeyName: string | null;
+  extraConfigs: ClaudeExtraConfig[];
+  onExtraConfigsChanged: (configs: ClaudeExtraConfig[]) => void;
+  managedClients: api.ManagedClients;
   activeModels: {
     claude: string | null;
+    claudeSubagent: string | null;
     claudeSmall: string | null;
     codex: string | null;
+    codexSubagent: string | null;
     gemini: string | null;
   };
   dragHandleProps?: Record<string, unknown>;
@@ -69,6 +87,9 @@ export function GatewayCard({
   isActive,
   activeKeyId,
   activeKeyName,
+  extraConfigs,
+  onExtraConfigsChanged,
+  managedClients,
   activeModels,
   dragHandleProps,
   canPinTop,
@@ -81,17 +102,23 @@ export function GatewayCard({
   const [expanded, setExpanded] = useState(isActive);
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [models, setModels] = useState<ModelList | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [selectedKeyId, setSelectedKeyId] = useState<string | null>(activeKeyId);
   const [claudeModel, setClaudeModel] = useState(gateway.claudeModel || (isActive ? activeModels.claude : null) || "");
+  const [claudeSubagentModel, setClaudeSubagentModel] = useState(gateway.claudeSubagentModel || (isActive ? activeModels.claudeSubagent : null) || "");
   const [claudeSmallModel, setClaudeSmallModel] = useState(gateway.claudeSmallModel || (isActive ? activeModels.claudeSmall : null) || "");
   const [codexModel, setCodexModel] = useState(gateway.codexModel || (isActive ? activeModels.codex : null) || "");
+  const [codexSubagentModel, setCodexSubagentModel] = useState(gateway.codexSubagentModel || (isActive ? activeModels.codexSubagent : null) || "");
   const [geminiModel, setGeminiModel] = useState(gateway.geminiModel || (isActive ? activeModels.gemini : null) || "");
+  const [claudeExtraConfigId, setClaudeExtraConfigId] = useState<string | null>(gateway.claudeExtraConfigId);
+  const [extraDialogOpen, setExtraDialogOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [healthLog, setHealthLog] = useState<HealthLogEntry[]>([]);
   const [trafficLog, setTrafficLog] = useState<ProxyTrafficEntry[]>([]);
   const trafficLogRef = useRef<ProxyTrafficEntry[]>([]);
+  const modelRequestRef = useRef(0);
   const [showSignIn, setShowSignIn] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState(gateway.name);
@@ -105,6 +132,10 @@ export function GatewayCard({
   useEffect(() => {
     setNameDraft(gateway.name);
   }, [gateway.name]);
+
+  useEffect(() => {
+    if (!editMode) setClaudeExtraConfigId(gateway.claudeExtraConfigId);
+  }, [gateway.claudeExtraConfigId, editMode]);
 
   const cancelRename = () => {
     setNameDraft(gateway.name);
@@ -171,6 +202,64 @@ export function GatewayCard({
     loadHealthLog();
   }, [expanded]);
 
+  const applyModelCatalog = (modelsResult: ModelList | null) => {
+    setModels(modelsResult);
+    const modelIds = modelsResult?.data.map((model) => model.id) ?? [];
+    const claudeMainCandidates = claudeRoleModels(modelIds, "main");
+    const claudeSubagentCandidates = claudeRoleModels(modelIds, "subagent");
+    const claudeHaikuCandidates = claudeRoleModels(modelIds, "haiku");
+    const codexCandidates = getCodexModels(modelIds);
+    const geminiCandidates = getGeminiModels(modelIds);
+
+    if (managedClients.claude) {
+      setClaudeModel((current) =>
+        reconcileModelSelection(current, claudeMainCandidates, preferredClaudeCodeModel(modelIds, "main")),
+      );
+      setClaudeSubagentModel((current) =>
+        reconcileModelSelection(current, claudeSubagentCandidates, preferredClaudeCodeModel(modelIds, "subagent")),
+      );
+      setClaudeSmallModel((current) =>
+        reconcileModelSelection(current, claudeHaikuCandidates, preferredClaudeCodeModel(modelIds, "haiku")),
+      );
+    }
+    if (managedClients.codex) {
+      const preferredCodex = preferredCodexModel(modelIds);
+      setCodexModel((current) =>
+        reconcileModelSelection(current, codexCandidates, preferredCodex),
+      );
+      setCodexSubagentModel((current) =>
+        reconcileModelSelection(
+          current,
+          codexCandidates,
+          preferredCodexSubagentModel(
+            modelIds,
+            codexCandidates.includes(codexModel) ? codexModel : preferredCodex,
+          ),
+        ),
+      );
+    }
+    if (managedClients.gemini) {
+      setGeminiModel((current) =>
+        reconcileModelSelection(current, geminiCandidates, preferredGeminiModel(modelIds)),
+      );
+    }
+  };
+
+  const loadModelsForKey = async (keyValue?: string) => {
+    const requestId = ++modelRequestRef.current;
+    applyModelCatalog(null);
+    setModelsLoading(true);
+    try {
+      const modelsResult = await api.fetchModels(gateway.id, keyValue);
+      if (requestId !== modelRequestRef.current) return;
+      applyModelCatalog(modelsResult);
+    } catch (error) {
+      throw error;
+    } finally {
+      if (requestId === modelRequestRef.current) setModelsLoading(false);
+    }
+  };
+
   const loadKeysAndModels = async (sessionToken?: string) => {
     setLoading(true);
     try {
@@ -189,32 +278,7 @@ export function GatewayCard({
         setSelectedKeyId(selectedKey.id);
       }
 
-      const modelsResult = await api.fetchModels(gateway.id, keyToUse);
-      setModels(modelsResult);
-
-      // Auto-suggest models
-      if (modelsResult.data.length > 0) {
-        const modelIds = modelsResult.data.map((m) => m.id).sort((a, b) => b.localeCompare(a));
-        if (!claudeModel) {
-          const claude = modelIds.find((id) => id.toLowerCase().includes("opus")) ||
-            modelIds.find((id) => id.toLowerCase().includes("claude")) || "";
-          setClaudeModel(claude);
-        }
-        if (!claudeSmallModel) {
-          const small = modelIds.find((id) => id.toLowerCase().includes("haiku")) ||
-            modelIds.find((id) => id.toLowerCase().includes("claude")) || "";
-          setClaudeSmallModel(small);
-        }
-        if (!codexModel) {
-          const codex = modelIds.find((id) => /gpt-[5-9]/i.test(id)) ||
-            modelIds.find((id) => /\bo[1-9]/i.test(id)) || "";
-          setCodexModel(codex);
-        }
-        if (!geminiModel) {
-          const gemini = modelIds.find((id) => id.toLowerCase().includes("gemini")) || "";
-          setGeminiModel(gemini);
-        }
-      }
+      await loadModelsForKey(keyToUse);
     } catch (err) {
       console.error("Failed to load keys/models:", err);
     } finally {
@@ -234,9 +298,12 @@ export function GatewayCard({
     setEditMode(false);
     setSelectedKeyId(activeKeyId);
     setClaudeModel(gateway.claudeModel || (isActive ? activeModels.claude : null) || "");
+    setClaudeSubagentModel(gateway.claudeSubagentModel || (isActive ? activeModels.claudeSubagent : null) || "");
     setClaudeSmallModel(gateway.claudeSmallModel || (isActive ? activeModels.claudeSmall : null) || "");
     setCodexModel(gateway.codexModel || (isActive ? activeModels.codex : null) || "");
+    setCodexSubagentModel(gateway.codexSubagentModel || (isActive ? activeModels.codexSubagent : null) || "");
     setGeminiModel(gateway.geminiModel || (isActive ? activeModels.gemini : null) || "");
+    setClaudeExtraConfigId(gateway.claudeExtraConfigId);
   };
 
   const handleDone = async () => {
@@ -253,10 +320,14 @@ export function GatewayCard({
         keyId: selectedKey?.id,
         keyName: selectedKey?.name,
         keyValue: selectedKey?.key,
-        claudeModel: claudeModels.length > 0 ? (claudeModel || undefined) : undefined,
-        claudeSmallModel: claudeSmallModels.length > 0 ? (claudeSmallModel || undefined) : undefined,
-        codexModel: codexModels.length > 0 ? (codexModel || undefined) : undefined,
-        geminiModel: geminiModels.length > 0 ? (geminiModel || undefined) : undefined,
+        claudeModel: managedClients.claude && claudeMainModels.includes(claudeModel) ? claudeModel : undefined,
+        claudeSubagentModel: managedClients.claude && claudeSubagentModels.includes(claudeSubagentModel) ? claudeSubagentModel : undefined,
+        claudeSmallModel: managedClients.claude && claudeHaikuModels.includes(claudeSmallModel) ? claudeSmallModel : undefined,
+        codexModel: managedClients.codex && codexModels.includes(codexModel) ? codexModel : undefined,
+        codexSubagentModel: managedClients.codex && codexModels.includes(codexSubagentModel) ? codexSubagentModel : undefined,
+        geminiModel: managedClients.gemini && geminiModels.includes(geminiModel) ? geminiModel : undefined,
+        claudeExtraConfigId: managedClients.claude ? claudeExtraConfigId ?? undefined : undefined,
+        claudeExtraConfigSet: managedClients.claude,
       };
       await api.applyConfig(params);
 
@@ -296,32 +367,27 @@ export function GatewayCard({
   // Reload models when key changes in edit mode
   const handleKeyChange = async (keyId: string) => {
     setSelectedKeyId(keyId);
-    const key = keys.find((k) => k.id === keyId);
-    if (key) {
-      try {
-        const modelsResult = await api.fetchModels(gateway.id, key.key);
-        setModels(modelsResult);
-      } catch {
-        // keep existing models
-      }
+    const key = keys.find((candidate) => candidate.id === keyId);
+    if (!key) {
+      modelRequestRef.current += 1;
+      applyModelCatalog(null);
+      setModelsLoading(false);
+      return;
+    }
+    try {
+      await loadModelsForKey(key.key);
+    } catch {
+      // The latest failed request already cleared stale models.
     }
   };
 
   // Model filtering
   const allModels = models?.data.map((m) => m.id) || [];
-  const claudeModels = allModels.filter((m) =>
-    m.toLowerCase().includes("claude") && !m.toLowerCase().includes("haiku")
-  );
-  const claudeSmallModels = allModels.filter((m) =>
-    m.toLowerCase().includes("claude")
-  );
-  const codexModels = allModels.filter((m) => {
-    const lower = m.toLowerCase();
-    return /gpt-[5-9]/.test(lower) || /\bo[1-9]/.test(lower);
-  });
-  const geminiModels = allModels.filter((m) =>
-    m.toLowerCase().includes("gemini")
-  );
+  const claudeMainModels = claudeRoleModels(allModels, "main");
+  const claudeSubagentModels = claudeRoleModels(allModels, "subagent");
+  const claudeHaikuModels = claudeRoleModels(allModels, "haiku");
+  const codexModels = getCodexModels(allModels);
+  const geminiModels = getGeminiModels(allModels);
 
   // Card border style: tri-state
   const cardClass = isActive
@@ -514,12 +580,30 @@ export function GatewayCard({
                           <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                             {t('gateway.models')}
                           </label>
-                          <div className="grid grid-cols-2 gap-2">
-                            <ModelSelect label={t('models.claude')} value={claudeModel} onChange={setClaudeModel} models={claudeModels} noModelsText={t('gateway.noModels')} />
-                            <ModelSelect label={t('models.claudeSmall')} value={claudeSmallModel} onChange={setClaudeSmallModel} models={claudeSmallModels} noModelsText={t('gateway.noModels')} />
-                            <ModelSelect label={t('models.codex')} value={codexModel} onChange={setCodexModel} models={codexModels} noModelsText={t('gateway.noModels')} />
-                            <ModelSelect label={t('models.gemini')} value={geminiModel} onChange={setGeminiModel} models={geminiModels} noModelsText={t('gateway.noModels')} />
-                          </div>
+                          <ModelSettings
+                            managedClients={managedClients}
+                            claudeModel={claudeModel}
+                            onClaudeModelChange={setClaudeModel}
+                            claudeModels={claudeMainModels}
+                            claudeSubagentModel={claudeSubagentModel}
+                            onClaudeSubagentModelChange={setClaudeSubagentModel}
+                            claudeSubagentModels={claudeSubagentModels}
+                            claudeHaikuModel={claudeSmallModel}
+                            onClaudeHaikuModelChange={setClaudeSmallModel}
+                            claudeHaikuModels={claudeHaikuModels}
+                            codexModel={codexModel}
+                            onCodexModelChange={setCodexModel}
+                            codexModels={codexModels}
+                            codexSubagentModel={codexSubagentModel}
+                            onCodexSubagentModelChange={setCodexSubagentModel}
+                            geminiModel={geminiModel}
+                            onGeminiModelChange={setGeminiModel}
+                            geminiModels={geminiModels}
+                            extraConfigs={extraConfigs}
+                            extraConfigId={claudeExtraConfigId}
+                            onExtraConfigChange={setClaudeExtraConfigId}
+                            onManageExtraConfigs={() => setExtraDialogOpen(true)}
+                          />
                         </div>
                       )}
 
@@ -538,7 +622,7 @@ export function GatewayCard({
                         <Button
                           size="sm"
                           onClick={handleDone}
-                          disabled={applying || !selectedKeyId}
+                          disabled={applying || modelsLoading || !selectedKeyId}
                           className="h-7 px-3 text-xs"
                         >
                           {applying ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
@@ -582,42 +666,50 @@ export function GatewayCard({
                           columns might still be null). */}
                       {(() => {
                         const c = gateway.claudeModel ?? (isActive ? activeModels.claude : null);
+                        const ca = gateway.claudeSubagentModel ?? (isActive ? activeModels.claudeSubagent : null);
                         const cs = gateway.claudeSmallModel ?? (isActive ? activeModels.claudeSmall : null);
                         const cx = gateway.codexModel ?? (isActive ? activeModels.codex : null);
+                        const cxs = gateway.codexSubagentModel ?? (isActive ? activeModels.codexSubagent : null);
                         const g = gateway.geminiModel ?? (isActive ? activeModels.gemini : null);
-                        if (!c && !cs && !cx && !g) return null;
-                        return (
-                        <div className="space-y-1.5">
-                          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                            {t('gateway.models')}
-                          </label>
-                          <div className="grid grid-cols-2 gap-1.5">
-                            {c && (
-                              <div className="text-[10px] text-muted-foreground">
-                                <span className="font-medium">{t('models.claude')}:</span>{" "}
-                                <span className="font-mono">{c}</span>
-                              </div>
-                            )}
-                            {cs && (
-                              <div className="text-[10px] text-muted-foreground">
-                                <span className="font-medium">{t('models.claudeSmall')}:</span>{" "}
-                                <span className="font-mono">{cs}</span>
-                              </div>
-                            )}
-                            {cx && (
-                              <div className="text-[10px] text-muted-foreground">
-                                <span className="font-medium">{t('models.codex')}:</span>{" "}
-                                <span className="font-mono">{cx}</span>
-                              </div>
-                            )}
-                            {g && (
-                              <div className="text-[10px] text-muted-foreground">
-                                <span className="font-medium">{t('models.gemini')}:</span>{" "}
-                                <span className="font-mono">{g}</span>
-                              </div>
-                            )}
+                        const showCodex = managedClients.codex && (cx || cxs);
+                        const showClaude = managedClients.claude && (c || ca || cs);
+                        const showGemini = managedClients.gemini && g;
+                        if (!showCodex && !showClaude && !showGemini) return null;
+                        const item = (label: string, value: string | null) => value && (
+                          <div className="min-w-0 text-[10px] text-muted-foreground">
+                            <span className="font-medium">{label}:</span>{" "}
+                            <span className="break-all font-mono">{value}</span>
                           </div>
-                        </div>
+                        );
+                        return (
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                              {t('gateway.models')}
+                            </label>
+                            <div className="space-y-1.5">
+                              {showCodex && (
+                                <div className="w-full space-y-1 rounded-md border border-border/50 bg-secondary/10 px-2.5 py-2">
+                                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{t('models.codexRegion')}</div>
+                                  {item(t('models.codex'), cx)}
+                                  {item(t('models.codexSubagent'), cxs)}
+                                </div>
+                              )}
+                              {showClaude && (
+                                <div className="w-full space-y-1 rounded-md border border-border/50 bg-secondary/10 px-2.5 py-2">
+                                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{t('models.claudeRegion')}</div>
+                                  {item(t('models.claude'), c)}
+                                  {item(t('models.claudeSubagent'), ca)}
+                                  {item(t('models.claudeHaiku'), cs)}
+                                </div>
+                              )}
+                              {showGemini && (
+                                <div className="w-full space-y-1 rounded-md border border-border/50 bg-secondary/10 px-2.5 py-2">
+                                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{t('models.geminiRegion')}</div>
+                                  {item(t('models.gemini'), g)}
+                                </div>
+                              )}
+                            </div>
+                          </div>
                         );
                       })()}
 
@@ -656,6 +748,16 @@ export function GatewayCard({
         onOpenChange={setShowSignIn}
         gatewayUrl={gateway.url}
         onComplete={handleSignInComplete}
+      />
+      <ClaudeExtraConfigDialog
+        open={extraDialogOpen}
+        onOpenChange={setExtraDialogOpen}
+        configs={extraConfigs}
+        selectedId={claudeExtraConfigId}
+        onChanged={(configs, selectedId) => {
+          onExtraConfigsChanged(configs);
+          if (selectedId !== undefined) setClaudeExtraConfigId(selectedId);
+        }}
       />
     </>
   );
@@ -768,48 +870,6 @@ function TrafficMonitor({ log }: { log: ProxyTrafficEntry[] }) {
           );
         })}
       </div>
-    </div>
-  );
-}
-
-function ModelSelect({
-  label,
-  value,
-  onChange,
-  models,
-  noModelsText,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  models: string[];
-  noModelsText?: string;
-}) {
-  if (models.length === 0) {
-    return (
-      <div className="space-y-1">
-        <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
-        <div className="h-7 flex items-center px-2 text-xs text-muted-foreground/40 italic">
-          {noModelsText || "No models available"}
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="space-y-1">
-      <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger className="h-7 text-xs border-border/60 transition-elegant-fast bg-background/50">
-          <SelectValue placeholder="—" />
-        </SelectTrigger>
-        <SelectContent className="border-border/60">
-          {models.map((m) => (
-            <SelectItem key={m} value={m} className="text-xs font-mono cursor-pointer">
-              {m}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
     </div>
   );
 }

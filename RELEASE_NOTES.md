@@ -1,4 +1,4 @@
-# LLM Relay v0.4.1
+# LLM Relay v0.5.0
 
 ## 新增
 
@@ -46,8 +46,8 @@
 
 | 平台 | 文件 |
 |------|------|
-| macOS Universal | `LLM Relay_0.4.1_universal.dmg` |
-| Windows GUI | `LLM Relay_0.4.1_x64-setup.exe` |
+| macOS Universal | `LLM Relay_0.5.0_universal.dmg` |
+| Windows GUI | `LLM Relay_0.5.0_x64-setup.exe` |
 | TUI/agent Linux x64 | `llm-relay-agent-x86_64-unknown-linux-gnu`, `llm-relay-tui-x86_64-unknown-linux-gnu` |
 | TUI/agent macOS Apple Silicon | `llm-relay-agent-aarch64-apple-darwin`, `llm-relay-tui-aarch64-apple-darwin` |
 | TUI/agent macOS Intel | `llm-relay-agent-x86_64-apple-darwin`, `llm-relay-tui-x86_64-apple-darwin` |

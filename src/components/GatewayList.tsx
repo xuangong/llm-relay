@@ -17,7 +17,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GatewayCard } from "./GatewayCard";
-import type { GatewayWithHealth } from "@/lib/api";
+import type { ClaudeExtraConfig, GatewayWithHealth } from "@/lib/api";
 import * as api from "@/lib/api";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { toast } from "sonner";
@@ -28,10 +28,15 @@ interface GatewayListProps {
   activeGatewayId: string | null;
   activeKeyId: string | null;
   activeKeyName: string | null;
+  extraConfigs: ClaudeExtraConfig[];
+  onExtraConfigsChanged: (configs: ClaudeExtraConfig[]) => void;
+  managedClients: import("@/lib/api").ManagedClients;
   activeModels: {
     claude: string | null;
+    claudeSubagent: string | null;
     claudeSmall: string | null;
     codex: string | null;
+    codexSubagent: string | null;
     gemini: string | null;
   };
   onRefresh: () => void;
@@ -42,6 +47,9 @@ function SortableGatewayCard({
   isActive,
   activeKeyId,
   activeKeyName,
+  extraConfigs,
+  onExtraConfigsChanged,
+  managedClients,
   activeModels,
   canPinTop,
   onPinTop,
@@ -53,10 +61,15 @@ function SortableGatewayCard({
   isActive: boolean;
   activeKeyId: string | null;
   activeKeyName: string | null;
+  extraConfigs: ClaudeExtraConfig[];
+  onExtraConfigsChanged: (configs: ClaudeExtraConfig[]) => void;
+  managedClients: import("@/lib/api").ManagedClients;
   activeModels: {
     claude: string | null;
+    claudeSubagent: string | null;
     claudeSmall: string | null;
     codex: string | null;
+    codexSubagent: string | null;
     gemini: string | null;
   };
   canPinTop: boolean;
@@ -88,6 +101,9 @@ function SortableGatewayCard({
         isActive={isActive}
         activeKeyId={activeKeyId}
         activeKeyName={activeKeyName}
+        extraConfigs={extraConfigs}
+        onExtraConfigsChanged={onExtraConfigsChanged}
+        managedClients={managedClients}
         activeModels={activeModels}
         dragHandleProps={listeners}
         canPinTop={canPinTop}
@@ -105,6 +121,9 @@ export function GatewayList({
   activeGatewayId,
   activeKeyId,
   activeKeyName,
+  extraConfigs,
+  onExtraConfigsChanged,
+  managedClients,
   activeModels,
   onRefresh,
 }: GatewayListProps) {
@@ -202,6 +221,9 @@ export function GatewayList({
               isActive={activeGatewayId === gw.id}
               activeKeyId={activeKeyId}
               activeKeyName={activeKeyName}
+              extraConfigs={extraConfigs}
+              onExtraConfigsChanged={onExtraConfigsChanged}
+              managedClients={managedClients}
               activeModels={activeModels}
               canPinTop={i > 0}
               onPinTop={() => handlePinTop(gw.id)}

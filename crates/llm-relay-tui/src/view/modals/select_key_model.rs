@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 pub fn render(frame: &mut Frame, area: Rect, form: &SelectKeyModelForm) {
-    let dialog = centered(60, 14, area);
+    let dialog = centered(64, 16, area);
     frame.render_widget(Clear, dialog);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -47,8 +47,25 @@ pub fn render(frame: &mut Frame, area: Rect, form: &SelectKeyModelForm) {
 
         if let Some(cat) = &form.catalog {
             lines.push(model_line("Claude", &cat.claude, form.claude_idx, form.focus == SelectField::Claude));
-            lines.push(model_line("Claude Small", &cat.claude, form.claude_small_idx, form.focus == SelectField::ClaudeSmall));
+            lines.push(model_line(
+                "Claude Subagent",
+                &cat.claude,
+                form.claude_subagent_idx,
+                form.focus == SelectField::ClaudeSubagent,
+            ));
+            lines.push(model_line(
+                "Claude Haiku",
+                &cat.claude,
+                form.claude_haiku_idx,
+                form.focus == SelectField::ClaudeHaiku,
+            ));
             lines.push(model_line("Codex", &cat.codex, form.codex_idx, form.focus == SelectField::Codex));
+            lines.push(model_line(
+                "Codex Subagent",
+                &cat.codex,
+                form.codex_subagent_idx,
+                form.focus == SelectField::CodexSubagent,
+            ));
             lines.push(model_line("Gemini", &cat.gemini, form.gemini_idx, form.focus == SelectField::Gemini));
         } else {
             lines.push(Line::from("No model catalog"));
@@ -72,7 +89,7 @@ fn field_line<'a>(label: &'a str, value: &'a str, focused: bool) -> Line<'a> {
     let arrow = if focused { "◄ " } else { "  " };
     let arrow_r = if focused { " ►" } else { "" };
     Line::from(vec![
-        Span::styled(format!("{label:>12}: "), Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{label:>16}: "), Style::default().fg(Color::DarkGray)),
         Span::raw(arrow),
         Span::styled(value, style),
         Span::raw(arrow_r),

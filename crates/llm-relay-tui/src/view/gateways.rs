@@ -90,8 +90,16 @@ fn row_to_item(_i: usize, row: &GatewayRow, _selected: bool) -> ListItem<'_> {
         // Models
         let models: Vec<String> = [
             row.claude_model.as_deref().map(|m| format!("claude={m}")),
-            row.claude_small_model.as_deref().map(|m| format!("claude_small={m}")),
+            row.claude_subagent_model
+                .as_deref()
+                .map(|m| format!("claude_subagent={m}")),
+            row.claude_small_model
+                .as_deref()
+                .map(|m| format!("claude_haiku={m}")),
             row.codex_model.as_deref().map(|m| format!("codex={m}")),
+            row.codex_subagent_model
+                .as_deref()
+                .map(|m| format!("codex_subagent={m}")),
             row.gemini_model.as_deref().map(|m| format!("gemini={m}")),
         ]
         .into_iter()

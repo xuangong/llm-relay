@@ -1,8 +1,8 @@
 use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem};
 use tauri::Manager;
 
-use llm_relay_core::AppError;
 use crate::AppState;
+use llm_relay_core::AppError;
 
 /// Create the system tray menu.
 ///
@@ -43,7 +43,10 @@ pub fn create_tray_menu(
         for gw in &gateways {
             let is_active = active_gw_id == Some(gw.gateway.id.as_str());
             let label = if gw.is_healthy {
-                let latency = gw.latency_ms.map(|ms| format!("{ms}ms")).unwrap_or_default();
+                let latency = gw
+                    .latency_ms
+                    .map(|ms| format!("{ms}ms"))
+                    .unwrap_or_default();
                 format!("{} ({})", gw.gateway.name, latency)
             } else {
                 format!("{} (offline)", gw.gateway.name)
@@ -66,9 +69,14 @@ pub fn create_tray_menu(
 
     // Key info
     if let Some(ref key_name) = active_config.key_name {
-        let key_info =
-            MenuItem::with_id(app, "key_info", &format!("Key: {key_name}"), false, None::<&str>)
-                .map_err(|e| AppError::Config(format!("Failed to create key info: {e}")))?;
+        let key_info = MenuItem::with_id(
+            app,
+            "key_info",
+            &format!("Key: {key_name}"),
+            false,
+            None::<&str>,
+        )
+        .map_err(|e| AppError::Config(format!("Failed to create key info: {e}")))?;
         builder = builder.item(&key_info).separator();
     }
 
@@ -90,9 +98,8 @@ pub fn create_tray_menu(
     builder = builder.item(&auto_item).separator();
 
     // Show main window
-    let show_main =
-        MenuItem::with_id(app, "show_main", "Open Main Window", true, None::<&str>)
-            .map_err(|e| AppError::Config(format!("Failed to create show_main: {e}")))?;
+    let show_main = MenuItem::with_id(app, "show_main", "Open Main Window", true, None::<&str>)
+        .map_err(|e| AppError::Config(format!("Failed to create show_main: {e}")))?;
     builder = builder.item(&show_main);
 
     // Quit
@@ -188,14 +195,31 @@ async fn handle_gateway_switch(app: &tauri::AppHandle, state: &AppState, gw_id: 
         .as_ref()
         .filter(|c| c.gateway_id.as_deref() == Some(gw.id.as_str()));
     let models = llm_relay_core::ipc::protocol::ModelSelection {
-        claude: gw.claude_model.clone()
+        claude: gw
+            .claude_model
+            .clone()
             .or_else(|| prev.and_then(|c| c.claude_model.clone())),
-        claude_small: gw.claude_small_model.clone()
+        claude_subagent: gw
+            .claude_subagent_model
+            .clone()
+            .or_else(|| prev.and_then(|c| c.claude_subagent_model.clone())),
+        claude_small: gw
+            .claude_small_model
+            .clone()
             .or_else(|| prev.and_then(|c| c.claude_small_model.clone())),
-        codex: gw.codex_model.clone()
+        codex: gw
+            .codex_model
+            .clone()
             .or_else(|| prev.and_then(|c| c.codex_model.clone())),
-        gemini: gw.gemini_model.clone()
+        codex_subagent: gw
+            .codex_subagent_model
+            .clone()
+            .or_else(|| prev.and_then(|c| c.codex_subagent_model.clone())),
+        gemini: gw
+            .gemini_model
+            .clone()
             .or_else(|| prev.and_then(|c| c.gemini_model.clone())),
+        claude_extra: llm_relay_core::ipc::protocol::ClaudeExtraSelection::Inherit,
     };
 
     if let Err(e) = state.service.set_active(gw_uuid, key_uuid, models).await {

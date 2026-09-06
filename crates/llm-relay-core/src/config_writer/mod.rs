@@ -1,11 +1,12 @@
 use crate::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use toml_edit::DocumentMut;
 
+pub mod lifecycle;
 pub mod snapshot;
 
 fn home_dir() -> PathBuf {
@@ -25,6 +26,21 @@ pub struct ClaudeSnapshot {
     pub anthropic_model: Option<String>,
     pub anthropic_small_fast_model: Option<String>,
     pub anthropic_auth_token: Option<String>,
+    #[serde(default)]
+    pub claude_code_subagent_model: Option<String>,
+    #[serde(default)]
+    pub anthropic_default_haiku_model: Option<String>,
+    #[serde(default)]
+    pub anthropic_custom_headers: Option<String>,
+    /// False identifies snapshots written before the three fields above were captured.
+    #[serde(default)]
+    pub extended_fields_captured: bool,
+    /// Original values for every environment key ever managed by an Extra config.
+    /// `None` means the key did not exist before relay management began.
+    #[serde(default)]
+    pub extra_env_originals: BTreeMap<String, Option<String>>,
+    #[serde(default)]
+    pub extra_env_captured: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -36,6 +52,18 @@ pub struct CodexSnapshot {
     /// Serialized TOML of `[model_providers.copilot_gateway]` if it existed,
     /// so we can put the original subtable back verbatim.
     pub copilot_gateway_provider_toml: Option<String>,
+    #[serde(default)]
+    pub model_reasoning_effort: Option<String>,
+    /// False identifies snapshots written before main-model effort was captured.
+    #[serde(default)]
+    pub special_fields_captured: bool,
+    #[serde(default)]
+    pub default_subagent_model: Option<String>,
+    #[serde(default)]
+    pub default_subagent_reasoning_effort: Option<String>,
+    /// Independent marker because older development snapshots captured only main effort.
+    #[serde(default)]
+    pub codex_subagent_defaults_captured: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -60,10 +88,12 @@ fn atomic_write(path: &PathBuf, content: &[u8]) -> Result<(), AppError> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let file_name = path.file_name()
+    let file_name = path
+        .file_name()
         .ok_or_else(|| AppError::Config("Invalid file name".to_string()))?
         .to_string_lossy();
-    let mut tmp = path.parent()
+    let mut tmp = path
+        .parent()
         .ok_or_else(|| AppError::Config("Invalid path".to_string()))?
         .to_path_buf();
     tmp.push(format!("{}.tmp.{}", file_name, ts));
@@ -109,7 +139,10 @@ fn claude_settings_path() -> PathBuf {
 /// strips up to two known suffixes (`-high|-xhigh` → effort, `-1m` → context1m)
 /// from the tail in any order. Non-Claude ids pass through unchanged.
 fn decompose_claude_id(id: &str) -> (String, Option<String>, bool) {
-    if !id.starts_with("claude-") {
+    if !id
+        .get(.."claude-".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-"))
+    {
         return (id.to_string(), None, false);
     }
     let mut rest = id.to_string();
@@ -131,19 +164,187 @@ fn decompose_claude_id(id: &str) -> (String, Option<String>, bool) {
     (rest, effort, context1m)
 }
 
+fn is_gpt_model(id: &str) -> bool {
+    crate::model_id::without_context_suffix(id)
+        .rsplit('/')
+        .next()
+        .unwrap_or(id)
+        .to_ascii_lowercase()
+        .starts_with("gpt")
+}
+
+/// Translate a saved gateway model id into the value Claude Code reads.
+/// GPT models advertise their extended context through a model-name suffix.
+fn claude_settings_model_id(id: &str, is_main: bool) -> String {
+    if is_main {
+        crate::model_id::normalize_claude_main_model(id)
+    } else {
+        id.to_string()
+    }
+}
+
+/// Build the three role values written to Claude Code. Normally Claude composite
+/// ids are reduced to their bare base and the relay supplies their modifiers on
+/// the wire. When two roles select different variants of the same base, however,
+/// the bare ids would be indistinguishable in the request body. Keep those
+/// composite ids so the proxy can resolve each role exactly.
+fn claude_settings_role_ids(roles: [Option<&str>; 3]) -> [Option<String>; 3] {
+    let conflicting = |index: usize, id: &str| {
+        let (id, bracket_context) = crate::model_id::split_context_suffix(id);
+        if !id
+            .get(.."claude-".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-"))
+        {
+            return false;
+        }
+        let (base, effort, context1m) = decompose_claude_id(id);
+        roles.iter().enumerate().any(|(other_index, other)| {
+            if other_index == index {
+                return false;
+            }
+            let Some(other) = other else { return false };
+            let (other, other_bracket_context) = crate::model_id::split_context_suffix(other);
+            if !other
+                .get(.."claude-".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-"))
+            {
+                return false;
+            }
+            let (other_base, other_effort, other_composite_context) = decompose_claude_id(other);
+            let context1m = context1m || bracket_context;
+            let other_context1m = other_composite_context || other_bracket_context;
+            base.eq_ignore_ascii_case(&other_base)
+                && (effort != other_effort || context1m != other_context1m)
+        })
+    };
+
+    std::array::from_fn(|index| {
+        roles[index].map(|id| {
+            let (id, _) = crate::model_id::split_context_suffix(id);
+            let normalized = if conflicting(index, id) {
+                id.to_string()
+            } else if id
+                .get(.."claude-".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-"))
+            {
+                decompose_claude_id(id).0
+            } else {
+                id.to_string()
+            };
+            if index == 0 {
+                claude_settings_model_id(&normalized, true)
+            } else {
+                normalized
+            }
+        })
+    })
+}
+
+fn write_claude_env(
+    settings: &mut Value,
+    base_url: &str,
+    api_key: &str,
+    model: Option<&str>,
+    subagent_model: Option<&str>,
+    haiku_model: Option<&str>,
+    extra_env: Option<&BTreeMap<String, String>>,
+    snapshot: Option<&ClaudeSnapshot>,
+) -> Result<bool, AppError> {
+    let original = settings.clone();
+    let [model, subagent_model, haiku_model] =
+        claude_settings_role_ids([model, subagent_model, haiku_model]);
+    let remove_custom_headers = [
+        model.as_deref(),
+        subagent_model.as_deref(),
+        haiku_model.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(is_gpt_model);
+
+    let settings_obj = settings
+        .as_object_mut()
+        .ok_or_else(|| AppError::Config("~/.claude/settings.json must be a JSON object".into()))?;
+    let env = settings_obj
+        .entry("env")
+        .or_insert_with(|| serde_json::json!({}));
+    let env_obj = env.as_object_mut().ok_or_else(|| {
+        AppError::Config("~/.claude/settings.json env must be a JSON object".into())
+    })?;
+
+    if let Some(snapshot) = snapshot.filter(|snapshot| snapshot.extra_env_captured) {
+        for (key, original) in &snapshot.extra_env_originals {
+            if extra_env.is_some_and(|extra| extra.contains_key(key)) {
+                continue;
+            }
+            match original {
+                Some(value) => {
+                    env_obj.insert(key.clone(), Value::String(value.clone()));
+                }
+                None => {
+                    env_obj.remove(key);
+                }
+            }
+        }
+    }
+    if let Some(extra_env) = extra_env {
+        for (key, value) in extra_env {
+            env_obj.insert(key.clone(), Value::String(value.clone()));
+        }
+    }
+
+    let token_already_present = env_obj
+        .get("ANTHROPIC_AUTH_TOKEN")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    let token_to_write = (!token_already_present).then_some(api_key);
+    let matches = |key: &str, desired: Option<&str>| match desired {
+        Some(value) => env_obj.get(key).and_then(|v| v.as_str()) == Some(value),
+        None => !env_obj.contains_key(key),
+    };
+    let core_matches = token_to_write.is_none_or(|token| {
+        env_obj.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) == Some(token)
+    }) && env_obj.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str())
+        == Some(base_url)
+        && matches("ANTHROPIC_MODEL", model.as_deref())
+        && matches("CLAUDE_CODE_SUBAGENT_MODEL", subagent_model.as_deref())
+        && matches("ANTHROPIC_DEFAULT_HAIKU_MODEL", haiku_model.as_deref())
+        && (haiku_model.is_none() || !env_obj.contains_key("ANTHROPIC_SMALL_FAST_MODEL"))
+        && (!remove_custom_headers || !env_obj.contains_key("ANTHROPIC_CUSTOM_HEADERS"));
+
+    if let Some(token) = token_to_write {
+        env_obj.insert("ANTHROPIC_AUTH_TOKEN".into(), Value::String(token.into()));
+    }
+    env_obj.insert("ANTHROPIC_BASE_URL".into(), Value::String(base_url.into()));
+    let mut apply = |key: &str, value: Option<String>| match value {
+        Some(value) => {
+            env_obj.insert(key.into(), Value::String(value));
+        }
+        None => {
+            env_obj.remove(key);
+        }
+    };
+    apply("ANTHROPIC_MODEL", model);
+    apply("CLAUDE_CODE_SUBAGENT_MODEL", subagent_model);
+    let replace_legacy_small_model = haiku_model.is_some();
+    apply("ANTHROPIC_DEFAULT_HAIKU_MODEL", haiku_model);
+    if replace_legacy_small_model {
+        env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
+    }
+    if remove_custom_headers {
+        env_obj.remove("ANTHROPIC_CUSTOM_HEADERS");
+    }
+    Ok(!core_matches || *settings != original)
+}
+
 pub fn write_claude_config(
     base_url: &str,
     api_key: &str,
     model: Option<&str>,
-    small_model: Option<&str>,
+    subagent_model: Option<&str>,
+    haiku_model: Option<&str>,
 ) -> Result<(), AppError> {
     let path = claude_settings_path();
-
-    // ANTHROPIC_MODEL must be the bare base id; any -xhigh / -1m suffix is an
-    // internal selection signal the relay applies per-request on the wire
-    // (see proxy_server), not user-facing config. Small model is written
-    // as-is (it never needs modifiers).
-    let big_base: Option<String> = model.map(|m| decompose_claude_id(m).0);
 
     // Read existing settings or start fresh
     let mut settings: Value = if path.exists() {
@@ -153,77 +354,17 @@ pub fn write_claude_config(
         serde_json::json!({})
     };
 
-    // Build env block
-    let env = settings
-        .as_object_mut()
-        .unwrap()
-        .entry("env")
-        .or_insert_with(|| serde_json::json!({}));
-
-    // ANTHROPIC_AUTH_TOKEN policy: the relay does NOT manage this secret. If
-    // the user already set it (any value), leave it alone — Claude Code reads
-    // it before invoking the proxy and the relay rewrites x-api-key on the
-    // wire anyway. If it's missing, drop in a harmless placeholder so Claude
-    // Code's "token must be set" preflight passes; the placeholder never
-    // reaches upstream.
-    let token_already_present = env
-        .as_object()
-        .and_then(|o| o.get("ANTHROPIC_AUTH_TOKEN"))
-        .and_then(|v| v.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    let token_to_write: Option<&str> = if token_already_present {
-        None
-    } else {
-        Some(api_key)
-    };
-
-    // Check if the current config already matches
-    let needs_update = if let Some(env_obj) = env.as_object() {
-        let token_match = match token_to_write {
-            Some(t) => env_obj.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) == Some(t),
-            None => true,
-        };
-        !(token_match
-            && env_obj.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) == Some(base_url)
-            && (big_base.is_none()
-                || env_obj.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()) == big_base.as_deref())
-            && (small_model.is_none()
-                || env_obj.get("ANTHROPIC_SMALL_FAST_MODEL").and_then(|v| v.as_str()) == small_model))
-    } else {
-        true
-    };
-
-    if !needs_update {
-        // Config already correct, skip write
+    if !write_claude_env(
+        &mut settings,
+        base_url,
+        api_key,
+        model,
+        subagent_model,
+        haiku_model,
+        None,
+        None,
+    )? {
         return Ok(());
-    }
-
-    if let Some(env_obj) = env.as_object_mut() {
-        if let Some(t) = token_to_write {
-            env_obj.insert(
-                "ANTHROPIC_AUTH_TOKEN".to_string(),
-                Value::String(t.to_string()),
-            );
-        }
-        env_obj.insert(
-            "ANTHROPIC_BASE_URL".to_string(),
-            Value::String(base_url.to_string()),
-        );
-        if let Some(b) = big_base.as_deref() {
-            env_obj.insert("ANTHROPIC_MODEL".to_string(), Value::String(b.to_string()));
-        }
-        if let Some(m) = small_model {
-            env_obj.insert(
-                "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
-                Value::String(m.to_string()),
-            );
-        }
-        // ANTHROPIC_CUSTOM_HEADERS is left untouched on purpose. If the user
-        // already configured it (advanced setup), the relay must not clobber
-        // their override; if they didn't, we don't introduce an unfamiliar
-        // var — the relay injects the equivalent headers on the wire when the
-        // active model has -xhigh / -1m suffixes (see proxy_server).
     }
 
     let json_str = serde_json::to_string_pretty(&settings)?;
@@ -256,6 +397,8 @@ pub fn clear_claude_config() -> Result<(), AppError> {
         // relay without losing pre-existing config.
         env.remove("ANTHROPIC_BASE_URL");
         env.remove("ANTHROPIC_MODEL");
+        env.remove("CLAUDE_CODE_SUBAGENT_MODEL");
+        env.remove("ANTHROPIC_DEFAULT_HAIKU_MODEL");
         env.remove("ANTHROPIC_SMALL_FAST_MODEL");
     }
 
@@ -270,10 +413,123 @@ fn codex_dir() -> PathBuf {
     home_dir().join(".codex")
 }
 
+/// Return the base model that Codex should rewrite to a selected fast variant.
+/// Matching is deliberately case-sensitive: model ids are opaque, and only the
+/// gateway's canonical `gpt-…-fast` shape opts into this behavior.
+fn codex_fast_base(model: &str) -> Option<&str> {
+    model
+        .starts_with("gpt-")
+        .then(|| model.strip_suffix("-fast"))
+        .flatten()
+        .filter(|base| base.len() > "gpt-".len())
+}
+
+fn table_item_to_table(item: &toml_edit::Item) -> Option<toml_edit::Table> {
+    item.clone().into_table().ok()
+}
+
+/// Normalize an expanded or inline table to an editable expanded table without
+/// dropping any existing entries. Non-table values are replaced, matching the
+/// writer's historical recovery behavior for malformed config.
+fn ensure_table_item(item: &mut toml_edit::Item) -> &mut toml_edit::Table {
+    if item.as_table().is_none() {
+        let existing = std::mem::take(item);
+        *item = match existing.into_table() {
+            Ok(table) => toml_edit::Item::Table(table),
+            Err(_) => toml_edit::table(),
+        };
+    }
+    item.as_table_mut().expect("item was normalized to a table")
+}
+
+/// Restore the main-model effort displaced by Relay's fast-model default.
+fn restore_codex_main_effort(doc: &mut DocumentMut, snapshot: Option<&CodexSnapshot>) {
+    if doc
+        .get("model_reasoning_effort")
+        .and_then(|value| value.as_str())
+        != Some("high")
+    {
+        return;
+    }
+    match snapshot.and_then(|snap| snap.model_reasoning_effort.as_deref()) {
+        Some(effort) => doc["model_reasoning_effort"] = toml_edit::value(effort),
+        None => {
+            doc.as_table_mut().remove("model_reasoning_effort");
+        }
+    }
+}
+
+/// Apply all relay-owned Codex TOML values and report whether the document changed.
+fn update_codex_document(
+    doc: &mut DocumentMut,
+    base_url: &str,
+    model: Option<&str>,
+    subagent_model: Option<&str>,
+    snapshot: Option<&CodexSnapshot>,
+) -> bool {
+    let before = doc.to_string();
+    restore_codex_main_effort(doc, snapshot);
+
+    match model {
+        Some(model) => {
+            doc["model"] = toml_edit::value(model);
+            if codex_fast_base(model).is_some() {
+                doc["model_reasoning_effort"] = toml_edit::value("high");
+            }
+        }
+        None => {
+            doc.as_table_mut().remove("model");
+        }
+    }
+
+    match subagent_model {
+        Some(model) => {
+            doc["default_subagent_model"] = toml_edit::value(model);
+            doc["default_subagent_reasoning_effort"] = toml_edit::value("high");
+        }
+        None => {
+            doc.as_table_mut().remove("default_subagent_model");
+            doc.as_table_mut()
+                .remove("default_subagent_reasoning_effort");
+        }
+    }
+
+    doc["model_provider"] = toml_edit::value("copilot_gateway");
+    let providers = ensure_table_item(&mut doc["model_providers"]);
+    let gateway = ensure_table_item(&mut providers["copilot_gateway"]);
+    let url_with_slash = if base_url.ends_with('/') {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/")
+    };
+    gateway["name"] = toml_edit::value("Copilot Gateway");
+    gateway["base_url"] = toml_edit::value(url_with_slash);
+    gateway["env_key"] = toml_edit::value("OPENAI_API_KEY");
+    gateway["wire_api"] = toml_edit::value("responses");
+
+    before != doc.to_string()
+}
+
+fn clear_codex_document(doc: &mut DocumentMut) {
+    doc.as_table_mut().remove("model_reasoning_effort");
+    doc.as_table_mut().remove("default_subagent_model");
+    doc.as_table_mut()
+        .remove("default_subagent_reasoning_effort");
+    if let Some(gateway) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_like_mut())
+        .and_then(|providers| providers.get_mut("copilot_gateway"))
+        .and_then(|item| item.as_table_like_mut())
+    {
+        gateway.remove("base_url");
+    }
+}
+
 pub fn write_codex_config(
     base_url: &str,
     api_key: &str,
     model: Option<&str>,
+    subagent_model: Option<&str>,
 ) -> Result<(), AppError> {
     let dir = codex_dir();
     fs::create_dir_all(&dir)?;
@@ -313,44 +569,8 @@ pub fn write_codex_config(
         "".parse::<DocumentMut>().unwrap()
     };
 
-    // Check if config needs update
-    let url_with_slash = if base_url.ends_with('/') {
-        base_url.to_string()
-    } else {
-        format!("{base_url}/")
-    };
-
-    let needs_config_update = doc.get("model_provider").and_then(|v| v.as_str()) != Some("copilot_gateway")
-        || (model.is_some() && doc.get("model").and_then(|v| v.as_str()) != model)
-        || doc.get("model_providers")
-            .and_then(|mp| mp.get("copilot_gateway"))
-            .and_then(|gw| gw.get("base_url"))
-            .and_then(|u| u.as_str()) != Some(&url_with_slash);
-
-    if !needs_config_update {
-        // Config already correct, skip write
+    if !update_codex_document(&mut doc, base_url, model, subagent_model, None) {
         return Ok(());
-    }
-
-    if let Some(m) = model {
-        doc["model"] = toml_edit::value(m);
-    }
-    doc["model_provider"] = toml_edit::value("copilot_gateway");
-
-    // Ensure [model_providers.copilot_gateway] section
-    if doc.get("model_providers").is_none() {
-        doc["model_providers"] = toml_edit::table();
-    }
-    if let Some(providers) = doc["model_providers"].as_table_mut() {
-        if !providers.contains_key("copilot_gateway") {
-            providers["copilot_gateway"] = toml_edit::table();
-        }
-        if let Some(gw) = providers["copilot_gateway"].as_table_mut() {
-            gw["name"] = toml_edit::value("Copilot Gateway");
-            gw["base_url"] = toml_edit::value(&url_with_slash);
-            gw["env_key"] = toml_edit::value("OPENAI_API_KEY");
-            gw["wire_api"] = toml_edit::value("responses");
-        }
     }
 
     let toml_str = doc.to_string();
@@ -403,17 +623,7 @@ pub fn clear_codex_config() -> Result<(), AppError> {
     if config_path.exists() {
         let content = fs::read_to_string(&config_path)?;
         if let Ok(mut doc) = content.parse::<DocumentMut>() {
-            if let Some(providers) = doc
-                .get_mut("model_providers")
-                .and_then(|v| v.as_table_mut())
-            {
-                if let Some(gw) = providers
-                    .get_mut("copilot_gateway")
-                    .and_then(|v| v.as_table_mut())
-                {
-                    gw.remove("base_url");
-                }
-            }
+            clear_codex_document(&mut doc);
             let toml_str = doc.to_string();
             atomic_write(&config_path, toml_str.as_bytes())?;
         }
@@ -672,8 +882,7 @@ fn rc_with_openai_key(existing: &str, shell: ShellKind, value: &str) -> RcOutcom
             if trimmed == desired {
                 outcome = Some(RcOutcome::AlreadySet);
                 out.push(line.to_string());
-            } else if assigned_openai_value(trimmed, shell)
-                .is_some_and(is_relay_owned_openai_value)
+            } else if assigned_openai_value(trimmed, shell).is_some_and(is_relay_owned_openai_value)
             {
                 outcome = Some(RcOutcome::Rewrite(String::new())); // placeholder, filled below
                 out.push(desired.clone());
@@ -707,10 +916,7 @@ fn rc_with_openai_key(existing: &str, shell: ShellKind, value: &str) -> RcOutcom
 ///
 /// Skips the write when the file already carries the right assignment: both
 /// backends rewrite the whole file, and the user's shell may be reading it.
-fn ensure_openai_api_key_in_rc(
-    backend: &dyn CliBackend,
-    shell: ShellKind,
-) -> Result<(), AppError> {
+fn ensure_openai_api_key_in_rc(backend: &dyn CliBackend, shell: ShellKind) -> Result<(), AppError> {
     let rel = shell.rc_relative_path();
     let existing = backend.read(&rel)?.unwrap_or_default();
     match rc_with_openai_key(&existing, shell, OPENAI_API_KEY_PLACEHOLDER) {
@@ -744,9 +950,7 @@ pub(crate) fn ensure_openai_api_key_env() -> Result<(), AppError> {
     // for a new login session — unless the user already has a real key in the
     // environment, in which case theirs wins here as well.
     let inherited = std::env::var("OPENAI_API_KEY").ok();
-    let ours = inherited
-        .as_deref()
-        .is_none_or(is_relay_owned_openai_value);
+    let ours = inherited.as_deref().is_none_or(is_relay_owned_openai_value);
     if ours {
         std::env::set_var("OPENAI_API_KEY", OPENAI_API_KEY_PLACEHOLDER);
     }
@@ -949,10 +1153,15 @@ mod openai_env_tests {
     fn writes_land_in_the_backends_home() {
         use crate::cli_target::WindowsFsBackend;
         let tmp = tempfile::TempDir::new().unwrap();
-        let b = WindowsFsBackend { home: tmp.path().to_path_buf() };
+        let b = WindowsFsBackend {
+            home: tmp.path().to_path_buf(),
+        };
         ensure_openai_api_key_in_rc(&b, ShellKind::Fish).unwrap();
         // fish's config dir does not exist beforehand; the backend must create it.
-        let written = b.read(&[".config", "fish", "config.fish"]).unwrap().unwrap();
+        let written = b
+            .read(&[".config", "fish", "config.fish"])
+            .unwrap()
+            .unwrap();
         assert!(written.contains("set -gx OPENAI_API_KEY llm-relay-ignore"));
     }
 }
@@ -991,7 +1200,6 @@ fn broadcast_env_change() {
         );
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1035,61 +1243,49 @@ pub fn write_claude_config_with(
     base_url: &str,
     api_key: &str,
     model: Option<&str>,
-    small_model: Option<&str>,
+    subagent_model: Option<&str>,
+    haiku_model: Option<&str>,
+) -> Result<(), AppError> {
+    write_claude_config_with_extra(
+        backend,
+        base_url,
+        api_key,
+        model,
+        subagent_model,
+        haiku_model,
+        None,
+        None,
+    )
+}
+
+fn write_claude_config_with_extra(
+    backend: &dyn CliBackend,
+    base_url: &str,
+    api_key: &str,
+    model: Option<&str>,
+    subagent_model: Option<&str>,
+    haiku_model: Option<&str>,
+    extra_env: Option<&BTreeMap<String, String>>,
+    snapshot: Option<&ClaudeSnapshot>,
 ) -> Result<(), AppError> {
     let rel: &[&str] = &[".claude", "settings.json"];
-    let big_base: Option<String> = model.map(|m| decompose_claude_id(m).0);
-
     let existing = backend.read(rel)?;
     let mut settings: Value = match existing.as_deref() {
         Some(s) => serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({})),
         None => serde_json::json!({}),
     };
 
-    let env = settings
-        .as_object_mut()
-        .unwrap()
-        .entry("env")
-        .or_insert_with(|| serde_json::json!({}));
-
-    let token_already_present = env
-        .as_object()
-        .and_then(|o| o.get("ANTHROPIC_AUTH_TOKEN"))
-        .and_then(|v| v.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    let token_to_write: Option<&str> = if token_already_present { None } else { Some(api_key) };
-
-    let needs_update = if let Some(env_obj) = env.as_object() {
-        let token_match = match token_to_write {
-            Some(t) => env_obj.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) == Some(t),
-            None => true,
-        };
-        !(token_match
-            && env_obj.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) == Some(base_url)
-            && (big_base.is_none()
-                || env_obj.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()) == big_base.as_deref())
-            && (small_model.is_none()
-                || env_obj.get("ANTHROPIC_SMALL_FAST_MODEL").and_then(|v| v.as_str()) == small_model))
-    } else {
-        true
-    };
-
-    if !needs_update {
+    if !write_claude_env(
+        &mut settings,
+        base_url,
+        api_key,
+        model,
+        subagent_model,
+        haiku_model,
+        extra_env,
+        snapshot,
+    )? {
         return Ok(());
-    }
-
-    if let Some(env_obj) = env.as_object_mut() {
-        if let Some(t) = token_to_write {
-            env_obj.insert("ANTHROPIC_AUTH_TOKEN".to_string(), Value::String(t.to_string()));
-        }
-        env_obj.insert("ANTHROPIC_BASE_URL".to_string(), Value::String(base_url.to_string()));
-        if let Some(b) = big_base.as_deref() {
-            env_obj.insert("ANTHROPIC_MODEL".to_string(), Value::String(b.to_string()));
-        }
-        if let Some(m) = small_model {
-            env_obj.insert("ANTHROPIC_SMALL_FAST_MODEL".to_string(), Value::String(m.to_string()));
-        }
     }
 
     let json_str = serde_json::to_string_pretty(&settings)?;
@@ -1154,11 +1350,16 @@ pub fn ensure_claude_onboarded_with(backend: &dyn CliBackend) -> Result<(), AppE
 
 pub fn clear_claude_config_with(backend: &dyn CliBackend) -> Result<(), AppError> {
     let rel: &[&str] = &[".claude", "settings.json"];
-    let Some(content) = backend.read(rel)? else { return Ok(()); };
-    let mut settings: Value = serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
+    let Some(content) = backend.read(rel)? else {
+        return Ok(());
+    };
+    let mut settings: Value =
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(env) = settings.get_mut("env").and_then(|v| v.as_object_mut()) {
         env.remove("ANTHROPIC_BASE_URL");
         env.remove("ANTHROPIC_MODEL");
+        env.remove("CLAUDE_CODE_SUBAGENT_MODEL");
+        env.remove("ANTHROPIC_DEFAULT_HAIKU_MODEL");
         env.remove("ANTHROPIC_SMALL_FAST_MODEL");
     }
     backend.write_atomic(rel, serde_json::to_string_pretty(&settings)?.as_bytes())
@@ -1169,6 +1370,18 @@ pub fn write_codex_config_with(
     base_url: &str,
     api_key: &str,
     model: Option<&str>,
+    subagent_model: Option<&str>,
+) -> Result<(), AppError> {
+    write_codex_config_with_snapshot(backend, base_url, api_key, model, subagent_model, None)
+}
+
+fn write_codex_config_with_snapshot(
+    backend: &dyn CliBackend,
+    base_url: &str,
+    api_key: &str,
+    model: Option<&str>,
+    subagent_model: Option<&str>,
+    snapshot: Option<&CodexSnapshot>,
 ) -> Result<(), AppError> {
     let auth_rel: &[&str] = &[".codex", "auth.json"];
     let cfg_rel: &[&str] = &[".codex", "config.toml"];
@@ -1188,47 +1401,16 @@ pub fn write_codex_config_with(
     }
 
     // config.toml
-    let url_with_slash = if base_url.ends_with('/') {
-        base_url.to_string()
-    } else {
-        format!("{base_url}/")
-    };
     let existing_cfg = backend.read(cfg_rel)?;
     let mut doc: DocumentMut = match existing_cfg.as_deref() {
-        Some(s) => s.parse::<DocumentMut>().unwrap_or_else(|_| "".parse().unwrap()),
+        Some(s) => s
+            .parse::<DocumentMut>()
+            .unwrap_or_else(|_| "".parse().unwrap()),
         None => "".parse().unwrap(),
     };
 
-    let needs_cfg_update = doc.get("model_provider").and_then(|v| v.as_str()) != Some("copilot_gateway")
-        || (model.is_some() && doc.get("model").and_then(|v| v.as_str()) != model)
-        || doc
-            .get("model_providers")
-            .and_then(|mp| mp.get("copilot_gateway"))
-            .and_then(|gw| gw.get("base_url"))
-            .and_then(|u| u.as_str())
-            != Some(&url_with_slash);
-
-    if !needs_cfg_update {
+    if !update_codex_document(&mut doc, base_url, model, subagent_model, snapshot) {
         return Ok(());
-    }
-
-    if let Some(m) = model {
-        doc["model"] = toml_edit::value(m);
-    }
-    doc["model_provider"] = toml_edit::value("copilot_gateway");
-    if doc.get("model_providers").is_none() {
-        doc["model_providers"] = toml_edit::table();
-    }
-    if let Some(providers) = doc["model_providers"].as_table_mut() {
-        if !providers.contains_key("copilot_gateway") {
-            providers["copilot_gateway"] = toml_edit::table();
-        }
-        if let Some(gw) = providers["copilot_gateway"].as_table_mut() {
-            gw["name"] = toml_edit::value("Copilot Gateway");
-            gw["base_url"] = toml_edit::value(&url_with_slash);
-            gw["env_key"] = toml_edit::value("OPENAI_API_KEY");
-            gw["wire_api"] = toml_edit::value("responses");
-        }
     }
     backend.write_atomic(cfg_rel, doc.to_string().as_bytes())
 }
@@ -1238,7 +1420,8 @@ pub fn clear_codex_config_with(backend: &dyn CliBackend) -> Result<(), AppError>
     let cfg_rel: &[&str] = &[".codex", "config.toml"];
 
     if let Some(content) = backend.read(auth_rel)? {
-        let mut auth: Value = serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
+        let mut auth: Value =
+            serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
         if let Some(obj) = auth.as_object_mut() {
             obj.remove("OPENAI_API_KEY");
         }
@@ -1246,11 +1429,7 @@ pub fn clear_codex_config_with(backend: &dyn CliBackend) -> Result<(), AppError>
     }
     if let Some(content) = backend.read(cfg_rel)? {
         if let Ok(mut doc) = content.parse::<DocumentMut>() {
-            if let Some(providers) = doc.get_mut("model_providers").and_then(|v| v.as_table_mut()) {
-                if let Some(gw) = providers.get_mut("copilot_gateway").and_then(|v| v.as_table_mut()) {
-                    gw.remove("base_url");
-                }
-            }
+            clear_codex_document(&mut doc);
             backend.write_atomic(cfg_rel, doc.to_string().as_bytes())?;
         }
     }
@@ -1284,20 +1463,32 @@ pub fn write_gemini_config_with(
         None => serde_json::json!({}),
     };
     if let Some(obj) = settings.as_object_mut() {
-        let security = obj.entry("security").or_insert_with(|| serde_json::json!({}));
+        let security = obj
+            .entry("security")
+            .or_insert_with(|| serde_json::json!({}));
         if let Some(sec_obj) = security.as_object_mut() {
-            let auth = sec_obj.entry("auth").or_insert_with(|| serde_json::json!({}));
+            let auth = sec_obj
+                .entry("auth")
+                .or_insert_with(|| serde_json::json!({}));
             if let Some(auth_obj) = auth.as_object_mut() {
-                auth_obj.insert("selectedType".into(), Value::String("gemini-api-key".into()));
+                auth_obj.insert(
+                    "selectedType".into(),
+                    Value::String("gemini-api-key".into()),
+                );
             }
         }
     }
-    backend.write_atomic(settings_rel, serde_json::to_string_pretty(&settings)?.as_bytes())
+    backend.write_atomic(
+        settings_rel,
+        serde_json::to_string_pretty(&settings)?.as_bytes(),
+    )
 }
 
 pub fn clear_gemini_config_with(backend: &dyn CliBackend) -> Result<(), AppError> {
     let env_rel: &[&str] = &[".gemini", ".env"];
-    let Some(content) = backend.read(env_rel)? else { return Ok(()); };
+    let Some(content) = backend.read(env_rel)? else {
+        return Ok(());
+    };
     let mut env_map = parse_env_file(&content);
     env_map.remove("GEMINI_API_KEY");
     env_map.remove("GOOGLE_GEMINI_BASE_URL");
@@ -1312,20 +1503,384 @@ mod backend_tests {
     use tempfile::TempDir;
 
     fn fake_home(tmp: &TempDir) -> WindowsFsBackend {
-        WindowsFsBackend { home: tmp.path().to_path_buf() }
+        WindowsFsBackend {
+            home: tmp.path().to_path_buf(),
+        }
     }
 
     #[test]
     fn claude_round_trip_via_backend() {
         let tmp = TempDir::new().unwrap();
         let b = fake_home(&tmp);
-        write_claude_config_with(&b, "http://127.0.0.1:18080", "kk", Some("claude-sonnet-4-6"), None).unwrap();
+        write_claude_config_with(
+            &b,
+            "http://127.0.0.1:18080",
+            "kk",
+            Some("claude-sonnet-4-6"),
+            None,
+            None,
+        )
+        .unwrap();
         let content = b.read(&[".claude", "settings.json"]).unwrap().unwrap();
         assert!(content.contains("ANTHROPIC_BASE_URL"));
         assert!(content.contains("http://127.0.0.1:18080"));
         clear_claude_config_with(&b).unwrap();
         let content = b.read(&[".claude", "settings.json"]).unwrap().unwrap();
         assert!(!content.contains("ANTHROPIC_BASE_URL"));
+    }
+
+    fn claude_env(b: &WindowsFsBackend) -> serde_json::Map<String, Value> {
+        let content = b.read(&[".claude", "settings.json"]).unwrap().unwrap();
+        serde_json::from_str::<Value>(&content).unwrap()["env"]
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn writes_all_three_claude_models_and_normalizes_gpt_context() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        write_claude_config_with(
+            &b,
+            "http://relay",
+            "kk",
+            Some("GPT-5.6-sol-fast"),
+            Some("gpt-5.6-agent[1m]"),
+            Some("claude-haiku-4-5"),
+        )
+        .unwrap();
+
+        let env = claude_env(&b);
+        assert_eq!(env["ANTHROPIC_MODEL"], "GPT-5.6-sol-fast[1m]");
+        assert_eq!(env["CLAUDE_CODE_SUBAGENT_MODEL"], "gpt-5.6-agent");
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5");
+
+        write_claude_config_with(
+            &b,
+            "http://relay",
+            "kk",
+            Some("vendor/gpt-5.6-sol-fast"),
+            None,
+            None,
+        )
+        .unwrap();
+        let env = claude_env(&b);
+        assert_eq!(env["ANTHROPIC_MODEL"], "vendor/gpt-5.6-sol-fast[1m]");
+
+        write_claude_config_with(
+            &b,
+            "http://relay",
+            "kk",
+            Some("claude-opus-4.7-xhigh-1m"),
+            Some("claude-sonnet-4.7-high-1m"),
+            Some("claude-haiku-4.5-1m"),
+        )
+        .unwrap();
+        let env = claude_env(&b);
+        assert_eq!(env["ANTHROPIC_MODEL"], "claude-opus-4.7[1m]");
+        assert_eq!(env["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-sonnet-4.7");
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4.5");
+    }
+
+    #[test]
+    fn same_base_different_claude_variants_remain_role_distinguishable() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        write_claude_config_with(
+            &b,
+            "http://relay",
+            "kk",
+            Some("claude-opus-4.7-xhigh"),
+            Some("claude-opus-4.7-high"),
+            Some("claude-opus-4.7-1m"),
+        )
+        .unwrap();
+
+        let env = claude_env(&b);
+        assert_eq!(env["ANTHROPIC_MODEL"], "claude-opus-4.7-xhigh[1m]");
+        assert_eq!(env["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-opus-4.7-high");
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-opus-4.7-1m");
+    }
+
+    #[test]
+    fn extra_env_switch_restores_original_values_and_keeps_unrelated_keys() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        b.write_atomic(
+            &[".claude", "settings.json"],
+            br#"{"env":{"OLD":"original","OTHER":"safe"}}"#,
+        )
+        .unwrap();
+        let snapshot = ClaudeSnapshot {
+            extra_env_originals: BTreeMap::from([
+                ("OLD".to_string(), Some("original".to_string())),
+                ("NEW".to_string(), None),
+            ]),
+            extra_env_captured: true,
+            ..Default::default()
+        };
+        let first = BTreeMap::from([
+            ("OLD".to_string(), "managed".to_string()),
+            ("NEW".to_string(), "1".to_string()),
+        ]);
+        write_claude_config_with_extra(
+            &b,
+            "http://relay",
+            "kk",
+            Some("gpt-5.6-sol"),
+            Some("gpt-5.6-terra"),
+            Some("gpt-5.6-luna"),
+            Some(&first),
+            Some(&snapshot),
+        )
+        .unwrap();
+        let env = claude_env(&b);
+        assert_eq!(env["OLD"], "managed");
+        assert_eq!(env["NEW"], "1");
+
+        write_claude_config_with_extra(
+            &b,
+            "http://relay",
+            "kk",
+            Some("gpt-5.6-sol"),
+            Some("gpt-5.6-terra"),
+            Some("gpt-5.6-luna"),
+            None,
+            Some(&snapshot),
+        )
+        .unwrap();
+        let env = claude_env(&b);
+        assert_eq!(env["OLD"], "original");
+        assert!(!env.contains_key("NEW"));
+        assert_eq!(env["OTHER"], "safe");
+        assert_eq!(env["ANTHROPIC_MODEL"], "gpt-5.6-sol[1m]");
+        assert_eq!(env["CLAUDE_CODE_SUBAGENT_MODEL"], "gpt-5.6-terra");
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "gpt-5.6-luna");
+    }
+
+    #[test]
+    fn gpt_apply_removes_stale_keys_and_preserves_unrelated_env() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        b.write_atomic(
+            &[".claude", "settings.json"],
+            br#"{"env":{"ANTHROPIC_BASE_URL":"http://relay","ANTHROPIC_AUTH_TOKEN":"keep","ANTHROPIC_MODEL":"gpt-5.6[1m]","CLAUDE_CODE_SUBAGENT_MODEL":"claude-sonnet","ANTHROPIC_DEFAULT_HAIKU_MODEL":"claude-haiku","ANTHROPIC_SMALL_FAST_MODEL":"old","ANTHROPIC_CUSTOM_HEADERS":"stale","OTHER":"safe"}}"#,
+        )
+        .unwrap();
+
+        write_claude_config_with(
+            &b,
+            "http://relay",
+            "ignored",
+            Some("gpt-5.6"),
+            Some("claude-sonnet"),
+            Some("claude-haiku"),
+        )
+        .unwrap();
+
+        let env = claude_env(&b);
+        assert!(!env.contains_key("ANTHROPIC_SMALL_FAST_MODEL"));
+        assert!(!env.contains_key("ANTHROPIC_CUSTOM_HEADERS"));
+        assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "keep");
+        assert_eq!(env["OTHER"], "safe");
+    }
+
+    #[test]
+    fn claude_only_apply_preserves_custom_headers_and_decomposes_main_model() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        b.write_atomic(
+            &[".claude", "settings.json"],
+            br#"{"env":{"ANTHROPIC_CUSTOM_HEADERS":"user=value"}}"#,
+        )
+        .unwrap();
+
+        write_claude_config_with(
+            &b,
+            "http://relay",
+            "kk",
+            Some("claude-opus-4.7-xhigh-1m"),
+            Some("claude-sonnet-4.7"),
+            Some("claude-haiku-4.5"),
+        )
+        .unwrap();
+
+        let env = claude_env(&b);
+        assert_eq!(env["ANTHROPIC_MODEL"], "claude-opus-4.7[1m]");
+        assert_eq!(env["ANTHROPIC_CUSTOM_HEADERS"], "user=value");
+
+        write_claude_config_with(
+            &b,
+            "http://relay",
+            "kk",
+            Some("CLAUDE-opus-4.7-xhigh-1m"),
+            Some("claude-sonnet-4.7"),
+            Some("claude-haiku-4.5"),
+        )
+        .unwrap();
+        let env = claude_env(&b);
+        assert_eq!(env["ANTHROPIC_MODEL"], "CLAUDE-opus-4.7[1m]");
+    }
+
+    #[test]
+    fn missing_roles_clear_stale_keys_but_keep_legacy_small_without_replacement() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        b.write_atomic(
+            &[".claude", "settings.json"],
+            br#"{"env":{"ANTHROPIC_MODEL":"old-main","CLAUDE_CODE_SUBAGENT_MODEL":"old-subagent","ANTHROPIC_DEFAULT_HAIKU_MODEL":"old-haiku","ANTHROPIC_SMALL_FAST_MODEL":"legacy-small"}}"#,
+        )
+        .unwrap();
+
+        write_claude_config_with(&b, "http://relay", "kk", None, None, None).unwrap();
+
+        let env = claude_env(&b);
+        assert!(!env.contains_key("ANTHROPIC_MODEL"));
+        assert!(!env.contains_key("CLAUDE_CODE_SUBAGENT_MODEL"));
+        assert!(!env.contains_key("ANTHROPIC_DEFAULT_HAIKU_MODEL"));
+        assert_eq!(env["ANTHROPIC_SMALL_FAST_MODEL"], "legacy-small");
+    }
+
+    #[test]
+    fn non_object_claude_env_returns_config_error_without_rewriting() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        let original = r#"{"env":null,"other":"keep"}"#;
+        b.write_atomic(&[".claude", "settings.json"], original.as_bytes())
+            .unwrap();
+
+        let err = write_claude_config_with(
+            &b,
+            "http://relay",
+            "kk",
+            Some("claude-sonnet-4.7"),
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("env must be a JSON object"));
+        assert_eq!(
+            b.read(&[".claude", "settings.json"]).unwrap().unwrap(),
+            original
+        );
+    }
+
+    fn codex_doc(b: &WindowsFsBackend) -> DocumentMut {
+        b.read(&[".codex", "config.toml"])
+            .unwrap()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn codex_writes_main_and_subagent_defaults_as_top_level_keys() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+
+        write_codex_config_with(
+            &b,
+            "http://relay",
+            "kk",
+            Some("gpt-5.6-sol-fast"),
+            Some("gpt-5.6-mini-fast"),
+        )
+        .unwrap();
+        let doc = codex_doc(&b);
+        assert_eq!(doc["model"].as_str(), Some("gpt-5.6-sol-fast"));
+        assert_eq!(doc["model_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(
+            doc["default_subagent_model"].as_str(),
+            Some("gpt-5.6-mini-fast")
+        );
+        assert_eq!(
+            doc["default_subagent_reasoning_effort"].as_str(),
+            Some("high")
+        );
+        assert!(doc.get("agents").is_none());
+    }
+
+    #[test]
+    fn codex_missing_models_clear_stale_top_level_values() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        b.write_atomic(
+            &[".codex", "config.toml"],
+            br#"model = "gpt-5.6-sol-fast"
+model_reasoning_effort = "high"
+default_subagent_model = "gpt-5.6-mini-fast"
+default_subagent_reasoning_effort = "high"
+"#,
+        )
+        .unwrap();
+
+        write_codex_config_with(&b, "http://relay", "kk", None, None).unwrap();
+        let doc = codex_doc(&b);
+        assert!(doc.get("model").is_none());
+        assert!(doc.get("model_reasoning_effort").is_none());
+        assert!(doc.get("default_subagent_model").is_none());
+        assert!(doc.get("default_subagent_reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn codex_non_fast_main_restores_snapshot_effort_and_preserves_inline_providers() {
+        let tmp = TempDir::new().unwrap();
+        let b = fake_home(&tmp);
+        let snapshot = CodexSnapshot {
+            model_reasoning_effort: Some("xhigh".into()),
+            special_fields_captured: true,
+            ..CodexSnapshot::default()
+        };
+        b.write_atomic(
+            &[".codex", "config.toml"],
+            br#"model = "gpt-5.6-sol-fast"
+model_reasoning_effort = "high"
+model_providers = { other = { name = "Other", base_url = "https://other.example" }, copilot_gateway = { custom = "keep" } }
+"#,
+        )
+        .unwrap();
+
+        write_codex_config_with_snapshot(
+            &b,
+            "http://relay",
+            "kk",
+            Some("gpt-5.6-sol"),
+            None,
+            Some(&snapshot),
+        )
+        .unwrap();
+        let doc = codex_doc(&b);
+        assert_eq!(doc["model_reasoning_effort"].as_str(), Some("xhigh"));
+        let providers = doc["model_providers"].as_table_like().unwrap();
+        assert_eq!(
+            providers
+                .get("other")
+                .and_then(|item| item.as_table_like())
+                .and_then(|other| other.get("base_url"))
+                .and_then(|value| value.as_str()),
+            Some("https://other.example")
+        );
+        assert_eq!(
+            providers
+                .get("copilot_gateway")
+                .and_then(|item| item.as_table_like())
+                .and_then(|gateway| gateway.get("custom"))
+                .and_then(|value| value.as_str()),
+            Some("keep")
+        );
+    }
+
+    #[test]
+    fn codex_non_fast_main_does_not_enable_main_effort() {
+        for model in ["GPT-5.6-sol-FAST", "gpt-5.6-sol-fast-extra", "gpt-5.6-sol"] {
+            let tmp = TempDir::new().unwrap();
+            let b = fake_home(&tmp);
+            write_codex_config_with(&b, "http://relay", "kk", Some(model), None).unwrap();
+            let doc = codex_doc(&b);
+            assert!(doc.get("model_reasoning_effort").is_none(), "{model}");
+        }
     }
 
     #[test]
@@ -1361,7 +1916,8 @@ mod backend_tests {
     fn onboarding_flag_false_is_flipped_to_true() {
         let tmp = TempDir::new().unwrap();
         let b = fake_home(&tmp);
-        b.write_atomic(&[".claude.json"], br#"{"hasCompletedOnboarding":false}"#).unwrap();
+        b.write_atomic(&[".claude.json"], br#"{"hasCompletedOnboarding":false}"#)
+            .unwrap();
         ensure_claude_onboarded_with(&b).unwrap();
         let v: Value = serde_json::from_str(&b.read(&[".claude.json"]).unwrap().unwrap()).unwrap();
         assert_eq!(v["hasCompletedOnboarding"], Value::Bool(true));
@@ -1374,7 +1930,8 @@ mod backend_tests {
         // Deliberately compact and oddly ordered: if we rewrote it, pretty
         // printing would reorder/reformat and this comparison would fail.
         let original = r#"{"hasCompletedOnboarding":true,"numStartups":3}"#;
-        b.write_atomic(&[".claude.json"], original.as_bytes()).unwrap();
+        b.write_atomic(&[".claude.json"], original.as_bytes())
+            .unwrap();
 
         ensure_claude_onboarded_with(&b).unwrap();
 
@@ -1390,7 +1947,8 @@ mod backend_tests {
         let tmp = TempDir::new().unwrap();
         let b = fake_home(&tmp);
         let broken = r#"{"numStartups": 7,,,"#;
-        b.write_atomic(&[".claude.json"], broken.as_bytes()).unwrap();
+        b.write_atomic(&[".claude.json"], broken.as_bytes())
+            .unwrap();
 
         // Not an error: the endpoint config still applied, and clobbering the
         // user's Claude Code state would cost far more than the missing flag.
@@ -1420,28 +1978,81 @@ mod backend_tests {
 // WSL distro) so each gets its own base_url + installed-tools mask
 // + per-target snapshot.
 
+pub fn shell_rc_paths(targets: &[crate::cli_target::CliTarget]) -> BTreeMap<String, Vec<String>> {
+    let mut paths = BTreeMap::new();
+    for target in targets.iter().filter(|target| target.installed.codex) {
+        let shell = match target.snapshot_meta.target_type {
+            crate::cli_target::TargetType::Windows => {
+                detect_shell(std::env::var("SHELL").ok().as_deref())
+            }
+            crate::cli_target::TargetType::Wsl => detect_shell(
+                target
+                    .snapshot_meta
+                    .distro_name
+                    .as_deref()
+                    .and_then(crate::wsl::distro::login_shell)
+                    .as_deref(),
+            ),
+        };
+        let key = match target.snapshot_meta.target_type {
+            crate::cli_target::TargetType::Windows => "native".to_string(),
+            crate::cli_target::TargetType::Wsl => format!(
+                "wsl:{}",
+                target.snapshot_meta.distro_name.as_deref().unwrap_or("")
+            ),
+        };
+        paths.insert(
+            key,
+            shell
+                .rc_relative_path()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+    }
+    paths
+}
+
+#[derive(Debug, Default)]
+pub struct ApplyReport {
+    pub succeeded: std::collections::HashSet<String>,
+    pub failed: BTreeMap<String, String>,
+}
+
 pub fn apply_to_targets(
     targets: &[crate::cli_target::CliTarget],
+    retained_keys: Option<&std::collections::HashSet<String>>,
     api_key: &str,
     claude_model: Option<&str>,
-    claude_small_model: Option<&str>,
+    claude_subagent_model: Option<&str>,
+    claude_haiku_model: Option<&str>,
     codex_model: Option<&str>,
+    codex_subagent_model: Option<&str>,
     _gemini_model: Option<&str>,
-) -> Result<(), AppError> {
+    claude_extra_env: Option<&BTreeMap<String, String>>,
+) -> Result<ApplyReport, AppError> {
     use crate::cli_target::TargetType;
 
+    // Legacy field snapshots are retained only for compatibility diagnostics.
+    // Full-file origin sidecars are the sole restoration authority.
     let prev_index = snapshot::build_index()?;
-    let current_keys: std::collections::HashSet<String> = targets
-        .iter()
-        .map(|t| {
-            t.snapshot_meta
-                .distro_name
-                .clone()
-                .unwrap_or_else(|| "windows".to_string())
-        })
-        .collect();
+    let current_keys: std::collections::HashSet<String> =
+        retained_keys.cloned().unwrap_or_else(|| {
+            targets
+                .iter()
+                .map(|t| {
+                    t.snapshot_meta
+                        .distro_name
+                        .clone()
+                        .unwrap_or_else(|| "windows".to_string())
+                })
+                .collect()
+        });
 
-    // 1. Restore + delete snapshots for targets removed since last apply.
+    // 1. Restore snapshots for targets removed since last apply. A failed
+    // restore keeps its snapshot so a later apply can retry instead of losing
+    // the only copy of the user's original config.
+    let mut dropped_windows_failed = false;
     for (key, meta) in &prev_index {
         if current_keys.contains(key) {
             continue;
@@ -1457,6 +2068,10 @@ pub fn apply_to_targets(
             };
             if let Err(e) = snapshot::restore(&snap, &*backend) {
                 log::warn!("restore failed for dropped target {key}: {e}");
+                if matches!(meta.target_type, TargetType::Windows) {
+                    dropped_windows_failed = true;
+                }
+                continue;
             }
             #[cfg(target_os = "windows")]
             if let TargetType::Wsl = meta.target_type {
@@ -1464,15 +2079,26 @@ pub fn apply_to_targets(
                     let hn = crate::wsl::hosts::relay_hostname();
                     if let Err(e) = crate::wsl::hosts::clear_hosts_entry(distro, &hn) {
                         log::warn!("clear hosts entry for dropped {distro}: {e}");
+                        continue;
                     }
                 }
             }
         }
-        let _ = snapshot::delete(meta);
+        if let Err(e) = snapshot::delete(meta) {
+            log::warn!("delete restored snapshot for {key} failed: {e}");
+            if matches!(meta.target_type, TargetType::Windows) {
+                dropped_windows_failed = true;
+            }
+        }
+    }
+    if dropped_windows_failed {
+        return Err(AppError::Config(
+            "apply: failed to restore removed Windows target".into(),
+        ));
     }
 
     // 2. For each current target: capture snapshot if new, then write.
-    let mut at_least_one_success = false;
+    let mut report = ApplyReport::default();
     let mut windows_failed = false;
     for target in targets {
         let key = target
@@ -1489,13 +2115,40 @@ pub fn apply_to_targets(
                 }
                 continue;
             }
+        } else if let Err(e) = snapshot::backfill_extended_snapshot(target) {
+            // An old snapshot cannot restore fields this release is about to
+            // overwrite. Refuse this target rather than destroy user config.
+            log::warn!("snapshot upgrade failed for {key}: {e}");
+            if is_windows {
+                windows_failed = true;
+            }
+            continue;
         }
-        match write_one_target(target, api_key, claude_model, claude_small_model, codex_model) {
+        if let Err(e) = snapshot::capture_extra_env_originals(target, claude_extra_env) {
+            log::warn!("Extra env snapshot upgrade failed for {key}: {e}");
+            if is_windows {
+                windows_failed = true;
+            }
+            continue;
+        }
+        let original_snapshot = snapshot::read(&target.snapshot_meta)?;
+        match write_one_target(
+            target,
+            api_key,
+            claude_model,
+            claude_subagent_model,
+            claude_haiku_model,
+            codex_model,
+            codex_subagent_model,
+            claude_extra_env,
+            original_snapshot.as_ref(),
+        ) {
             Ok(()) => {
-                at_least_one_success = true;
+                report.succeeded.insert(key);
             }
             Err(e) => {
                 log::warn!("apply failed for {key}: {e}");
+                report.failed.insert(key, e.to_string());
                 if is_windows {
                     windows_failed = true;
                 }
@@ -1506,22 +2159,35 @@ pub fn apply_to_targets(
     if windows_failed {
         return Err(AppError::Config("apply: Windows target failed".into()));
     }
-    if !at_least_one_success && !targets.is_empty() {
+    if report.succeeded.is_empty() && !targets.is_empty() {
         return Err(AppError::Config("apply: no target succeeded".into()));
     }
-    Ok(())
+    Ok(report)
 }
 
-fn write_one_target(
+pub(crate) fn write_one_target(
     target: &crate::cli_target::CliTarget,
     api_key: &str,
     claude_model: Option<&str>,
-    claude_small_model: Option<&str>,
+    claude_subagent_model: Option<&str>,
+    claude_haiku_model: Option<&str>,
     codex_model: Option<&str>,
+    codex_subagent_model: Option<&str>,
+    claude_extra_env: Option<&BTreeMap<String, String>>,
+    original_snapshot: Option<&snapshot::TargetSnapshot>,
 ) -> Result<(), AppError> {
     let b = &*target.backend;
     if target.installed.claude {
-        write_claude_config_with(b, &target.base_url, api_key, claude_model, claude_small_model)?;
+        write_claude_config_with_extra(
+            b,
+            &target.base_url,
+            api_key,
+            claude_model,
+            claude_subagent_model,
+            claude_haiku_model,
+            claude_extra_env,
+            original_snapshot.map(|snapshot| &snapshot.claude),
+        )?;
         // Non-fatal: a settings.json pointing at the relay is still useful even
         // if this one file could not be touched, and failing the whole target
         // would also skip codex/gemini below.
@@ -1530,7 +2196,14 @@ fn write_one_target(
         }
     }
     if target.installed.codex {
-        write_codex_config_with(b, &target.base_url, api_key, codex_model)?;
+        write_codex_config_with_snapshot(
+            b,
+            &target.base_url,
+            api_key,
+            codex_model,
+            codex_subagent_model,
+            original_snapshot.map(|snap| &snap.codex),
+        )?;
         // Codex CLI refuses to start without OPENAI_API_KEY. The local host is
         // handled once in `ensure_openai_api_key_env` (which also covers the
         // Windows registry and macOS launchctl); a WSL distro has its own home
@@ -1551,15 +2224,16 @@ fn write_one_target(
     Ok(())
 }
 
-/// Disable: walk the snapshot directory and restore every target it
-/// covers, then delete the directory. Replaces `clear_all_configs` for
-/// callers that want the multi-target behavior.
+/// Disable: restore every target from its snapshot. Each snapshot is deleted
+/// only after its target is fully restored, so failures remain retryable.
 pub fn clear_targets_from_snapshots() -> Result<(), AppError> {
     use crate::cli_target::TargetType;
     let dir = crate::paths::cli_config_backup_dir();
     if !dir.exists() {
         return Ok(());
     }
+
+    let mut failures = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -1567,16 +2241,20 @@ pub fn clear_targets_from_snapshots() -> Result<(), AppError> {
             continue;
         }
         let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
+            Ok(bytes) => bytes,
             Err(e) => {
-                log::warn!("clear: read {} failed: {e}", path.display());
+                let message = format!("read {} failed: {e}", path.display());
+                log::warn!("clear: {message}");
+                failures.push(message);
                 continue;
             }
         };
         let snap: snapshot::TargetSnapshot = match serde_json::from_slice(&bytes) {
-            Ok(s) => s,
+            Ok(snap) => snap,
             Err(e) => {
-                log::warn!("malformed snapshot {}: {e}", path.display());
+                let message = format!("malformed snapshot {}: {e}", path.display());
+                log::warn!("{message}");
+                failures.push(message);
                 continue;
             }
         };
@@ -1593,18 +2271,43 @@ pub fn clear_targets_from_snapshots() -> Result<(), AppError> {
             }),
         };
         if let Err(e) = snapshot::restore(&snap, &*backend) {
-            log::warn!("clear restore failed for {}: {e}", path.display());
+            let message = format!("restore {} failed: {e}", path.display());
+            log::warn!("clear {message}");
+            failures.push(message);
+            continue;
         }
         #[cfg(target_os = "windows")]
         if let TargetType::Wsl = target_type {
             if let Some(distro) = snap.distro_name.as_deref() {
-                let hn = crate::wsl::hosts::relay_hostname();
-                if let Err(e) = crate::wsl::hosts::clear_hosts_entry(distro, &hn) {
-                    log::warn!("clear hosts entry on disable for {distro}: {e}");
+                let hostname = crate::wsl::hosts::relay_hostname();
+                if let Err(e) = crate::wsl::hosts::clear_hosts_entry(distro, &hostname) {
+                    let message = format!("clear hosts entry for {distro} failed: {e}");
+                    log::warn!("{message}");
+                    failures.push(message);
+                    continue;
                 }
             }
         }
+        if let Err(e) = std::fs::remove_file(&path) {
+            let message = format!("delete restored snapshot {} failed: {e}", path.display());
+            log::warn!("{message}");
+            failures.push(message);
+        }
     }
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(())
+
+    if failures.is_empty() {
+        match std::fs::remove_dir(&dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(AppError::Config(format!(
+                "clear: restored targets but could not remove snapshot directory: {e}"
+            ))),
+        }
+    } else {
+        Err(AppError::Config(format!(
+            "clear: {} target snapshot(s) could not be restored; backups were kept: {}",
+            failures.len(),
+            failures.join("; ")
+        )))
+    }
 }

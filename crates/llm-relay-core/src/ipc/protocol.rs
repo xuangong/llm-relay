@@ -22,41 +22,91 @@ pub enum ServerFrame {
 pub enum Request {
     Ping,
     GetSnapshot,
-    Subscribe { topics: Vec<Topic> },
-    Unsubscribe { topics: Vec<Topic> },
+    Subscribe {
+        topics: Vec<Topic>,
+    },
+    Unsubscribe {
+        topics: Vec<Topic>,
+    },
     AddGateway(GatewayInput),
-    UpdateGateway { id: Uuid, fields: GatewayUpdate },
-    DeleteGateway { id: Uuid },
-    SetActive { gateway_id: Uuid, key_id: Uuid, models: ModelSelection },
+    UpdateGateway {
+        id: Uuid,
+        fields: GatewayUpdate,
+    },
+    DeleteGateway {
+        id: Uuid,
+    },
+    SetActive {
+        gateway_id: Uuid,
+        key_id: Uuid,
+        models: ModelSelection,
+    },
     ClearActive,
-    SetAutoFailover { enabled: bool },
-    Reorder { ids: Vec<Uuid> },
-    GetUsage { range: TimeRange, gateway_id: Option<Uuid> },
-    GetTrafficLog { gateway_id: Option<Uuid> },
-    StartLogin { gateway_id: Uuid },
-    CancelLogin { gateway_id: Uuid },
-    FetchKeys { gateway_id: Uuid },
-    FetchModels { gateway_id: Uuid, key_id: Uuid },
+    SetAutoFailover {
+        enabled: bool,
+    },
+    Reorder {
+        ids: Vec<Uuid>,
+    },
+    GetUsage {
+        range: TimeRange,
+        gateway_id: Option<Uuid>,
+    },
+    GetTrafficLog {
+        gateway_id: Option<Uuid>,
+    },
+    StartLogin {
+        gateway_id: Uuid,
+    },
+    CancelLogin {
+        gateway_id: Uuid,
+    },
+    FetchKeys {
+        gateway_id: Uuid,
+    },
+    FetchModels {
+        gateway_id: Uuid,
+        key_id: Uuid,
+    },
     GetSettings,
     UpdateSettings(SettingsUpdate),
     Shutdown,
     ListGateways,
     /// TUI: fetch per-gateway usage rows for a given range.
-    GetUsageRows { range: UsageRange },
+    GetUsageRows {
+        range: UsageRange,
+    },
     /// TUI: fetch recent error rows.
-    GetErrors { limit: u32 },
+    GetErrors {
+        limit: u32,
+    },
     /// TUI: fetch agent/system settings summary.
     GetTuiSettings,
     /// TUI: toggle the auto-launch-on-boot preference.
-    SetAutoLaunch { enabled: bool },
+    SetAutoLaunch {
+        enabled: bool,
+    },
     /// TUI: add a gateway with just name+url (auth_key defaults to empty).
-    AddGatewaySimple { name: String, url: String },
+    AddGatewaySimple {
+        name: String,
+        url: String,
+    },
     /// TUI: update a gateway's name and url.
-    UpdateGatewaySimple { id: Uuid, name: String, url: String },
+    UpdateGatewaySimple {
+        id: Uuid,
+        name: String,
+        url: String,
+    },
     /// TUI: get the active key_id + model preferences for a gateway.
-    GetGatewayConfig { gateway_id: Uuid },
+    GetGatewayConfig {
+        gateway_id: Uuid,
+    },
     /// TUI: save key + model config for a gateway without activating it.
-    SaveGatewayConfig { gateway_id: Uuid, key_id: Uuid, models: ModelSelection },
+    SaveGatewayConfig {
+        gateway_id: Uuid,
+        key_id: Uuid,
+        models: ModelSelection,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,57 +115,110 @@ pub enum Response {
     Pong,
     Snapshot(Snapshot),
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
     LoginInitiated {
         gateway_id: Uuid,
         user_code: String,
         verification_uri: String,
         expires_in_secs: u64,
     },
-    LoginCancelled { gateway_id: Uuid },
-    Keys { keys: Vec<KeyInfo> },
-    Models { catalog: ModelCatalog },
+    LoginCancelled {
+        gateway_id: Uuid,
+    },
+    Keys {
+        keys: Vec<KeyInfo>,
+    },
+    Models {
+        catalog: ModelCatalog,
+    },
     Settings(Settings),
     Usage(UsageReport),
-    TrafficLog { entries: Vec<TrafficEntry> },
-    GatewayList { gateways: Vec<GatewaySummary> },
+    TrafficLog {
+        entries: Vec<TrafficEntry>,
+    },
+    GatewayList {
+        gateways: Vec<GatewaySummary>,
+    },
     /// TUI: per-gateway usage rows (see `UsageRowDetail`).
-    UsageRows { rows: Vec<UsageRowDetail> },
+    UsageRows {
+        rows: Vec<UsageRowDetail>,
+    },
     /// TUI: recent error rows.
-    ErrorRows { rows: Vec<ErrorRow> },
+    ErrorRows {
+        rows: Vec<ErrorRow>,
+    },
     /// TUI: agent/system settings snapshot.
     TuiSettings(TuiSettings),
     /// TUI: acknowledgement for a settings mutation (e.g. SetAutoLaunch).
     SettingsAck,
     /// TUI: gateway created, returns new id.
-    GatewayCreated { id: Uuid },
+    GatewayCreated {
+        id: Uuid,
+    },
     /// TUI: gateway updated.
-    GatewayUpdated { id: Uuid },
+    GatewayUpdated {
+        id: Uuid,
+    },
     /// TUI: active key + model config for a gateway.
     GatewayConfig {
         active_key_id: Option<Uuid>,
         claude: Option<String>,
+        #[serde(default)]
+        claude_subagent: Option<String>,
         claude_small: Option<String>,
         codex: Option<String>,
+        #[serde(default)]
+        codex_subagent: Option<String>,
         gemini: Option<String>,
+        #[serde(default)]
+        claude_extra_config_id: Option<Uuid>,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    HealthChanged { gateway_id: Uuid, status: HealthStatus },
-    ActiveChanged { gateway_id: Option<Uuid> },
+    HealthChanged {
+        gateway_id: Uuid,
+        status: HealthStatus,
+    },
+    ActiveChanged {
+        gateway_id: Option<Uuid>,
+    },
     TrafficError(TrafficEntry),
-    UsageDelta { gateway_id: Uuid, model: String, input: u64, output: u64, cache: u64 },
-    LoginCompleted { gateway_id: Uuid, session_token: String, user_id: Option<String>, user_name: Option<String> },
-    LoginFailed { gateway_id: Uuid, message: String },
-    LoginExpired { gateway_id: Uuid },
+    UsageDelta {
+        gateway_id: Uuid,
+        model: String,
+        input: u64,
+        output: u64,
+        cache: u64,
+    },
+    LoginCompleted {
+        gateway_id: Uuid,
+        session_token: String,
+        user_id: Option<String>,
+        user_name: Option<String>,
+    },
+    LoginFailed {
+        gateway_id: Uuid,
+        message: String,
+    },
+    LoginExpired {
+        gateway_id: Uuid,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum Topic { Health, Active, Traffic, Usage, Login }
+pub enum Topic {
+    Health,
+    Active,
+    Traffic,
+    Usage,
+    Login,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayInput {
@@ -161,12 +264,27 @@ pub struct ActiveView {
     pub models: ModelSelection,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", content = "id", rename_all = "snake_case")]
+pub enum ClaudeExtraSelection {
+    #[default]
+    Inherit,
+    Disabled,
+    Preset(Uuid),
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelSelection {
     pub claude: Option<String>,
+    #[serde(default)]
+    pub claude_subagent: Option<String>,
     pub claude_small: Option<String>,
     pub codex: Option<String>,
+    #[serde(default)]
+    pub codex_subagent: Option<String>,
     pub gemini: Option<String>,
+    #[serde(default)]
+    pub claude_extra: ClaudeExtraSelection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,15 +296,29 @@ pub struct ModelCatalog {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum HealthStatus { Healthy, Degraded, Down, Unknown }
+pub enum HealthStatus {
+    Healthy,
+    Degraded,
+    Down,
+    Unknown,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum KeystoreKind { System, EncryptedFile, Env }
+pub enum KeystoreKind {
+    System,
+    EncryptedFile,
+    Env,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TimeRange { Today, Week, Days7, Days30 }
+pub enum TimeRange {
+    Today,
+    Week,
+    Days7,
+    Days30,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageReport {
@@ -206,10 +338,17 @@ pub struct UsageRow {
 /// Range selector used by the TUI Usage tab (distinct from `TimeRange` used by GUI).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum UsageRange { Today, Last7Days, Last30Days, AllTime }
+pub enum UsageRange {
+    Today,
+    Last7Days,
+    Last30Days,
+    AllTime,
+}
 
 impl Default for UsageRange {
-    fn default() -> Self { UsageRange::Today }
+    fn default() -> Self {
+        UsageRange::Today
+    }
 }
 
 /// Per-gateway/model usage row returned for the TUI Usage tab.
@@ -258,9 +397,13 @@ pub struct GatewaySummary {
     #[serde(default)]
     pub claude_model: Option<String>,
     #[serde(default)]
+    pub claude_subagent_model: Option<String>,
+    #[serde(default)]
     pub claude_small_model: Option<String>,
     #[serde(default)]
     pub codex_model: Option<String>,
+    #[serde(default)]
+    pub codex_subagent_model: Option<String>,
     #[serde(default)]
     pub gemini_model: Option<String>,
     #[serde(default)]
@@ -272,12 +415,16 @@ pub struct Settings {
     pub client_name: String,
     pub auto_failover: bool,
     pub launch_at_login: bool,
+    #[serde(default)]
+    pub managed_clients: crate::cli_target::ManagedClients,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SettingsUpdate {
     pub client_name: Option<String>,
     pub launch_at_login: Option<bool>,
+    #[serde(default)]
+    pub managed_clients: Option<crate::cli_target::ManagedClients>,
 }
 
 /// A recent error entry shown in the TUI Errors tab.
@@ -303,6 +450,8 @@ pub struct TuiSettings {
     pub log_path: String,
     pub auto_launch: bool,
     pub auto_failover: bool,
+    #[serde(default)]
+    pub managed_clients: crate::cli_target::ManagedClients,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ClaudeExtraConfigDialog } from "@/components/ClaudeExtraConfigDialog";
+import { ModelSettings } from "@/components/ModelSettings";
 import {
   Select,
   SelectContent,
@@ -19,9 +21,21 @@ import {
   type ApiKey,
   type DeviceCodeResponse,
   type ModelList,
+  type ClaudeExtraConfig,
+  DEFAULT_CLAUDE_EXTRA_CONFIG_ID,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { extractErrorMessage } from "@/lib/error";
+import {
+  claudeRoleModels,
+  codexModels as getCodexModels,
+  geminiModels as getGeminiModels,
+  preferredClaudeCodeModel,
+  preferredCodexModel,
+  preferredCodexSubagentModel,
+  preferredGeminiModel,
+  reconcileModelSelection,
+} from "@/lib/models";
 import {
   Loader2,
   Check,
@@ -33,11 +47,19 @@ import {
 
 interface AddGatewayCardProps {
   onAdded: () => void;
+  extraConfigs: ClaudeExtraConfig[];
+  onExtraConfigsChanged: (configs: ClaudeExtraConfig[]) => void;
+  managedClients: import("@/lib/api").ManagedClients;
 }
 
 type Phase = "idle" | "url" | "device" | "config";
 
-export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
+export function AddGatewayCard({
+  onAdded,
+  extraConfigs,
+  onExtraConfigsChanged,
+  managedClients,
+}: AddGatewayCardProps) {
   const { t } = useI18n();
   const [phase, setPhase] = useState<Phase>("idle");
   const [url, setUrl] = useState("");
@@ -48,6 +70,8 @@ export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
   const [deviceCode, setDeviceCode] = useState<DeviceCodeResponse | null>(null);
   const [copied, setCopied] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const modelRequestRef = useRef(0);
+  const extraDefaultInitializedRef = useRef(false);
 
   // Auth result
   const [sessionToken, setSessionToken] = useState("");
@@ -58,10 +82,15 @@ export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [selectedKeyId, setSelectedKeyId] = useState<string | null>(null);
   const [models, setModels] = useState<ModelList | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [claudeModel, setClaudeModel] = useState("");
+  const [claudeSubagentModel, setClaudeSubagentModel] = useState("");
   const [claudeSmallModel, setClaudeSmallModel] = useState("");
   const [codexModel, setCodexModel] = useState("");
+  const [codexSubagentModel, setCodexSubagentModel] = useState("");
   const [geminiModel, setGeminiModel] = useState("");
+  const [claudeExtraConfigId, setClaudeExtraConfigId] = useState<string | null>(null);
+  const [extraDialogOpen, setExtraDialogOpen] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -69,7 +98,17 @@ export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!extraDefaultInitializedRef.current && extraConfigs.length > 0) {
+      setClaudeExtraConfigId(
+        extraConfigs.find((config) => config.id === DEFAULT_CLAUDE_EXTRA_CONFIG_ID)?.id ?? null,
+      );
+      extraDefaultInitializedRef.current = true;
+    }
+  }, [extraConfigs]);
+
   const reset = () => {
+    modelRequestRef.current += 1;
     setPhase("idle");
     setUrl("");
     setError("");
@@ -82,10 +121,17 @@ export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
     setKeys([]);
     setSelectedKeyId(null);
     setModels(null);
+    setModelsLoading(false);
     setClaudeModel("");
+    setClaudeSubagentModel("");
     setClaudeSmallModel("");
     setCodexModel("");
+    setCodexSubagentModel("");
     setGeminiModel("");
+    setClaudeExtraConfigId(
+      extraConfigs.find((config) => config.id === DEFAULT_CLAUDE_EXTRA_CONFIG_ID)?.id ?? null,
+    );
+    extraDefaultInitializedRef.current = extraConfigs.length > 0;
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
@@ -169,46 +215,79 @@ export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
     []
   );
 
+  const applyModelCatalog = (modelsResult: ModelList | null) => {
+    setModels(modelsResult);
+    const modelIds = modelsResult?.data.map((model) => model.id) ?? [];
+    const claudeMainCandidates = claudeRoleModels(modelIds, "main");
+    const claudeSubagentCandidates = claudeRoleModels(modelIds, "subagent");
+    const claudeHaikuCandidates = claudeRoleModels(modelIds, "haiku");
+    const codexCandidates = getCodexModels(modelIds);
+    const geminiCandidates = getGeminiModels(modelIds);
+
+    if (managedClients.claude) {
+      setClaudeModel((current) =>
+        reconcileModelSelection(current, claudeMainCandidates, preferredClaudeCodeModel(modelIds, "main")),
+      );
+      setClaudeSubagentModel((current) =>
+        reconcileModelSelection(current, claudeSubagentCandidates, preferredClaudeCodeModel(modelIds, "subagent")),
+      );
+      setClaudeSmallModel((current) =>
+        reconcileModelSelection(current, claudeHaikuCandidates, preferredClaudeCodeModel(modelIds, "haiku")),
+      );
+    }
+    if (managedClients.codex) {
+      const preferredCodex = preferredCodexModel(modelIds);
+      setCodexModel((current) =>
+        reconcileModelSelection(current, codexCandidates, preferredCodex),
+      );
+      setCodexSubagentModel((current) =>
+        reconcileModelSelection(
+          current,
+          codexCandidates,
+          preferredCodexSubagentModel(
+            modelIds,
+            codexCandidates.includes(codexModel) ? codexModel : preferredCodex,
+          ),
+        ),
+      );
+    }
+    if (managedClients.gemini) {
+      setGeminiModel((current) =>
+        reconcileModelSelection(current, geminiCandidates, preferredGeminiModel(modelIds)),
+      );
+    }
+  };
+
   const loadModelsForKey = async (gatewayUrl: string, keyValue: string) => {
+    const requestId = ++modelRequestRef.current;
+    applyModelCatalog(null);
+    setModelsLoading(true);
     try {
       const resp = await fetch(`${gatewayUrl}/v1/models`, {
         headers: { "x-api-key": keyValue },
       });
-      if (resp.ok) {
-        const modelsResult: ModelList = await resp.json();
-        setModels(modelsResult);
-
-        if (modelsResult.data.length > 0) {
-          const modelIds = modelsResult.data.map((m) => m.id).sort((a, b) => b.localeCompare(a));
-          setClaudeModel(
-            modelIds.find((id) => id.toLowerCase().includes("opus")) ||
-            modelIds.find((id) => id.toLowerCase().includes("claude")) || ""
-          );
-          setClaudeSmallModel(
-            modelIds.find((id) => id.toLowerCase().includes("haiku")) ||
-            modelIds.find((id) => id.toLowerCase().includes("claude")) || ""
-          );
-          setCodexModel(
-            modelIds.find((id) => /gpt-[5-9]/i.test(id)) ||
-            modelIds.find((id) => /\bo[1-9]/i.test(id)) || ""
-          );
-          setGeminiModel(
-            modelIds.find((id) => id.toLowerCase().includes("gemini")) || ""
-          );
-        }
-      }
+      if (!resp.ok) return;
+      const modelsResult: ModelList = await resp.json();
+      if (requestId !== modelRequestRef.current) return;
+      applyModelCatalog(modelsResult);
     } catch {
-      // Models fetch failed — not critical
+      // The catalog was cleared before the request to avoid stale key/model pairs.
+    } finally {
+      if (requestId === modelRequestRef.current) setModelsLoading(false);
     }
   };
 
   const handleKeyChange = async (keyId: string) => {
     setSelectedKeyId(keyId);
-    const key = keys.find((k) => k.id === keyId);
-    if (key) {
-      const trimmedUrl = url.replace(/\/+$/, "");
-      await loadModelsForKey(trimmedUrl, key.key);
+    const key = keys.find((candidate) => candidate.id === keyId);
+    if (!key) {
+      modelRequestRef.current += 1;
+      applyModelCatalog(null);
+      setModelsLoading(false);
+      return;
     }
+    const trimmedUrl = url.replace(/\/+$/, "");
+    await loadModelsForKey(trimmedUrl, key.key);
   };
 
   const handleSave = async () => {
@@ -228,21 +307,19 @@ export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
         userName,
       });
 
-      const allModelIds = models?.data.map((m) => m.id) || [];
-      const cModels = allModelIds.filter((m) => m.toLowerCase().includes("claude") && !m.toLowerCase().includes("haiku"));
-      const csModels = allModelIds.filter((m) => m.toLowerCase().includes("claude"));
-      const xModels = allModelIds.filter((m) => { const l = m.toLowerCase(); return /gpt-[5-9]/.test(l) || /\bo[1-9]/.test(l); });
-      const gModels = allModelIds.filter((m) => m.toLowerCase().includes("gemini"));
-
       await applyConfig({
         gatewayId: gw.id,
         keyId: selected.id,
         keyName: selected.name,
         keyValue: selected.key,
-        claudeModel: cModels.length > 0 ? (claudeModel || undefined) : undefined,
-        claudeSmallModel: csModels.length > 0 ? (claudeSmallModel || undefined) : undefined,
-        codexModel: xModels.length > 0 ? (codexModel || undefined) : undefined,
-        geminiModel: gModels.length > 0 ? (geminiModel || undefined) : undefined,
+        claudeModel: managedClients.claude && claudeMainModels.includes(claudeModel) ? claudeModel : undefined,
+        claudeSubagentModel: managedClients.claude && claudeSubagentModels.includes(claudeSubagentModel) ? claudeSubagentModel : undefined,
+        claudeSmallModel: managedClients.claude && claudeHaikuModels.includes(claudeSmallModel) ? claudeSmallModel : undefined,
+        codexModel: managedClients.codex && codexModels.includes(codexModel) ? codexModel : undefined,
+        codexSubagentModel: managedClients.codex && codexModels.includes(codexSubagentModel) ? codexSubagentModel : undefined,
+        geminiModel: managedClients.gemini && geminiModels.includes(geminiModel) ? geminiModel : undefined,
+        claudeExtraConfigId: managedClients.claude ? claudeExtraConfigId ?? undefined : undefined,
+        claudeExtraConfigSet: managedClients.claude,
       });
 
       reset();
@@ -265,19 +342,11 @@ export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
 
   // Model filtering
   const allModelIds = models?.data.map((m) => m.id) || [];
-  const claudeModels = allModelIds.filter((m) =>
-    m.toLowerCase().includes("claude") && !m.toLowerCase().includes("haiku")
-  );
-  const claudeSmallModels = allModelIds.filter((m) =>
-    m.toLowerCase().includes("claude")
-  );
-  const codexModels = allModelIds.filter((m) => {
-    const lower = m.toLowerCase();
-    return /gpt-[5-9]/.test(lower) || /\bo[1-9]/.test(lower);
-  });
-  const geminiModels = allModelIds.filter((m) =>
-    m.toLowerCase().includes("gemini")
-  );
+  const claudeMainModels = claudeRoleModels(allModelIds, "main");
+  const claudeSubagentModels = claudeRoleModels(allModelIds, "subagent");
+  const claudeHaikuModels = claudeRoleModels(allModelIds, "haiku");
+  const codexModels = getCodexModels(allModelIds);
+  const geminiModels = getGeminiModels(allModelIds);
 
   // Idle state: just a button
   if (phase === "idle") {
@@ -428,12 +497,30 @@ export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
                 <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                   {t('gateway.models')}
                 </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <ModelSelect label={t('models.claude')} value={claudeModel} onChange={setClaudeModel} models={claudeModels} noModelsText={t('gateway.noModels')} />
-                  <ModelSelect label={t('models.claudeSmall')} value={claudeSmallModel} onChange={setClaudeSmallModel} models={claudeSmallModels} noModelsText={t('gateway.noModels')} />
-                  <ModelSelect label={t('models.codex')} value={codexModel} onChange={setCodexModel} models={codexModels} noModelsText={t('gateway.noModels')} />
-                  <ModelSelect label={t('models.gemini')} value={geminiModel} onChange={setGeminiModel} models={geminiModels} noModelsText={t('gateway.noModels')} />
-                </div>
+                <ModelSettings
+                  managedClients={managedClients}
+                  claudeModel={claudeModel}
+                  onClaudeModelChange={setClaudeModel}
+                  claudeModels={claudeMainModels}
+                  claudeSubagentModel={claudeSubagentModel}
+                  onClaudeSubagentModelChange={setClaudeSubagentModel}
+                  claudeSubagentModels={claudeSubagentModels}
+                  claudeHaikuModel={claudeSmallModel}
+                  onClaudeHaikuModelChange={setClaudeSmallModel}
+                  claudeHaikuModels={claudeHaikuModels}
+                  codexModel={codexModel}
+                  onCodexModelChange={setCodexModel}
+                  codexModels={codexModels}
+                  codexSubagentModel={codexSubagentModel}
+                  onCodexSubagentModelChange={setCodexSubagentModel}
+                  geminiModel={geminiModel}
+                  onGeminiModelChange={setGeminiModel}
+                  geminiModels={geminiModels}
+                  extraConfigs={extraConfigs}
+                  extraConfigId={claudeExtraConfigId}
+                  onExtraConfigChange={setClaudeExtraConfigId}
+                  onManageExtraConfigs={() => setExtraDialogOpen(true)}
+                />
               </div>
             )}
 
@@ -454,7 +541,7 @@ export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
               <Button
                 size="sm"
                 onClick={handleSave}
-                disabled={loading || !selectedKeyId}
+                disabled={loading || modelsLoading || !selectedKeyId}
                 className="h-7 px-3 text-xs"
               >
                 {loading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Check className="h-3 w-3 mr-1" />}
@@ -464,48 +551,16 @@ export function AddGatewayCard({ onAdded }: AddGatewayCardProps) {
           </>
         )}
       </CardContent>
+      <ClaudeExtraConfigDialog
+        open={extraDialogOpen}
+        onOpenChange={setExtraDialogOpen}
+        configs={extraConfigs}
+        selectedId={claudeExtraConfigId}
+        onChanged={(configs, selectedId) => {
+          onExtraConfigsChanged(configs);
+          if (selectedId !== undefined) setClaudeExtraConfigId(selectedId);
+        }}
+      />
     </Card>
-  );
-}
-
-function ModelSelect({
-  label,
-  value,
-  onChange,
-  models,
-  noModelsText,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  models: string[];
-  noModelsText?: string;
-}) {
-  if (models.length === 0) {
-    return (
-      <div className="space-y-1">
-        <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
-        <div className="h-7 flex items-center px-2 text-xs text-muted-foreground/40 italic">
-          {noModelsText || "No models available"}
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="space-y-1">
-      <label className="text-[10px] font-medium text-muted-foreground">{label}</label>
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger className="h-7 text-xs border-border/60 transition-elegant-fast bg-background/50">
-          <SelectValue placeholder="—" />
-        </SelectTrigger>
-        <SelectContent className="border-border/60">
-          {models.map((m) => (
-            <SelectItem key={m} value={m} className="text-xs font-mono cursor-pointer">
-              {m}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
   );
 }

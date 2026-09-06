@@ -7,7 +7,7 @@
 //!   - `Uuid → String`: `id.to_string()`
 //!   - `String → Uuid`: `Uuid::parse_str(&s).unwrap_or_default()`
 
-use crate::database::{ActiveConfig, Gateway};
+use crate::database::{ActiveConfig, ClaudeExtraConfig, Gateway};
 use crate::ipc::protocol::*;
 use crate::{AppError, Database, SharedEventSink};
 use std::sync::Arc;
@@ -30,6 +30,64 @@ pub fn pick_key_id(gw: &Gateway, existing: Option<&ActiveConfig>) -> Option<Stri
             .filter(|c| c.gateway_id.as_deref() == Some(gw.id.as_str()))
             .and_then(|c| c.key_id.clone())
     })
+}
+
+const RESERVED_CLAUDE_EXTRA_KEYS: &[&str] = &[
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+];
+
+fn validate_claude_extra_config(
+    name: &str,
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<(), AppError> {
+    if name.trim().is_empty() {
+        return Err(AppError::Config(
+            "Claude Extra config name cannot be empty".into(),
+        ));
+    }
+    if env.is_empty() {
+        return Err(AppError::Config(
+            "Claude Extra config must contain at least one entry".into(),
+        ));
+    }
+    for key in env.keys() {
+        let mut chars = key.chars();
+        let valid = chars
+            .next()
+            .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+            && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric());
+        if !valid {
+            return Err(AppError::Config(format!("Invalid environment key: {key}")));
+        }
+        if RESERVED_CLAUDE_EXTRA_KEYS
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(key))
+        {
+            return Err(AppError::Config(format!(
+                "{key} is managed by LLM Relay and cannot be used in Claude Extra config"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub struct PendingWslTarget {
+    pub name: String,
+    pub home: Option<String>,
+    pub installed: crate::cli_target::InstalledTools,
+    pub reason: String,
+}
+
+pub struct ApplyPlan {
+    pub ready: Vec<crate::cli_target::CliTarget>,
+    pub pending: Vec<PendingWslTarget>,
+    pub retained_keys: std::collections::HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -72,11 +130,7 @@ impl Service {
     ) -> Result<Snapshot, AppError> {
         let gateways = self.list_gateway_views()?;
         let active = self.active_view()?;
-        let auto_failover = self
-            .db
-            .get_setting("auto_failover")?
-            .as_deref()
-            == Some("true");
+        let auto_failover = self.db.get_setting("auto_failover")?.as_deref() == Some("true");
         Ok(Snapshot {
             gateways,
             active,
@@ -148,10 +202,16 @@ impl Service {
                 healthy: health.as_ref().map(|h| h.is_healthy),
                 latency_ms: health.as_ref().and_then(|h| h.latency_ms),
                 needs_login,
-                active_key_name: if is_active { active_key_name.clone() } else { None },
+                active_key_name: if is_active {
+                    active_key_name.clone()
+                } else {
+                    None
+                },
                 claude_model: gw.claude_model,
+                claude_subagent_model: gw.claude_subagent_model,
                 claude_small_model: gw.claude_small_model,
                 codex_model: gw.codex_model,
+                codex_subagent_model: gw.codex_subagent_model,
                 gemini_model: gw.gemini_model,
                 user_name: gw.user_name,
             });
@@ -174,9 +234,16 @@ impl Service {
             key_name,
             models: ModelSelection {
                 claude: cfg.claude_model,
+                claude_subagent: cfg.claude_subagent_model,
                 claude_small: cfg.claude_small_model,
                 codex: cfg.codex_model,
+                codex_subagent: cfg.codex_subagent_model,
                 gemini: cfg.gemini_model,
+                claude_extra: cfg
+                    .claude_extra_config_id
+                    .and_then(|id| Uuid::parse_str(&id).ok())
+                    .map(ClaudeExtraSelection::Preset)
+                    .unwrap_or(ClaudeExtraSelection::Disabled),
             },
         }))
     }
@@ -197,10 +264,13 @@ impl Service {
             sort_order: 0,
             created_at: now,
             claude_model: None,
+            claude_subagent_model: None,
             claude_small_model: None,
             codex_model: None,
+            codex_subagent_model: None,
             gemini_model: None,
             preferred_key_id: None,
+            claude_extra_config_id: self.db.default_claude_extra_config_id()?,
         };
         self.db.add_gateway(&gw)?;
         Ok(id)
@@ -228,6 +298,34 @@ impl Service {
         Ok(())
     }
 
+    pub fn list_claude_extra_configs(&self) -> Result<Vec<ClaudeExtraConfig>, AppError> {
+        self.db.list_claude_extra_configs()
+    }
+
+    pub fn create_claude_extra_config(
+        &self,
+        name: String,
+        env: std::collections::BTreeMap<String, String>,
+    ) -> Result<ClaudeExtraConfig, AppError> {
+        validate_claude_extra_config(&name, &env)?;
+        self.db.create_claude_extra_config(name.trim(), &env)
+    }
+
+    pub fn update_claude_extra_config(
+        &self,
+        id: Uuid,
+        name: String,
+        env: std::collections::BTreeMap<String, String>,
+    ) -> Result<ClaudeExtraConfig, AppError> {
+        validate_claude_extra_config(&name, &env)?;
+        self.db
+            .update_claude_extra_config(&id.to_string(), name.trim(), &env)
+    }
+
+    pub fn delete_claude_extra_config(&self, id: Uuid) -> Result<(), AppError> {
+        self.db.delete_claude_extra_config(&id.to_string())
+    }
+
     /// Set the active gateway/key/model selection and apply CLI configs.
     pub async fn set_active(
         &self,
@@ -236,13 +334,54 @@ impl Service {
         models: ModelSelection,
     ) -> Result<(), AppError> {
         let _g = self.switch_lock.lock().await;
+        self.set_active_locked(gateway_id, key_id, models).await
+    }
 
+    async fn set_active_locked(
+        &self,
+        gateway_id: Uuid,
+        key_id: Uuid,
+        models: ModelSelection,
+    ) -> Result<(), AppError> {
+        let db_active = self.db.get_active_config()?.gateway_id.is_some();
+        crate::config_writer::lifecycle::recover(db_active)?;
         let gw_id_str = gateway_id.to_string();
         let key_id_str = key_id.to_string();
 
         // Fetch the key value from the gateway so the proxy can forward with it.
-        let gw = self.db.get_gateway(&gw_id_str)?
+        let gw = self
+            .db
+            .get_gateway(&gw_id_str)?
             .ok_or_else(|| AppError::Config(format!("gateway {gateway_id} not found")))?;
+        let mut models = models;
+        if let Some(main) = models.claude.as_deref() {
+            models.claude = Some(crate::model_id::normalize_claude_main_model(main));
+        }
+        let all_claude = [
+            models.claude.as_deref(),
+            models.claude_subagent.as_deref(),
+            models.claude_small.as_deref(),
+        ]
+        .into_iter()
+        .all(|model| model.is_some_and(crate::model_id::is_claude_family_model));
+        let requested_extra_config_id = match &models.claude_extra {
+            ClaudeExtraSelection::Inherit => gw.claude_extra_config_id.clone(),
+            ClaudeExtraSelection::Disabled => None,
+            ClaudeExtraSelection::Preset(id) => Some(id.to_string()),
+        };
+        let claude_extra_config_id = if all_claude {
+            requested_extra_config_id
+                .or_else(|| self.db.default_claude_extra_config_id().ok().flatten())
+        } else {
+            self.db.default_claude_extra_config_id()?
+        };
+        let claude_extra_config =
+            match claude_extra_config_id.as_deref() {
+                Some(id) => Some(self.db.get_claude_extra_config(id)?.ok_or_else(|| {
+                    AppError::Config(format!("Claude Extra config {id} not found"))
+                })?),
+                None => None,
+            };
         let keys = crate::gateway::fetch_keys_with_fallback(
             &gw.url,
             gw.session_token.as_deref(),
@@ -273,45 +412,90 @@ impl Service {
             key_name,
             key_value,
             claude_model: models.claude.clone(),
+            claude_subagent_model: models.claude_subagent.clone(),
             claude_small_model: models.claude_small.clone(),
             codex_model: models.codex.clone(),
+            codex_subagent_model: models.codex_subagent.clone(),
             gemini_model: models.gemini.clone(),
+            claude_extra_config_id: claude_extra_config_id.clone(),
             auto_switch: existing.auto_switch,
             applied_at: Some(chrono::Utc::now().to_rfc3339()),
             last_switched_at: existing.last_switched_at,
         };
-        self.db.set_active_config(&config)?;
+        // Finish every fallible external config operation before publishing the
+        // new active selection. In particular, an old snapshot may need an
+        // atomic on-disk upgrade before `apply_to_targets` can write anything;
+        // if that fails, the proxy-visible DB state must remain unchanged.
+        let apply_plan = self.build_apply_plan();
+        let targets = &apply_plan.ready;
+        let inactive_use = existing.gateway_id.is_none();
+        let shell_paths = crate::config_writer::shell_rc_paths(targets);
+        let mut file_lifecycle = if inactive_use {
+            Some(crate::config_writer::lifecycle::prepare_use(
+                targets,
+                &apply_plan.pending,
+                &shell_paths,
+            )?)
+        } else {
+            crate::config_writer::lifecycle::prepare_active_apply(&targets, &shell_paths)?
+        };
 
-        // Persist per-gateway model preferences + key
-        self.db.update_gateway_config(
-            &gateway_id.to_string(),
-            Some(&key_id.to_string()),
-            models.claude.as_deref(),
-            models.claude_small.as_deref(),
-            models.codex.as_deref(),
-            models.gemini.as_deref(),
-        )?;
+        // Host-level shell env for Codex CLI, which will not start without
+        // OPENAI_API_KEY set. Do this before the per-target writes so a registry
+        // failure cannot leave fresh CLI files paired with the old active DB row.
+        // WSL targets get their own rc line inside `apply_to_targets`.
+        if targets.iter().any(|t| t.installed.codex) {
+            crate::config_writer::ensure_openai_api_key_env()?;
+        }
 
         // Apply CLI config files so claude/codex/gemini CLIs use the proxy.
         // Iterate over Windows + every selected WSL distro that has a
         // resolved URL. Distros without resolved_url are skipped here
         // and surface as "Unreachable" in the UI until Refresh succeeds.
-        let targets = self.build_apply_targets();
-        crate::config_writer::apply_to_targets(
-            &targets,
+        let report = match crate::config_writer::apply_to_targets(
+            targets,
+            Some(&apply_plan.retained_keys),
             crate::proxy_server::PLACEHOLDER_KEY,
             models.claude.as_deref(),
+            models.claude_subagent.as_deref(),
             models.claude_small.as_deref(),
             models.codex.as_deref(),
+            models.codex_subagent.as_deref(),
             models.gemini.as_deref(),
-        )?;
-        // Host-level shell env for Codex CLI, which will not start without
-        // OPENAI_API_KEY set. Unrelated to the per-target file writes above —
-        // it lands in the registry / a shell rc, not in a CLI's config. WSL
-        // targets get their own rc line inside `apply_to_targets`.
-        if targets.iter().any(|t| t.installed.codex) {
-            crate::config_writer::ensure_openai_api_key_env()?;
+            claude_extra_config.as_ref().map(|config| &config.env),
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                if inactive_use {
+                    if let Some(manifest) = file_lifecycle.as_mut() {
+                        let _ = crate::config_writer::lifecycle::rollback_use(manifest);
+                    }
+                }
+                return Err(error);
+            }
+        };
+        if let Some(manifest) = file_lifecycle.as_mut() {
+            crate::config_writer::lifecycle::mark_targets_active(manifest, &report.succeeded)?;
+            for (key, error) in &report.failed {
+                crate::config_writer::lifecycle::mark_target_failed(key, error)?;
+            }
         }
+
+        self.db.set_active_config(&config)?;
+
+        // Persist per-gateway model preferences + key only after the CLI files
+        // successfully reflect the same selection.
+        self.db.update_gateway_config(
+            &gateway_id.to_string(),
+            Some(&key_id.to_string()),
+            models.claude.as_deref(),
+            models.claude_subagent.as_deref(),
+            models.claude_small.as_deref(),
+            models.codex.as_deref(),
+            models.codex_subagent.as_deref(),
+            models.gemini.as_deref(),
+            claude_extra_config_id.as_deref(),
+        )?;
 
         crate::events::emit_typed(
             &*self.sink,
@@ -326,7 +510,6 @@ impl Service {
     /// Clear the active selection and wipe CLI config files.
     pub async fn clear_active(&self) -> Result<(), AppError> {
         let _g = self.switch_lock.lock().await;
-
         let existing = self.db.get_active_config()?;
         let config = ActiveConfig {
             gateway_id: None,
@@ -334,16 +517,36 @@ impl Service {
             key_name: None,
             key_value: None,
             claude_model: None,
+            claude_subagent_model: None,
             claude_small_model: None,
             codex_model: None,
+            codex_subagent_model: None,
             gemini_model: None,
+            claude_extra_config_id: None,
             auto_switch: existing.auto_switch,
             applied_at: None,
             last_switched_at: existing.last_switched_at,
         };
-        self.db.set_active_config(&config)?;
+        // Back up the current Relay working files before restoring the exact
+        // files captured when this inactive → Use cycle began. The legacy
+        // field-level snapshot path remains a fallback for pre-lifecycle users.
+        let lifecycle_distros: std::collections::HashSet<String> =
+            crate::config_writer::lifecycle::load()
+                .ok()
+                .flatten()
+                .into_iter()
+                .flat_map(|manifest| manifest.targets)
+                .filter_map(|target| target.distro_name)
+                .collect();
+        if !crate::config_writer::lifecycle::manifest_exists() {
+            return Err(AppError::Config(
+                "No full-file origin manifest exists; refusing to restore legacy field snapshots"
+                    .into(),
+            ));
+        }
+        crate::config_writer::lifecycle::disable()?;
 
-        crate::config_writer::clear_targets_from_snapshots()?;
+        self.db.set_active_config(&config)?;
 
         // Defensive: state machine may have injected /etc/hosts entries on
         // selected distros that never had an apply run against them (so no
@@ -353,11 +556,24 @@ impl Service {
         #[cfg(target_os = "windows")]
         {
             let hostname = crate::wsl::hosts::relay_hostname();
+            let mut cleared = std::collections::HashSet::new();
             if let Ok(distros) = self.db.list_wsl_distros() {
-                for d in distros.iter().filter(|d| d.selected) {
+                for d in distros
+                    .iter()
+                    .filter(|d| d.selected || lifecycle_distros.contains(&d.name))
+                {
                     if let Err(e) = crate::wsl::hosts::clear_hosts_entry(&d.name, &hostname) {
                         log::warn!("clear hosts entry on disable for {}: {e}", d.name);
                     }
+                    cleared.insert(d.name.clone());
+                }
+            }
+            for distro in lifecycle_distros
+                .into_iter()
+                .filter(|distro| !cleared.contains(distro))
+            {
+                if let Err(e) = crate::wsl::hosts::clear_hosts_entry(&distro, &hostname) {
+                    log::warn!("clear hosts entry on disable for {distro}: {e}");
                 }
             }
         }
@@ -373,7 +589,8 @@ impl Service {
     /// Persist the auto-failover preference.
     /// Maps to `ActiveConfig::auto_switch` (same concept, different name in DB).
     pub async fn set_auto_failover(&self, on: bool) -> Result<(), AppError> {
-        self.db.set_setting("auto_failover", if on { "true" } else { "false" })?;
+        self.db
+            .set_setting("auto_failover", if on { "true" } else { "false" })?;
         Ok(())
     }
 
@@ -425,55 +642,35 @@ impl Service {
     /// NOTE: The upstream `/api/models` endpoint returns a flat list of ModelInfo
     /// objects. There is no server-side categorisation by provider in the current
     /// gateway API. We classify models by their ID prefix as a best-effort mapping.
-    /// TODO Phase 6: real key store — retrieve key value from persistent store
     pub async fn fetch_models(
         &self,
         gateway_id: Uuid,
-        _key_id: Uuid,
+        key_id: Uuid,
     ) -> Result<ModelCatalog, AppError> {
         let gw = self
             .db
             .get_gateway(&gateway_id.to_string())?
             .ok_or_else(|| AppError::Config(format!("gateway {gateway_id} not found")))?;
+        let key_id = key_id.to_string();
+        let keys = crate::gateway::fetch_keys_with_fallback(
+            &gw.url,
+            gw.session_token.as_deref(),
+            &gw.auth_key,
+            Some(&key_id),
+        )
+        .await?;
+        let key = keys.iter().find(|key| key.id == key_id).ok_or_else(|| {
+            AppError::Config(format!(
+                "key {key_id} is not visible on {} — log in again and refresh the key list",
+                gw.name
+            ))
+        })?;
 
-        // TODO Phase 6: real key store — look up key value by key_id
-        // For now use the gateway auth_key / session_token as the bearer token.
-        let auth = gw
-            .session_token
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&gw.auth_key);
+        let model_list = crate::gateway::fetch_models(&gw.url, &key.key).await?;
 
-        let model_list = crate::gateway::fetch_models(&gw.url, auth).await?;
-
-        let mut claude = Vec::new();
-        let mut codex = Vec::new();
-        let mut gemini = Vec::new();
-
-        for m in model_list.data {
-            let id_lower = m.id.to_lowercase();
-            if id_lower.contains("claude") {
-                claude.push(m.id);
-            } else if id_lower.contains("gpt")
-                || id_lower.contains("o1")
-                || id_lower.contains("o3")
-                || id_lower.contains("o4")
-                || id_lower.contains("codex")
-            {
-                codex.push(m.id);
-            } else if id_lower.contains("gemini") {
-                gemini.push(m.id);
-            } else {
-                // Unknown provider — add to claude bucket as a fallback
-                claude.push(m.id);
-            }
-        }
-
-        Ok(ModelCatalog {
-            claude,
-            codex,
-            gemini,
-        })
+        Ok(classify_models(
+            model_list.data.into_iter().map(|model| model.id),
+        ))
     }
 
     /// Return aggregated usage statistics for the requested time range.
@@ -484,9 +681,7 @@ impl Service {
     ) -> Result<UsageReport, AppError> {
         let period = range_to_period(range);
         let gw_id_str = gateway_id.map(|id| id.to_string());
-        let rows = self
-            .db
-            .get_usage_stats(gw_id_str.as_deref(), period)?;
+        let rows = self.db.get_usage_stats(gw_id_str.as_deref(), period)?;
         Ok(UsageReport {
             range,
             rows: rows
@@ -508,17 +703,14 @@ impl Service {
         gateway_id: Option<Uuid>,
     ) -> Result<Vec<TrafficEntry>, AppError> {
         let gw_id_str = gateway_id.map(|id| id.to_string());
-        let logs = self
-            .db
-            .get_traffic_log(gw_id_str.as_deref(), 500, false)?;
+        let logs = self.db.get_traffic_log(gw_id_str.as_deref(), 500, false)?;
         Ok(logs
             .into_iter()
             .map(|l| {
                 let at = chrono::DateTime::parse_from_rfc3339(&l.logged_at)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now());
-                let gw_id =
-                    Uuid::parse_str(&l.gateway_id).unwrap_or_default();
+                let gw_id = Uuid::parse_str(&l.gateway_id).unwrap_or_default();
                 TrafficEntry {
                     at,
                     gateway_id: gw_id,
@@ -534,24 +726,14 @@ impl Service {
 
     /// Return the current application settings.
     pub async fn get_settings(&self) -> Result<Settings, AppError> {
-        let client_name = self
-            .db
-            .get_setting("client_name")?
-            .unwrap_or_default();
-        let auto_failover = self
-            .db
-            .get_setting("auto_failover")?
-            .as_deref()
-            == Some("true");
-        let launch_at_login = self
-            .db
-            .get_setting("launch_at_login")?
-            .as_deref()
-            == Some("true");
+        let client_name = self.db.get_setting("client_name")?.unwrap_or_default();
+        let auto_failover = self.db.get_setting("auto_failover")?.as_deref() == Some("true");
+        let launch_at_login = self.db.get_setting("launch_at_login")?.as_deref() == Some("true");
         Ok(Settings {
             client_name,
             auto_failover,
             launch_at_login,
+            managed_clients: self.db.get_managed_clients()?,
         })
     }
 
@@ -564,7 +746,69 @@ impl Service {
             self.db
                 .set_setting("launch_at_login", if b { "true" } else { "false" })?;
         }
+        if let Some(clients) = u.managed_clients {
+            self.set_managed_clients(clients).await?;
+        }
         Ok(())
+    }
+
+    pub async fn set_managed_clients(
+        &self,
+        clients: crate::cli_target::ManagedClients,
+    ) -> Result<(), AppError> {
+        if !clients.any() {
+            return Err(AppError::Config(
+                "At least one managed client must be selected".into(),
+            ));
+        }
+        let _guard = self.switch_lock.lock().await;
+        let active = self.db.get_active_config()?;
+        crate::config_writer::lifecycle::recover(active.gateway_id.is_some())?;
+        let previous = self.db.get_managed_clients()?;
+        if previous == clients {
+            return Ok(());
+        }
+        self.db.set_managed_clients(clients)?;
+        if active.gateway_id.is_none() {
+            return Ok(());
+        }
+        if let Err(error) = self.retry_active_config_locked(active.clone()).await {
+            self.db.set_managed_clients(previous)?;
+            if let Err(rollback) = self.retry_active_config_locked(active).await {
+                return Err(AppError::Config(format!(
+                    "managed client update failed: {error}; rollback failed: {rollback}"
+                )));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn retry_active_config_locked(&self, active: ActiveConfig) -> Result<(), AppError> {
+        let gateway_id = active
+            .gateway_id
+            .as_deref()
+            .ok_or_else(|| AppError::Config("No active gateway".into()))?;
+        let gateway = self
+            .db
+            .get_gateway(gateway_id)?
+            .ok_or_else(|| AppError::Config("active gateway not found".into()))?;
+        let key_id = pick_key_id(&gateway, Some(&active))
+            .ok_or_else(|| AppError::Config("active gateway key not found".into()))?;
+        self.set_active_locked(
+            Uuid::parse_str(gateway_id).map_err(|e| AppError::Config(e.to_string()))?,
+            Uuid::parse_str(&key_id).map_err(|e| AppError::Config(e.to_string()))?,
+            ModelSelection {
+                claude: active.claude_model,
+                claude_subagent: active.claude_subagent_model,
+                claude_small: active.claude_small_model,
+                codex: active.codex_model,
+                codex_subagent: active.codex_subagent_model,
+                gemini: active.gemini_model,
+                claude_extra: ClaudeExtraSelection::Inherit,
+            },
+        )
+        .await
     }
 
     /// Return per-gateway, per-model usage rows for the TUI Usage tab.
@@ -601,14 +845,20 @@ impl Service {
             .into_iter()
             .filter(|e| e.status >= 400 || e.error_detail.is_some())
             .map(|e| {
-                let kind = if e.status == 401 { "auth" }
-                    else if e.status >= 500 { "proxy" }
-                    else { "error" };
+                let kind = if e.status == 401 {
+                    "auth"
+                } else if e.status >= 500 {
+                    "proxy"
+                } else {
+                    "error"
+                };
                 ErrorRow {
                     timestamp_iso: e.logged_at,
                     gateway_name: e.gateway_name.unwrap_or_default(),
                     kind: kind.to_string(),
-                    message: e.error_detail.unwrap_or_else(|| format!("HTTP {}", e.status)),
+                    message: e
+                        .error_detail
+                        .unwrap_or_else(|| format!("HTTP {}", e.status)),
                 }
             })
             .collect())
@@ -645,6 +895,7 @@ impl Service {
             log_path,
             auto_launch,
             auto_failover,
+            managed_clients: self.db.get_managed_clients()?,
         })
     }
 
@@ -656,7 +907,8 @@ impl Service {
             "auto_launch not yet implemented: storing intent={} in DB but no OS registration",
             enabled
         );
-        self.db.set_setting("auto_launch", if enabled { "true" } else { "false" })?;
+        self.db
+            .set_setting("auto_launch", if enabled { "true" } else { "false" })?;
         Ok(())
     }
 
@@ -671,12 +923,20 @@ impl Service {
     }
 
     /// TUI: update a gateway's name and url only.
-    pub async fn update_gateway_simple(&self, id: Uuid, name: String, url: String) -> Result<(), AppError> {
-        self.update_gateway(id, GatewayUpdate {
-            name: Some(name),
-            url: Some(url),
-            auth_key: None,
-        })
+    pub async fn update_gateway_simple(
+        &self,
+        id: Uuid,
+        name: String,
+        url: String,
+    ) -> Result<(), AppError> {
+        self.update_gateway(
+            id,
+            GatewayUpdate {
+                name: Some(name),
+                url: Some(url),
+                auth_key: None,
+            },
+        )
         .await
     }
 
@@ -689,17 +949,45 @@ impl Service {
         _user_name: Option<String>,
     ) -> Result<(), AppError> {
         let id_str = gateway_id.to_string();
-        self.db.update_gateway_session(&id_str, false, Some(&session_token))?;
+        self.db
+            .update_gateway_session(&id_str, false, Some(&session_token))?;
         Ok(())
     }
 
     /// Get the active key_id and model preferences for a gateway.
-    pub async fn get_gateway_config(&self, gateway_id: Uuid) -> Result<(Option<Uuid>, Option<String>, Option<String>, Option<String>, Option<String>), AppError> {
+    pub async fn get_gateway_config(
+        &self,
+        gateway_id: Uuid,
+    ) -> Result<
+        (
+            Option<Uuid>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<Uuid>,
+        ),
+        AppError,
+    > {
         let id_str = gateway_id.to_string();
-        let gw = self.db.get_gateway(&id_str)?
+        let gw = self
+            .db
+            .get_gateway(&id_str)?
             .ok_or_else(|| AppError::Config(format!("gateway {gateway_id} not found")))?;
         let preferred = gw.preferred_key_id.and_then(|k| Uuid::parse_str(&k).ok());
-        Ok((preferred, gw.claude_model, gw.claude_small_model, gw.codex_model, gw.gemini_model))
+        Ok((
+            preferred,
+            gw.claude_model,
+            gw.claude_subagent_model,
+            gw.claude_small_model,
+            gw.codex_model,
+            gw.codex_subagent_model,
+            gw.gemini_model,
+            gw.claude_extra_config_id
+                .and_then(|id| Uuid::parse_str(&id).ok()),
+        ))
     }
 
     /// Save key + model config for a gateway without activating it.
@@ -709,13 +997,41 @@ impl Service {
         key_id: Uuid,
         models: ModelSelection,
     ) -> Result<(), AppError> {
+        let gateway = self
+            .db
+            .get_gateway(&gateway_id.to_string())?
+            .ok_or_else(|| AppError::Config(format!("gateway {gateway_id} not found")))?;
+        let all_claude = [
+            models.claude.as_deref(),
+            models.claude_subagent.as_deref(),
+            models.claude_small.as_deref(),
+        ]
+        .into_iter()
+        .all(|model| model.is_some_and(crate::model_id::is_claude_family_model));
+        let requested_extra_id = match models.claude_extra {
+            ClaudeExtraSelection::Inherit => gateway.claude_extra_config_id,
+            ClaudeExtraSelection::Disabled => None,
+            ClaudeExtraSelection::Preset(id) => Some(id.to_string()),
+        };
+        let extra_id = if all_claude {
+            requested_extra_id.or_else(|| self.db.default_claude_extra_config_id().ok().flatten())
+        } else {
+            self.db.default_claude_extra_config_id()?
+        };
         self.db.update_gateway_config(
             &gateway_id.to_string(),
             Some(&key_id.to_string()),
-            models.claude.as_deref(),
+            models
+                .claude
+                .as_deref()
+                .map(crate::model_id::normalize_claude_main_model)
+                .as_deref(),
+            models.claude_subagent.as_deref(),
             models.claude_small.as_deref(),
             models.codex.as_deref(),
+            models.codex_subagent.as_deref(),
             models.gemini.as_deref(),
+            extra_id.as_deref(),
         )?;
         Ok(())
     }
@@ -725,17 +1041,23 @@ impl Service {
     /// has a probed `home` AND a `resolved_url`. Distros missing either
     /// are logged and skipped (the UI surfaces them as Unreachable /
     /// Unknown until the user clicks Refresh).
-    pub fn build_apply_targets(&self) -> Vec<crate::cli_target::CliTarget> {
+    pub fn build_apply_plan(&self) -> ApplyPlan {
         use crate::cli_target::{
             CliTarget, InstalledTools, SnapshotMeta, TargetType, WindowsFsBackend, WslBackend,
         };
 
-        let mut targets: Vec<CliTarget> = Vec::new();
+        let managed = self
+            .db
+            .get_managed_clients()
+            .unwrap_or(crate::cli_target::ManagedClients::ALL);
+        let mut ready: Vec<CliTarget> = Vec::new();
+        let mut pending = Vec::new();
+        let mut retained_keys = std::collections::HashSet::from(["windows".to_string()]);
 
-        targets.push(CliTarget {
+        ready.push(CliTarget {
             backend: Box::new(WindowsFsBackend::new()),
             base_url: crate::proxy_server::proxy_base_url(),
-            installed: InstalledTools::ALL,
+            installed: managed.intersect(InstalledTools::ALL),
             label: "windows".into(),
             snapshot_meta: SnapshotMeta {
                 target_type: TargetType::Windows,
@@ -749,31 +1071,37 @@ impl Service {
             if !row.selected {
                 continue;
             }
-            let Some(url) = row.resolved_url.clone() else {
-                log::warn!(
-                    "WSL distro {} has no resolved_url — skipping apply",
-                    row.name
-                );
+            retained_keys.insert(row.name.clone());
+            let installed = managed.intersect(InstalledTools {
+                claude: row.has_claude,
+                codex: row.has_codex,
+                gemini: row.has_gemini,
+            });
+            if !installed.claude && !installed.codex && !installed.gemini {
+                continue;
+            }
+            let (Some(url), Some(home)) = (row.resolved_url.clone(), row.home.clone()) else {
+                let reason = if row.home.is_none() {
+                    "WSL home has not been probed"
+                } else {
+                    "WSL relay URL is unreachable"
+                };
+                log::warn!("WSL distro {} is pending: {reason}", row.name);
+                pending.push(PendingWslTarget {
+                    name: row.name,
+                    home: row.home,
+                    installed,
+                    reason: reason.into(),
+                });
                 continue;
             };
-            let Some(home) = row.home.clone() else {
-                log::warn!(
-                    "WSL distro {} has no probed home — skipping apply",
-                    row.name
-                );
-                continue;
-            };
-            targets.push(CliTarget {
+            ready.push(CliTarget {
                 backend: Box::new(WslBackend {
                     distro: row.name.clone(),
                     home: home.clone(),
                 }),
                 base_url: url,
-                installed: InstalledTools {
-                    claude: row.has_claude,
-                    codex: row.has_codex,
-                    gemini: row.has_gemini,
-                },
+                installed,
                 label: format!("wsl:{}", row.name),
                 snapshot_meta: SnapshotMeta {
                     target_type: TargetType::Wsl,
@@ -783,18 +1111,61 @@ impl Service {
             });
         }
 
-        targets
+        ApplyPlan {
+            ready,
+            pending,
+            retained_keys,
+        }
+    }
+
+    pub fn build_apply_targets(&self) -> Vec<crate::cli_target::CliTarget> {
+        self.build_apply_plan().ready
+    }
+
+    pub async fn retry_pending_wsl_apply(&self) -> Result<(), AppError> {
+        if !crate::config_writer::lifecycle::has_pending_wsl() {
+            return Ok(());
+        }
+        let active = self.db.get_active_config()?;
+        let Some(gateway_id) = active.gateway_id.as_deref() else {
+            return Ok(());
+        };
+        let gateway = self
+            .db
+            .get_gateway(gateway_id)?
+            .ok_or_else(|| AppError::Config("active gateway not found".into()))?;
+        let key_id = pick_key_id(&gateway, Some(&active))
+            .ok_or_else(|| AppError::Config("active gateway key not found".into()))?;
+        let gateway_id =
+            Uuid::parse_str(gateway_id).map_err(|error| AppError::Config(error.to_string()))?;
+        let key_id =
+            Uuid::parse_str(&key_id).map_err(|error| AppError::Config(error.to_string()))?;
+        self.set_active(
+            gateway_id,
+            key_id,
+            ModelSelection {
+                claude: active.claude_model,
+                claude_subagent: active.claude_subagent_model,
+                claude_small: active.claude_small_model,
+                codex: active.codex_model,
+                codex_subagent: active.codex_subagent_model,
+                gemini: active.gemini_model,
+                claude_extra: ClaudeExtraSelection::Inherit,
+            },
+        )
+        .await
     }
 
     /// Build the WSL detection state machine. The caller is responsible for
     /// spawning `sm.clone().run()` on the appropriate runtime (tokio for the
     /// headless agent, `tauri::async_runtime` for the GUI). Returns `None`
     /// if `proxy` isn't attached (test code or pre-startup).
-    pub fn spawn_wsl_state_machine(
-        &self,
-    ) -> Option<Arc<crate::wsl::state::StateMachine>> {
+    pub fn spawn_wsl_state_machine(&self) -> Option<Arc<crate::wsl::state::StateMachine>> {
         let proxy = self.proxy.as_ref()?.clone();
-        Some(crate::wsl::state::StateMachine::new(self.db.clone(), proxy))
+        Some(crate::wsl::state::StateMachine::new(
+            Arc::new(self.clone()),
+            proxy,
+        ))
     }
 
     /// List the WSL distros known to LLM Relay (cached in `wsl_distros`).
@@ -836,11 +1207,114 @@ impl Service {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
+fn classify_models(ids: impl IntoIterator<Item = String>) -> ModelCatalog {
+    let mut claude = Vec::new();
+    let mut codex = Vec::new();
+    let mut gemini = Vec::new();
+
+    for id in ids {
+        let id_lower = id.to_lowercase();
+        let family_id = id_lower.rsplit('/').next().unwrap_or(&id_lower);
+        if family_id.starts_with("gpt-5.6") {
+            claude.push(id.clone());
+            codex.push(id);
+        } else if family_id.starts_with("claude") {
+            claude.push(id);
+        } else if id_lower.contains("gpt")
+            || id_lower.contains("o1")
+            || id_lower.contains("o3")
+            || id_lower.contains("o4")
+            || id_lower.contains("codex")
+        {
+            codex.push(id);
+        } else if id_lower.contains("gemini") {
+            gemini.push(id);
+        } else {
+            // Unknown provider — add to claude bucket as a fallback.
+            claude.push(id);
+        }
+    }
+
+    ModelCatalog {
+        claude,
+        codex,
+        gemini,
+    }
+}
+
 fn range_to_period(r: TimeRange) -> &'static str {
     match r {
         TimeRange::Today => "today",
         TimeRange::Week => "week",
         TimeRange::Days7 => "7d",
         TimeRange::Days30 => "30d",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_models, Service};
+    use crate::events::NullSink;
+    use crate::wsl::distro::DistroRow;
+    use crate::Database;
+    use std::sync::Arc;
+
+    #[test]
+    fn unresolved_selected_wsl_is_retained_as_pending() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        db.upsert_wsl_distro(&DistroRow {
+            name: "Offline Distro".into(),
+            is_default: false,
+            selected: true,
+            home: None,
+            user: None,
+            has_claude: true,
+            has_codex: true,
+            has_gemini: false,
+            resolved_url: None,
+            probed_at: Some("now".into()),
+        })
+        .unwrap();
+        let service = Service::new(db, Arc::new(NullSink));
+        let plan = service.build_apply_plan();
+        assert_eq!(plan.ready.len(), 1);
+        assert_eq!(plan.pending.len(), 1);
+        assert_eq!(plan.pending[0].name, "Offline Distro");
+        assert!(plan.retained_keys.contains("Offline Distro"));
+    }
+
+    #[test]
+    fn gpt_5_6_is_available_to_claude_and_codex() {
+        let catalog = classify_models([
+            "CLAUDE-opus-4.7".to_string(),
+            "GPT-5.6-sol-fast".to_string(),
+            "vendor/gpt-5.6-code".to_string(),
+            "vendor/claude-sonnet".to_string(),
+            "gpt-5.5-codex".to_string(),
+            "gemini-3-pro".to_string(),
+        ]);
+
+        assert_eq!(
+            catalog.claude,
+            [
+                "CLAUDE-opus-4.7",
+                "GPT-5.6-sol-fast",
+                "vendor/gpt-5.6-code",
+                "vendor/claude-sonnet",
+            ]
+        );
+        assert_eq!(
+            catalog.codex,
+            ["GPT-5.6-sol-fast", "vendor/gpt-5.6-code", "gpt-5.5-codex"]
+        );
+        assert_eq!(catalog.gemini, ["gemini-3-pro"]);
+    }
+
+    #[test]
+    fn unknown_models_keep_the_existing_claude_fallback() {
+        let catalog = classify_models(["custom-model".to_string()]);
+        assert_eq!(catalog.claude, ["custom-model"]);
+        assert!(catalog.codex.is_empty());
+        assert!(catalog.gemini.is_empty());
     }
 }
