@@ -30,10 +30,6 @@ import {
   claudeRoleModels,
   codexModels as getCodexModels,
   geminiModels as getGeminiModels,
-  preferredClaudeCodeModel,
-  preferredCodexModel,
-  preferredCodexSubagentModel,
-  preferredGeminiModel,
   reconcileModelSelection,
 } from "@/lib/models";
 import {
@@ -217,7 +213,12 @@ export function AddGatewayCard({
 
   const applyModelCatalog = (modelsResult: ModelList | null) => {
     setModels(modelsResult);
-    const modelIds = modelsResult?.data.map((model) => model.id) ?? [];
+    // A missing catalog means it is loading (or unavailable), not that the
+    // saved selection should be replaced. Once loaded, only keep values that
+    // are actually offered by this gateway; never invent a default model.
+    if (!modelsResult) return;
+
+    const modelIds = modelsResult.data.map((model) => model.id);
     const claudeMainCandidates = claudeRoleModels(modelIds, "main");
     const claudeSubagentCandidates = claudeRoleModels(modelIds, "subagent");
     const claudeHaikuCandidates = claudeRoleModels(modelIds, "haiku");
@@ -226,34 +227,26 @@ export function AddGatewayCard({
 
     if (managedClients.claude) {
       setClaudeModel((current) =>
-        reconcileModelSelection(current, claudeMainCandidates, preferredClaudeCodeModel(modelIds, "main")),
+        reconcileModelSelection(current, claudeMainCandidates),
       );
       setClaudeSubagentModel((current) =>
-        reconcileModelSelection(current, claudeSubagentCandidates, preferredClaudeCodeModel(modelIds, "subagent")),
+        reconcileModelSelection(current, claudeSubagentCandidates),
       );
       setClaudeSmallModel((current) =>
-        reconcileModelSelection(current, claudeHaikuCandidates, preferredClaudeCodeModel(modelIds, "haiku")),
+        reconcileModelSelection(current, claudeHaikuCandidates),
       );
     }
     if (managedClients.codex) {
-      const preferredCodex = preferredCodexModel(modelIds);
       setCodexModel((current) =>
-        reconcileModelSelection(current, codexCandidates, preferredCodex),
+        reconcileModelSelection(current, codexCandidates),
       );
       setCodexSubagentModel((current) =>
-        reconcileModelSelection(
-          current,
-          codexCandidates,
-          preferredCodexSubagentModel(
-            modelIds,
-            codexCandidates.includes(codexModel) ? codexModel : preferredCodex,
-          ),
-        ),
+        reconcileModelSelection(current, codexCandidates),
       );
     }
     if (managedClients.gemini) {
       setGeminiModel((current) =>
-        reconcileModelSelection(current, geminiCandidates, preferredGeminiModel(modelIds)),
+        reconcileModelSelection(current, geminiCandidates),
       );
     }
   };
