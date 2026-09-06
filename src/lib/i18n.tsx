@@ -160,6 +160,8 @@ const en: Translations = {
     yesterday: "Yesterday",
   },
   models: {
+    search: "Search models…",
+    noMatches: "No matching models",
     claude: "Claude",
     claudeSubagent: "Claude Subagent",
     claudeHaiku: "Claude Haiku",
@@ -339,6 +341,8 @@ const zh: Translations = {
     yesterday: "昨天",
   },
   models: {
+    search: "搜索模型…",
+    noMatches: "没有匹配的模型",
     claude: "Claude 主模型",
     claudeSubagent: "Claude 子代理",
     claudeHaiku: "Claude Haiku",

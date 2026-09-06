@@ -9,10 +9,6 @@ export function isClaudeFamilyModel(id: string): boolean {
   return modelFamilyId(id).startsWith("claude");
 }
 
-export function isGpt56Model(id: string): boolean {
-  return modelFamilyId(id).startsWith("gpt-5.6");
-}
-
 export function stripMainContextSuffix(id: string): string {
   return id.replace(/\[1m\]$/i, "");
 }
@@ -23,7 +19,7 @@ export function withMainContextSuffix(id: string): string {
 }
 
 export function claudeCodeModels(ids: string[]): string[] {
-  return ids.filter((id) => isClaudeFamilyModel(id) || isGpt56Model(id));
+  return [...new Set(ids.filter(Boolean))];
 }
 
 export function allClaudeRolesUseClaudeFamily(
@@ -41,18 +37,38 @@ export function claudeRoleModels(
   role: ClaudeModelRole,
 ): string[] {
   const candidates = claudeCodeModels(ids);
-  return role === "main" ? candidates.map(withMainContextSuffix) : candidates;
+  return role === "main"
+    ? [...new Set(candidates.map(withMainContextSuffix))]
+    : candidates;
 }
 
 export function codexModels(ids: string[]): string[] {
-  return ids.filter((id) => {
-    const lower = id.toLowerCase();
-    return /gpt-[5-9]/.test(lower) || /\bo[1-9]/.test(lower);
-  });
+  return [...new Set(ids.filter(Boolean))];
 }
 
 export function geminiModels(ids: string[]): string[] {
-  return ids.filter((id) => id.toLowerCase().includes("gemini"));
+  return [
+    ...new Set(ids.filter((id) => modelFamilyId(id).startsWith("gemini"))),
+  ];
+}
+
+export function searchModels(ids: string[], query: string): string[] {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return ids;
+
+  return ids.filter((id) => {
+    const model = id.toLowerCase();
+    return terms.every((term) => {
+      // Match non-adjacent characters too, e.g. "gpt54" -> "gpt-5.4".
+      let position = 0;
+      for (const character of term) {
+        const index = model.indexOf(character, position);
+        if (index === -1) return false;
+        position = index + 1;
+      }
+      return true;
+    });
+  });
 }
 
 export function reconcileModelSelection(
