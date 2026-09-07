@@ -10,6 +10,9 @@ const MANIFEST_VERSION: u32 = 1;
 const ORIGIN_SUFFIX: &str = ".llm-relay.origin";
 const BACKUP_SUFFIX: &str = ".llm-relay.bak";
 
+mod migration;
+pub use migration::{migrate_legacy_active, snapshot_for_apply};
+
 fn default_true() -> bool {
     true
 }
@@ -82,6 +85,10 @@ pub struct ManagedTarget {
     pub installed: StoredInstalledTools,
     pub label: String,
     pub files: Vec<ManagedFile>,
+    #[serde(default)]
+    pub extra_env_keys: HashSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_snapshot: Option<super::snapshot::TargetSnapshot>,
     #[serde(default)]
     pub pending: bool,
     #[serde(default)]
@@ -298,6 +305,8 @@ pub fn prepare_use(
             installed: pending.installed.into(),
             label: format!("wsl:{}", pending.name),
             files: Vec::new(),
+            extra_env_keys: HashSet::new(),
+            legacy_snapshot: None,
             pending: true,
             pending_reason: Some(pending.reason.clone()),
         });
@@ -327,81 +336,112 @@ pub fn prepare_active_apply(
     }
     let mut changed = false;
     for target in targets {
-        let key = target_key(&target.snapshot_meta);
-        let desired = descriptors(target.installed, shell_paths.get(&key).cloned());
-        if let Some(index) = manifest
-            .targets
-            .iter()
-            .position(|stored| stored_key(stored) == key)
-        {
-            let desired_paths: HashSet<Vec<String>> =
-                desired.iter().map(|file| file.path.clone()).collect();
-            let backend = &*target.backend;
-            for existing in &mut manifest.targets[index].files {
-                if existing.managed && !desired_paths.contains(&existing.path) {
-                    let origin = sidecar_path(&existing.path, ORIGIN_SUFFIX)?;
-                    restore_state(
-                        backend,
-                        &refs(&existing.path),
-                        &refs(&origin),
-                        &existing.origin,
-                    )?;
-                    existing.managed = false;
-                    existing.restored = true;
-                    changed = true;
-                }
-            }
-            for mut file in desired {
-                if let Some(existing) = manifest.targets[index]
-                    .files
-                    .iter_mut()
-                    .find(|existing| existing.path == file.path)
-                {
-                    verify_origin(target, existing)?;
-                    if !existing.managed {
-                        existing.managed = true;
-                        existing.restored = false;
+        let result = (|| -> Result<(), AppError> {
+            migration::resume(&mut manifest, target)?;
+            let key = target_key(&target.snapshot_meta);
+            let desired = descriptors(target.installed, shell_paths.get(&key).cloned());
+            if let Some(index) = manifest
+                .targets
+                .iter()
+                .position(|stored| stored_key(stored) == key)
+            {
+                for file in &mut manifest.targets[index].files {
+                    if reconcile_deleted_origin(&*target.backend, file)? {
                         changed = true;
                     }
-                    continue;
                 }
-                capture_origin(target, &mut file, true)?;
-                file.touched = true;
-                manifest.targets[index].files.push(file);
+                let desired_paths: HashSet<Vec<String>> =
+                    desired.iter().map(|file| file.path.clone()).collect();
+                let backend = &*target.backend;
+                for existing in &mut manifest.targets[index].files {
+                    if existing.managed && !desired_paths.contains(&existing.path) {
+                        let origin = sidecar_path(&existing.path, ORIGIN_SUFFIX)?;
+                        restore_state(
+                            backend,
+                            &refs(&existing.path),
+                            &refs(&origin),
+                            &existing.origin,
+                        )?;
+                        existing.managed = false;
+                        existing.restored = true;
+                        changed = true;
+                    }
+                }
+                for mut file in desired {
+                    if let Some(existing) = manifest.targets[index]
+                        .files
+                        .iter_mut()
+                        .find(|existing| existing.path == file.path)
+                    {
+                        verify_origin(target, existing)?;
+                        if !existing.managed {
+                            existing.managed = true;
+                            existing.restored = false;
+                            changed = true;
+                        }
+                        continue;
+                    }
+                    capture_origin(target, &mut file, true)?;
+                    file.touched = true;
+                    manifest.targets[index].files.push(file);
+                    save(&mut manifest)?;
+                    changed = true;
+                }
+                let stored = &mut manifest.targets[index];
+                if stored.base_url != target.base_url || stored.pending {
+                    changed = true;
+                }
+                stored.base_url = target.base_url.clone();
+                stored.home = target.snapshot_meta.home.clone();
+                stored.installed = target.installed.into();
+                stored.pending = true;
+                stored.pending_reason = Some("Applying Relay configuration".into());
+            } else {
+                let files = desired;
+                let mut stored = stored_target(target, Vec::new());
+                stored.pending = true;
+                stored.pending_reason = Some("Capturing original configuration".into());
+                manifest.targets.push(stored);
                 save(&mut manifest)?;
+                let index = manifest.targets.len() - 1;
+                for mut file in files {
+                    capture_origin(target, &mut file, true)?;
+                    file.touched = true;
+                    manifest.targets[index].files.push(file);
+                    save(&mut manifest)?;
+                }
+                manifest.targets[index].pending_reason =
+                    Some("Applying Relay configuration".into());
                 changed = true;
             }
-            let stored = &mut manifest.targets[index];
-            if stored.base_url != target.base_url || stored.pending {
-                changed = true;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if target.snapshot_meta.target_type != TargetType::Wsl {
+                return Err(error);
             }
-            stored.base_url = target.base_url.clone();
-            stored.home = target.snapshot_meta.home.clone();
-            stored.installed = target.installed.into();
-            stored.pending = true;
-            stored.pending_reason = Some("Applying Relay configuration".into());
-        } else {
-            let files = desired;
-            let mut stored = stored_target(target, Vec::new());
-            stored.pending = true;
-            stored.pending_reason = Some("Capturing original configuration".into());
-            manifest.targets.push(stored);
-            save(&mut manifest)?;
-            let index = manifest.targets.len() - 1;
-            for mut file in files {
-                capture_origin(target, &mut file, true)?;
-                file.touched = true;
-                manifest.targets[index].files.push(file);
-                save(&mut manifest)?;
+            let key = target_key(&target.snapshot_meta);
+            if !manifest
+                .targets
+                .iter()
+                .any(|stored| stored_key(stored) == key)
+            {
+                manifest.targets.push(stored_target(target, Vec::new()));
             }
-            manifest.targets[index].pending_reason = Some("Applying Relay configuration".into());
+            let stored = manifest
+                .targets
+                .iter_mut()
+                .find(|stored| stored_key(stored) == key)
+                .unwrap();
+            stored.pending = true;
+            stored.pending_reason = Some(format!("Waiting to sync WSL: {error}"));
             changed = true;
         }
     }
     if changed {
         save(&mut manifest)?;
     }
-    Ok(changed.then_some(manifest))
+    Ok(Some(manifest))
 }
 
 pub fn mark_active(manifest: &mut LifecycleManifest) -> Result<(), AppError> {
@@ -418,9 +458,14 @@ pub fn mark_targets_active(
     manifest: &mut LifecycleManifest,
     keys: &HashSet<String>,
 ) -> Result<(), AppError> {
+    // Writers persist Extra-key ownership while applying; don't overwrite it
+    // with the preparation-time manifest held by the service.
+    if let Some(latest) = load()? {
+        *manifest = latest;
+    }
     manifest.phase = LifecyclePhase::Active;
-    for target in &mut manifest.targets {
-        if !keys.contains(&stored_key(target)) {
+    'targets: for target in &mut manifest.targets {
+        if !keys.contains(&stored_key(target)) && !keys.contains(&report_key(target)) {
             continue;
         }
         let backend = backend_for(target)?;
@@ -433,7 +478,14 @@ pub fn mark_targets_active(
             file.error = None;
             if file.backup.complete {
                 let backup_path = sidecar_path(&file.path, BACKUP_SUFFIX)?;
-                backend.remove(&refs(&backup_path))?;
+                if let Err(error) = backend.remove(&refs(&backup_path)) {
+                    if target.target_type != "wsl" {
+                        return Err(error);
+                    }
+                    target.pending = true;
+                    target.pending_reason = Some(format!("Waiting to finish WSL sync: {error}"));
+                    continue 'targets;
+                }
                 file.backup = StoredFileState::default();
             }
         }
@@ -494,6 +546,41 @@ pub fn has_pending_wsl() -> bool {
     })
 }
 
+pub fn record_pending_wsl(pending: &[crate::service::PendingWslTarget]) -> Result<(), AppError> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let Some(mut manifest) = load()? else {
+        return Ok(());
+    };
+    for row in pending {
+        if let Some(stored) = manifest
+            .targets
+            .iter_mut()
+            .find(|t| t.distro_name.as_deref() == Some(&row.name))
+        {
+            stored.pending = true;
+            stored.pending_reason = Some(row.reason.clone());
+        } else {
+            manifest.targets.push(ManagedTarget {
+                target_type: "wsl".into(),
+                distro_name: Some(row.name.clone()),
+                home: row.home.clone(),
+                native_home: None,
+                base_url: String::new(),
+                installed: row.installed.into(),
+                label: format!("wsl:{}", row.name),
+                files: Vec::new(),
+                extra_env_keys: HashSet::new(),
+                legacy_snapshot: None,
+                pending: true,
+                pending_reason: Some(row.reason.clone()),
+            });
+        }
+    }
+    save(&mut manifest)
+}
+
 pub fn mark_target_failed(key: &str, error: &str) -> Result<(), AppError> {
     let Some(mut manifest) = load()? else {
         return Ok(());
@@ -501,7 +588,7 @@ pub fn mark_target_failed(key: &str, error: &str) -> Result<(), AppError> {
     if let Some(target) = manifest
         .targets
         .iter_mut()
-        .find(|target| stored_key(target) == key)
+        .find(|target| stored_key(target) == key || report_key(target) == key)
     {
         target.pending = true;
         target.pending_reason = Some(error.to_string());
@@ -548,6 +635,23 @@ pub fn disable() -> Result<(), AppError> {
     let Some(mut manifest) = load()? else {
         return Ok(());
     };
+    for index in 0..manifest.targets.len() {
+        if manifest.targets[index].legacy_snapshot.is_some() {
+            let stored = &manifest.targets[index];
+            let target = CliTarget {
+                backend: backend_for(stored)?,
+                base_url: stored.base_url.clone(),
+                installed: stored.installed.into(),
+                label: stored.label.clone(),
+                snapshot_meta: SnapshotMeta {
+                    target_type: TargetType::Wsl,
+                    distro_name: stored.distro_name.clone(),
+                    home: stored.home.clone(),
+                },
+            };
+            migration::resume(&mut manifest, &target)?;
+        }
+    }
     manifest.phase = LifecyclePhase::CapturingDisableBackup;
     save(&mut manifest)?;
 
@@ -559,6 +663,11 @@ pub fn disable() -> Result<(), AppError> {
         let backend = backend_for(target)?;
         for file in &mut target.files {
             if !file.touched {
+                continue;
+            }
+            if let Err(error) = reconcile_deleted_origin(&*backend, file) {
+                file.error = Some(error.to_string());
+                capture_failures.push(format!("{}:{}", target.label, file.path.join("/")));
                 continue;
             }
             let current = match backend.read_bytes(&refs(&file.path)) {
@@ -668,6 +777,8 @@ fn stored_target(target: &CliTarget, files: Vec<ManagedFile>) -> ManagedTarget {
         installed: target.installed.into(),
         label: target.label.clone(),
         files,
+        extra_env_keys: HashSet::new(),
+        legacy_snapshot: None,
         pending: false,
         pending_reason: None,
     }
@@ -677,9 +788,31 @@ fn verify_origin(target: &CliTarget, file: &ManagedFile) -> Result<(), AppError>
     verify_origin_for_backend(&*target.backend, file)
 }
 
+/// If the user deletes both the working file and its original sidecar, absence
+/// becomes the new baseline. Never recapture an existing Relay working file.
+fn reconcile_deleted_origin(
+    backend: &dyn CliBackend,
+    file: &mut ManagedFile,
+) -> Result<bool, AppError> {
+    if !file.origin.exists {
+        return Ok(false);
+    }
+    let origin = sidecar_path(&file.path, ORIGIN_SUFFIX)?;
+    if backend.exists(&refs(&origin))? || backend.exists(&refs(&file.path))? {
+        return Ok(false);
+    }
+    file.origin = state_from(None, true);
+    Ok(true)
+}
+
 fn verify_origin_for_backend(backend: &dyn CliBackend, file: &ManagedFile) -> Result<(), AppError> {
     let origin = sidecar_path(&file.path, ORIGIN_SUFFIX)?;
-    verify_sidecar(backend, &refs(&origin), &file.origin)
+    verify_sidecar(backend, &refs(&origin), &file.origin).map_err(|error| {
+        AppError::Config(format!(
+            "Cannot verify original backup {}: {error}",
+            origin.join("/")
+        ))
+    })
 }
 
 fn capture_origin(
@@ -1046,6 +1179,75 @@ fn stored_key(target: &ManagedTarget) -> String {
     }
 }
 
+fn report_key(target: &ManagedTarget) -> String {
+    target
+        .distro_name
+        .clone()
+        .unwrap_or_else(|| "windows".into())
+}
+
+pub fn restore_removed_targets(retained: &HashSet<String>) -> Result<(), AppError> {
+    let Some(mut manifest) = load()? else {
+        return Ok(());
+    };
+    for index in 0..manifest.targets.len() {
+        if retained.contains(&report_key(&manifest.targets[index])) {
+            continue;
+        }
+        let result = (|| -> Result<(), AppError> {
+            let stored = &manifest.targets[index];
+            let target = CliTarget {
+                backend: backend_for(stored)?,
+                base_url: stored.base_url.clone(),
+                installed: stored.installed.into(),
+                label: stored.label.clone(),
+                snapshot_meta: SnapshotMeta {
+                    target_type: if stored.target_type == "wsl" {
+                        TargetType::Wsl
+                    } else {
+                        TargetType::Windows
+                    },
+                    distro_name: stored.distro_name.clone(),
+                    home: stored.home.clone(),
+                },
+            };
+            migration::resume(&mut manifest, &target)?;
+            let stored = &mut manifest.targets[index];
+            for file in &mut stored.files {
+                if !file.managed {
+                    continue;
+                }
+                reconcile_deleted_origin(&*target.backend, file)?;
+                let origin = sidecar_path(&file.path, ORIGIN_SUFFIX)?;
+                restore_state(
+                    &*target.backend,
+                    &refs(&file.path),
+                    &refs(&origin),
+                    &file.origin,
+                )?;
+                file.managed = false;
+                file.restored = true;
+            }
+            #[cfg(target_os = "windows")]
+            if let Some(distro) = &stored.distro_name {
+                crate::wsl::hosts::clear_hosts_entry(distro, &crate::wsl::hosts::relay_hostname())?;
+            }
+            stored.pending = false;
+            stored.pending_reason = None;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if manifest.targets[index].target_type != "wsl" {
+                return Err(error);
+            }
+            manifest.targets[index].pending = true;
+            manifest.targets[index].pending_reason =
+                Some(format!("Waiting to restore WSL configuration: {error}"));
+        }
+    }
+    save(&mut manifest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,6 +1299,429 @@ mod tests {
         assert!(!absent.exists);
         assert!(empty.exists);
         assert_eq!(absent.sha256, empty.sha256);
+    }
+
+    struct MigrationEnv {
+        _lock: MutexGuard<'static, ()>,
+        home: TempDir,
+        config: TempDir,
+        old_home: Option<std::ffi::OsString>,
+        old_native: Option<std::ffi::OsString>,
+    }
+
+    impl MigrationEnv {
+        fn new() -> Self {
+            let guard = env_lock();
+            let home = TempDir::new().unwrap();
+            let config = TempDir::new().unwrap();
+            let old_home = std::env::var_os("LLM_RELAY_HOME");
+            let old_native = std::env::var_os("LLM_RELAY_TEST_NATIVE_HOME");
+            std::env::set_var("LLM_RELAY_HOME", config.path());
+            std::env::set_var("LLM_RELAY_TEST_NATIVE_HOME", home.path());
+            Self {
+                _lock: guard,
+                home,
+                config,
+                old_home,
+                old_native,
+            }
+        }
+    }
+
+    impl Drop for MigrationEnv {
+        fn drop(&mut self) {
+            for (key, value) in [
+                ("LLM_RELAY_HOME", &self.old_home),
+                ("LLM_RELAY_TEST_NATIVE_HOME", &self.old_native),
+            ] {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn migration_then_toggle_uses_only_full_file_origins() {
+        let env = MigrationEnv::new();
+        let native = target(env.home.path());
+        let settings = [".claude", "settings.json"];
+        native.backend.write_atomic(&settings, br#"{"env":{"ANTHROPIC_BASE_URL":"https://original","KEEP":"original-extra"},"permissions":{"allow":[]}}"#).unwrap();
+        super::super::snapshot::capture(&native).unwrap();
+        native.backend.write_atomic(&settings, br#"{"env":{"ANTHROPIC_BASE_URL":"http://relay","ANTHROPIC_AUTH_TOKEN":"relay-token","KEEP":"original-extra"},"permissions":{"allow":["Read"]}}"#).unwrap();
+        let working = native.backend.read_bytes(&settings).unwrap();
+        migrate_legacy_active().unwrap();
+        assert_eq!(native.backend.read_bytes(&settings).unwrap(), working);
+        assert!(!super::super::snapshot::has_legacy_snapshots().unwrap());
+        assert!(
+            std::fs::read_dir(env.config.path().join("cli-config-backup"))
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("migrated-"))
+        );
+        let origin_path = [".claude", "settings.json.llm-relay.origin"];
+        let origin = native.backend.read_bytes(&origin_path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(origin.as_ref().unwrap()).unwrap();
+        assert_eq!(value["env"]["ANTHROPIC_BASE_URL"], "https://original");
+        assert_eq!(value["permissions"]["allow"][0], "Read");
+        assert!(value["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+
+        let mut off = target(env.home.path());
+        off.installed.claude = false;
+        off.installed.codex = true;
+        prepare_active_apply(&[off], &BTreeMap::new()).unwrap();
+        assert_eq!(native.backend.read_bytes(&settings).unwrap(), origin);
+        let mut prepared = prepare_active_apply(&[target(env.home.path())], &BTreeMap::new())
+            .unwrap()
+            .unwrap();
+        let extra = BTreeMap::from([
+            ("KEEP".into(), "override".into()),
+            ("NEW_EXTRA".into(), "new".into()),
+        ]);
+        let snap = snapshot_for_apply(&native, Some(&extra)).unwrap();
+        assert_eq!(
+            snap.claude.extra_env_originals["KEEP"].as_deref(),
+            Some("original-extra")
+        );
+        assert_eq!(snap.claude.extra_env_originals["NEW_EXTRA"], None);
+        super::super::write_one_target(
+            &native,
+            "relay",
+            Some("claude-test"),
+            None,
+            None,
+            None,
+            None,
+            Some(&extra),
+            Some(&snap),
+        )
+        .unwrap();
+        mark_targets_active(&mut prepared, &HashSet::from(["windows".into()])).unwrap();
+        assert!(!load().unwrap().unwrap().targets[0].pending);
+        let snap = snapshot_for_apply(&native, None).unwrap();
+        super::super::write_one_target(
+            &native,
+            "relay",
+            Some("claude-test"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&snap),
+        )
+        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&native.backend.read(&settings).unwrap().unwrap()).unwrap();
+        assert_eq!(value["env"]["KEEP"], "original-extra");
+        assert!(value["env"].get("NEW_EXTRA").is_none());
+        assert_eq!(native.backend.read_bytes(&origin_path).unwrap(), origin);
+        assert!(!super::super::snapshot::snapshot_path(&native.snapshot_meta).exists());
+        disable().unwrap();
+        assert_eq!(native.backend.read_bytes(&settings).unwrap(), origin);
+    }
+
+    #[test]
+    fn migration_rejects_conflicting_sidecar_without_changing_live_files() {
+        let env = MigrationEnv::new();
+        let native = target(env.home.path());
+        native
+            .backend
+            .write_atomic(&[".claude", "settings.json"], b"{}")
+            .unwrap();
+        super::super::snapshot::capture(&native).unwrap();
+        native
+            .backend
+            .write_atomic(
+                &[".claude", "settings.json.llm-relay.origin"],
+                b"unrelated backup",
+            )
+            .unwrap();
+        assert!(migrate_legacy_active()
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting origin"));
+        assert!(!manifest_exists());
+        assert!(super::super::snapshot::has_legacy_snapshots().unwrap());
+        assert_eq!(
+            native
+                .backend
+                .read(&[".claude", "settings.json"])
+                .unwrap()
+                .as_deref(),
+            Some("{}")
+        );
+    }
+
+    #[test]
+    fn migration_failure_can_retry_with_matching_sidecars() {
+        let env = MigrationEnv::new();
+        let native = target(env.home.path());
+        super::super::snapshot::capture(&native).unwrap();
+        // Simulate interruption after the first (absent-file) sidecar write.
+        native
+            .backend
+            .write_atomic(&[".claude", "settings.json.llm-relay.origin"], b"")
+            .unwrap();
+        migrate_legacy_active().unwrap();
+        migrate_legacy_active().unwrap();
+        assert!(manifest_exists());
+        assert!(!native
+            .backend
+            .exists(&[".claude", "settings.json"])
+            .unwrap());
+        assert!(!super::super::snapshot::has_legacy_snapshots().unwrap());
+    }
+
+    #[test]
+    fn migration_does_not_silently_skip_an_invalid_target() {
+        let env = MigrationEnv::new();
+        let native = target(env.home.path());
+        super::super::snapshot::capture(&native).unwrap();
+        std::fs::write(
+            crate::paths::cli_config_backup_dir().join("broken.json"),
+            b"{",
+        )
+        .unwrap();
+        assert!(migrate_legacy_active().is_err());
+        assert!(!manifest_exists());
+        assert!(super::super::snapshot::snapshot_path(&native.snapshot_meta).exists());
+        assert!(!native
+            .backend
+            .exists(&[".claude", "settings.json.llm-relay.origin"])
+            .unwrap());
+    }
+
+    struct SwitchableBackend {
+        fs: WindowsFsBackend,
+        online: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[test]
+    fn deleted_config_and_origin_can_be_reenabled_then_restored_to_absence() {
+        let env = MigrationEnv::new();
+        let native = target(env.home.path());
+        let settings = [".claude", "settings.json"];
+        let origin = [".claude", "settings.json.llm-relay.origin"];
+        native
+            .backend
+            .write_atomic(
+                &settings,
+                br#"{"env":{"ANTHROPIC_BASE_URL":"https://original"}}"#,
+            )
+            .unwrap();
+        let mut manifest = prepare_use(&[target(env.home.path())], &[], &BTreeMap::new()).unwrap();
+        mark_active(&mut manifest).unwrap();
+        native.backend.remove(&settings).unwrap();
+        native.backend.remove(&origin).unwrap();
+        prepare_active_apply(&[target(env.home.path())], &BTreeMap::new()).unwrap();
+        let stored = load().unwrap().unwrap();
+        assert!(!stored.targets[0].files[0].origin.exists);
+        let snapshot = snapshot_for_apply(&native, None).unwrap();
+        super::super::write_one_target(
+            &native,
+            "relay",
+            Some("claude-test"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&snapshot),
+        )
+        .unwrap();
+        assert!(native.backend.exists(&settings).unwrap());
+        let mut off = target(env.home.path());
+        off.installed.claude = false;
+        off.installed.codex = true;
+        prepare_active_apply(&[off], &BTreeMap::new()).unwrap();
+        assert!(!native.backend.exists(&settings).unwrap());
+    }
+
+    #[test]
+    fn disable_accepts_deleted_config_and_origin() {
+        let env = MigrationEnv::new();
+        let native = target(env.home.path());
+        let settings = [".claude", "settings.json"];
+        native.backend.write_atomic(&settings, b"{}").unwrap();
+        let mut manifest = prepare_use(&[target(env.home.path())], &[], &BTreeMap::new()).unwrap();
+        mark_active(&mut manifest).unwrap();
+        native.backend.remove(&settings).unwrap();
+        native
+            .backend
+            .remove(&[".claude", "settings.json.llm-relay.origin"])
+            .unwrap();
+        disable().unwrap();
+        assert!(!native.backend.exists(&settings).unwrap());
+        assert_eq!(load().unwrap().unwrap().phase, LifecyclePhase::Inactive);
+    }
+
+    #[test]
+    fn missing_origin_with_existing_config_reports_specific_error() {
+        let env = MigrationEnv::new();
+        let native = target(env.home.path());
+        native
+            .backend
+            .write_atomic(&[".claude", "settings.json"], b"{}")
+            .unwrap();
+        let mut manifest = prepare_use(&[target(env.home.path())], &[], &BTreeMap::new()).unwrap();
+        mark_active(&mut manifest).unwrap();
+        native
+            .backend
+            .remove(&[".claude", "settings.json.llm-relay.origin"])
+            .unwrap();
+        let error = prepare_active_apply(&[target(env.home.path())], &BTreeMap::new()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(".claude/settings.json.llm-relay.origin"));
+        assert!(load().unwrap().unwrap().targets[0].files[0].origin.exists);
+    }
+
+    impl SwitchableBackend {
+        fn check(&self) -> Result<(), AppError> {
+            if self.online.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(AppError::Config(
+                    "wsl.exe exited with exit code: 0xffffffff".into(),
+                ))
+            }
+        }
+    }
+
+    impl CliBackend for SwitchableBackend {
+        fn read_bytes(&self, path: &[&str]) -> Result<Option<Vec<u8>>, AppError> {
+            self.check()?;
+            self.fs.read_bytes(path)
+        }
+        fn write_atomic(&self, path: &[&str], bytes: &[u8]) -> Result<(), AppError> {
+            self.check()?;
+            self.fs.write_atomic(path, bytes)
+        }
+        fn remove(&self, path: &[&str]) -> Result<(), AppError> {
+            self.check()?;
+            self.fs.remove(path)
+        }
+        fn exists(&self, path: &[&str]) -> Result<bool, AppError> {
+            self.check()?;
+            self.fs.exists(path)
+        }
+    }
+
+    #[test]
+    fn offline_wsl_migration_does_not_block_native_and_reconnect_restores_latest_selection() {
+        let env = MigrationEnv::new();
+        let native = target(env.home.path());
+        super::super::snapshot::capture(&native).unwrap();
+        let wsl_home = TempDir::new().unwrap();
+        let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let wsl = CliTarget {
+            backend: Box::new(SwitchableBackend {
+                fs: WindowsFsBackend {
+                    home: wsl_home.path().into(),
+                },
+                online: online.clone(),
+            }),
+            snapshot_meta: SnapshotMeta {
+                target_type: TargetType::Wsl,
+                distro_name: Some("Offline Test".into()),
+                home: Some("/home/test".into()),
+            },
+            base_url: "http://relay".into(),
+            label: "wsl:Offline Test".into(),
+            installed: InstalledTools {
+                claude: false,
+                codex: false,
+                gemini: false,
+            },
+        };
+        wsl.backend
+            .write_atomic(
+                &[".claude", "settings.json"],
+                br#"{"env":{"ANTHROPIC_BASE_URL":"https://original"}}"#,
+            )
+            .unwrap();
+        super::super::snapshot::capture(&wsl).unwrap();
+        wsl.backend
+            .write_atomic(
+                &[".claude", "settings.json"],
+                br#"{"env":{"ANTHROPIC_BASE_URL":"http://relay"}}"#,
+            )
+            .unwrap();
+        online.store(false, std::sync::atomic::Ordering::SeqCst);
+        migrate_legacy_active().unwrap();
+        assert!(has_pending_wsl());
+        assert!(!super::super::snapshot::snapshot_path(&wsl.snapshot_meta).exists());
+        // The serialized manifest is sufficient after a restart; no old JSON
+        // file or access to the offline subsystem is needed to save settings.
+        assert!(load()
+            .unwrap()
+            .unwrap()
+            .targets
+            .iter()
+            .any(|t| t.legacy_snapshot.is_some()));
+        let targets = [native, wsl];
+        let mut manifest = prepare_active_apply(&targets, &BTreeMap::new())
+            .unwrap()
+            .unwrap();
+        let retained = HashSet::from(["windows".into(), "Offline Test".into()]);
+        let report = super::super::apply_to_targets(
+            &targets,
+            Some(&retained),
+            "relay",
+            Some("claude-test"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(report.succeeded.contains("windows"));
+        assert!(report.failed.contains_key("Offline Test"));
+        assert!(report.failed["Offline Test"].contains("wsl.exe exited"));
+        mark_targets_active(&mut manifest, &report.succeeded).unwrap();
+        assert!(has_pending_wsl());
+        online.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut manifest = prepare_active_apply(&targets, &BTreeMap::new())
+            .unwrap()
+            .unwrap();
+        let report = super::super::apply_to_targets(
+            &targets,
+            Some(&retained),
+            "relay",
+            Some("claude-test"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        mark_targets_active(&mut manifest, &report.succeeded).unwrap();
+        assert!(!has_pending_wsl());
+        assert!(load()
+            .unwrap()
+            .unwrap()
+            .targets
+            .iter()
+            .all(|t| t.legacy_snapshot.is_none()));
+        let restored: serde_json::Value = serde_json::from_str(
+            &targets[1]
+                .backend
+                .read(&[".claude", "settings.json"])
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored["env"]["ANTHROPIC_BASE_URL"], "https://original");
     }
 
     #[test]
@@ -1192,6 +1817,8 @@ mod tests {
                 installed: InstalledTools::ALL.into(),
                 label: "native".into(),
                 files: Vec::new(),
+                extra_env_keys: HashSet::new(),
+                legacy_snapshot: None,
                 pending: false,
                 pending_reason: None,
             }],

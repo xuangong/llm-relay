@@ -164,6 +164,11 @@ function App() {
     try {
       await api.updateSettings(autoSwitch, next);
       await loadAll();
+      const status = await api.listCliLifecycleStatus().catch(() => []);
+      const pending = status.filter((target) => target.targetType === "wsl" && target.pending);
+      if (pending.length > 0) {
+        toast.info(t("wsl.settingsQueued").replace("{distros}", pending.map((target) => target.distroName).join(", ")), { duration: 8000 });
+      }
     } catch (err) {
       toast.error(`Failed to update client mode: ${extractErrorMessage(err)}`);
       setManagedClients(previous);

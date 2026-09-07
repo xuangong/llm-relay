@@ -57,7 +57,10 @@ const en: Translations = {
     installHint: "Install one via Microsoft Store or {cmd}, then Refresh.",
     default: "(default)",
     homeUnknown: "(home unknown)",
-    unreachable: "Unreachable — ensure curl or wget is installed in this distro, then Refresh.",
+    unreachable: "Cannot connect. Start this WSL distribution, then Refresh. If it is already running, check that curl or wget is installed.",
+    pendingSync: "Waiting to sync. Start this WSL distribution now, or leave it for later; settings will sync automatically when it connects.",
+    settingsQueued: "Settings saved. {distros} has not synced yet. See its status in Settings; Relay will retry automatically.",
+    syncBlocked: "Connected to Relay, but configuration sync failed. Resolve the issue below; Relay will retry automatically.",
     notProbed: "Not yet probed.",
   },
   disable: {
@@ -238,7 +241,10 @@ const zh: Translations = {
     installHint: "可通过 Microsoft Store 或 {cmd} 安装，然后点刷新。",
     default: "（默认）",
     homeUnknown: "（home 未知）",
-    unreachable: "无法连通——请确认该发行版内安装了 curl 或 wget，然后点刷新。",
+    unreachable: "暂时无法连接。请启动此 WSL 子系统后刷新；若已启动，请检查是否安装了 curl 或 wget。",
+    pendingSync: "等待同步。你可以现在启动此 WSL 子系统，也可以稍后再打开；连接恢复后会自动同步设置。",
+    settingsQueued: "设置已保存。{distros} 尚未同步，请在 Settings 中查看具体状态，Relay 会自动重试。",
+    syncBlocked: "已连接 Relay，但配置同步失败。请处理下方问题，Relay 会自动重试。",
     notProbed: "尚未探测。",
   },
   disable: {

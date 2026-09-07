@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
+import { listCliLifecycleStatus } from "@/lib/api";
 
 type WslDistroStatus = "ready" | "unreachable" | "unknown";
 
@@ -33,12 +34,19 @@ export function WslDistros() {
   const [distros, setDistros] = useState<WslDistroInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [pendingReasons, setPendingReasons] = useState<Record<string, string | null>>({});
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (background = false) => {
+    if (!background) setLoading(true);
     try {
-      const list = await invoke<WslDistroInfo[]>("list_wsl_distros");
+      const [list, status] = await Promise.all([
+        invoke<WslDistroInfo[]>("list_wsl_distros"),
+        listCliLifecycleStatus(),
+      ]);
       setDistros(list);
+      setPendingReasons(Object.fromEntries(status
+        .filter((target) => target.targetType === "wsl" && target.pending && target.distroName)
+        .map((target) => [target.distroName!, target.pendingReason])));
     } catch (e) {
       console.error("list_wsl_distros failed", e);
       setDistros([]);
@@ -50,6 +58,8 @@ export function WslDistros() {
   useEffect(() => {
     if (!isWindows) return;
     void load();
+    const timer = setInterval(() => void load(true), 5000);
+    return () => clearInterval(timer);
   }, [load]);
 
   const handleRefresh = async () => {
@@ -147,7 +157,21 @@ export function WslDistros() {
                     gemini {d.hasGemini ? "✓" : "✗"}
                   </span>
                 </div>
-                <StatusLine status={d.status} url={d.resolvedUrl} />
+                {d.name in pendingReasons ? (
+                  <div className="text-amber-500" role="status">
+                    {d.status === "ready" ? (
+                      <>
+                        <p>{t("wsl.syncBlocked")}</p>
+                        <p className="mt-1 break-words select-text">{pendingReasons[d.name]}</p>
+                      </>
+                    ) : (
+                      <>
+                        <p>{t("wsl.pendingSync")}</p>
+                        <code className="select-all">wsl -d "{d.name}"</code>
+                      </>
+                    )}
+                  </div>
+                ) : <StatusLine status={d.status} url={d.resolvedUrl} />}
               </div>
             </li>
           ))}

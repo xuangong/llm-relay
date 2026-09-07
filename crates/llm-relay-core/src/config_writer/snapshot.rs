@@ -62,22 +62,29 @@ pub fn snapshot_path(meta: &SnapshotMeta) -> PathBuf {
 /// Capture the live state of the three CLIs as visible to `target.backend`
 /// and atomically persist as a TargetSnapshot JSON.
 pub fn capture(target: &CliTarget) -> Result<(), AppError> {
-    let snap = TargetSnapshot {
-        target_type: match target.snapshot_meta.target_type {
-            TargetType::Windows => "windows".into(),
-            TargetType::Wsl => "wsl".into(),
-        },
-        distro_name: target.snapshot_meta.distro_name.clone(),
-        home: target.snapshot_meta.home.clone(),
-        captured_at: chrono::Utc::now().to_rfc3339(),
-        claude: capture_claude(&*target.backend)?,
-        codex: capture_codex(&*target.backend)?,
-        gemini: capture_gemini(&*target.backend)?,
-    };
+    let snap = capture_from_backend(&target.snapshot_meta, &*target.backend)?;
     let path = snapshot_path(&target.snapshot_meta);
     std::fs::create_dir_all(crate::paths::cli_config_backup_dir())?;
     let bytes = serde_json::to_vec_pretty(&snap)?;
     crate::cli_target::atomic_write(&path, &bytes)
+}
+
+pub(super) fn capture_from_backend(
+    meta: &SnapshotMeta,
+    backend: &dyn CliBackend,
+) -> Result<TargetSnapshot, AppError> {
+    Ok(TargetSnapshot {
+        target_type: match meta.target_type {
+            TargetType::Windows => "windows".into(),
+            TargetType::Wsl => "wsl".into(),
+        },
+        distro_name: meta.distro_name.clone(),
+        home: meta.home.clone(),
+        captured_at: chrono::Utc::now().to_rfc3339(),
+        claude: capture_claude(backend)?,
+        codex: capture_codex(backend)?,
+        gemini: capture_gemini(backend)?,
+    })
 }
 
 pub fn read(meta: &SnapshotMeta) -> Result<Option<TargetSnapshot>, AppError> {

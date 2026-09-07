@@ -2033,72 +2033,18 @@ pub fn apply_to_targets(
 ) -> Result<ApplyReport, AppError> {
     use crate::cli_target::TargetType;
 
-    // Legacy field snapshots remain a restoration authority only for active
-    // installations that predate the full-file lifecycle manifest.
-    let prev_index = snapshot::build_index()?;
-    let legacy_compat = !lifecycle::manifest_exists();
-    let current_keys: std::collections::HashSet<String> =
-        retained_keys.cloned().unwrap_or_else(|| {
-            targets
-                .iter()
-                .map(|t| {
-                    t.snapshot_meta
-                        .distro_name
-                        .clone()
-                        .unwrap_or_else(|| "windows".to_string())
-                })
-                .collect()
-        });
-
-    // 1. Restore snapshots for targets removed since last apply. A failed
-    // restore keeps its snapshot so a later apply can retry instead of losing
-    // the only copy of the user's original config.
-    let mut dropped_windows_failed = false;
-    for (key, meta) in &prev_index {
-        if current_keys.contains(key) {
-            continue;
-        }
-        log::info!("dropping target {key} — restoring previous state");
-        if let Some(snap) = snapshot::read(meta)? {
-            let backend: Box<dyn CliBackend> = match meta.target_type {
-                TargetType::Windows => Box::new(crate::cli_target::WindowsFsBackend::new()),
-                TargetType::Wsl => Box::new(crate::cli_target::WslBackend {
-                    distro: meta.distro_name.clone().unwrap_or_default(),
-                    home: meta.home.clone().unwrap_or_default(),
-                }),
-            };
-            if let Err(e) = snapshot::restore(&snap, &*backend) {
-                log::warn!("restore failed for dropped target {key}: {e}");
-                if matches!(meta.target_type, TargetType::Windows) {
-                    dropped_windows_failed = true;
-                }
-                continue;
-            }
-            #[cfg(target_os = "windows")]
-            if let TargetType::Wsl = meta.target_type {
-                if let Some(distro) = meta.distro_name.as_deref() {
-                    let hn = crate::wsl::hosts::relay_hostname();
-                    if let Err(e) = crate::wsl::hosts::clear_hosts_entry(distro, &hn) {
-                        log::warn!("clear hosts entry for dropped {distro}: {e}");
-                        continue;
-                    }
-                }
-            }
-        }
-        if let Err(e) = snapshot::delete(meta) {
-            log::warn!("delete restored snapshot for {key} failed: {e}");
-            if matches!(meta.target_type, TargetType::Windows) {
-                dropped_windows_failed = true;
-            }
-        }
-    }
-    if dropped_windows_failed {
+    // All active legacy installations are migrated before this entry point.
+    // Full-file origins are the sole restoration source.
+    if !lifecycle::manifest_exists() {
         return Err(AppError::Config(
-            "apply: failed to restore removed Windows target".into(),
+            "full-file lifecycle is required before apply".into(),
         ));
     }
+    if let Some(retained) = retained_keys {
+        lifecycle::restore_removed_targets(retained)?;
+    }
 
-    // 2. For each current target: capture snapshot if new, then write.
+    // Derive defaults from origins, then write each current target.
     let mut report = ApplyReport::default();
     let mut windows_failed = false;
     for target in targets {
@@ -2108,47 +2054,16 @@ pub fn apply_to_targets(
             .clone()
             .unwrap_or_else(|| "windows".to_string());
         let is_windows = matches!(target.snapshot_meta.target_type, TargetType::Windows);
-        if !prev_index.contains_key(&key) {
-            if legacy_compat {
-                let error = format!(
-                    "active pre-manifest target {key} has no legacy snapshot; refusing to capture Relay-written files as origin"
-                );
-                log::warn!("{error}");
-                report.failed.insert(key, error);
+        let original_snapshot = match lifecycle::snapshot_for_apply(target, claude_extra_env) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                report.failed.insert(key, error.to_string());
                 if is_windows {
                     windows_failed = true;
                 }
                 continue;
             }
-            if let Err(e) = snapshot::capture(target) {
-                log::warn!("snapshot capture failed for {key}: {e}");
-                if is_windows {
-                    windows_failed = true;
-                }
-                continue;
-            }
-        } else if let Err(e) = snapshot::backfill_extended_snapshot(target) {
-            // An old snapshot cannot restore fields this release is about to
-            // overwrite. Refuse this target rather than destroy user config.
-            log::warn!("snapshot upgrade failed for {key}: {e}");
-            if is_windows {
-                windows_failed = true;
-            }
-            continue;
-        }
-        if let Err(e) = snapshot::capture_extra_env_originals(target, claude_extra_env) {
-            log::warn!("Extra env snapshot upgrade failed for {key}: {e}");
-            if is_windows {
-                windows_failed = true;
-            }
-            continue;
-        }
-        let original_snapshot = snapshot::read(&target.snapshot_meta)?;
-        if legacy_compat {
-            if let Some(snapshot) = original_snapshot.as_ref() {
-                snapshot::restore_unmanaged(snapshot, &*target.backend, target.installed)?;
-            }
-        }
+        };
         match write_one_target(
             target,
             api_key,
@@ -2158,7 +2073,7 @@ pub fn apply_to_targets(
             codex_model,
             codex_subagent_model,
             claude_extra_env,
-            original_snapshot.as_ref(),
+            Some(&original_snapshot),
         ) {
             Ok(()) => {
                 report.succeeded.insert(key);

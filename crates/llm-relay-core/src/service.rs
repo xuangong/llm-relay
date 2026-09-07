@@ -345,6 +345,9 @@ impl Service {
     ) -> Result<(), AppError> {
         let db_active = self.db.get_active_config()?.gateway_id.is_some();
         crate::config_writer::lifecycle::recover(db_active)?;
+        if db_active {
+            crate::config_writer::lifecycle::migrate_legacy_active()?;
+        }
         let gw_id_str = gateway_id.to_string();
         let key_id_str = key_id.to_string();
 
@@ -437,9 +440,11 @@ impl Service {
                 &shell_paths,
             )?)
         } else {
+            crate::config_writer::lifecycle::restore_removed_targets(&apply_plan.retained_keys)?;
             crate::config_writer::lifecycle::prepare_active_apply(&targets, &shell_paths)?
         };
 
+        crate::config_writer::lifecycle::record_pending_wsl(&apply_plan.pending)?;
         // Host-level shell env for Codex CLI, which will not start without
         // OPENAI_API_KEY set. Do this before the per-target writes so a registry
         // failure cannot leave fresh CLI files paired with the old active DB row.
@@ -527,9 +532,11 @@ impl Service {
             applied_at: None,
             last_switched_at: existing.last_switched_at,
         };
-        // Back up the current Relay working files before restoring the exact
-        // files captured when this inactive → Use cycle began. The legacy
-        // field-level snapshot path remains a fallback for pre-lifecycle users.
+        // Import old field snapshots once, then use the same full-file restore
+        // path for Settings switches and Disable.
+        if !crate::config_writer::lifecycle::manifest_exists() {
+            crate::config_writer::lifecycle::migrate_legacy_active()?;
+        }
         #[cfg(target_os = "windows")]
         let lifecycle_distros: std::collections::HashSet<String> =
             crate::config_writer::lifecycle::load()
@@ -539,20 +546,7 @@ impl Service {
                 .flat_map(|manifest| manifest.targets)
                 .filter_map(|target| target.distro_name)
                 .collect();
-        if crate::config_writer::lifecycle::manifest_exists() {
-            crate::config_writer::lifecycle::disable()?;
-        } else if crate::config_writer::snapshot::has_legacy_snapshots()? {
-            // Upgrade compatibility: releases before the full-file lifecycle
-            // still have authoritative field snapshots. Restore those rather
-            // than trapping an active user in a configuration they cannot
-            // disable.
-            crate::config_writer::clear_targets_from_snapshots()?;
-        } else {
-            return Err(AppError::Config(
-                "No trusted full-file origin manifest or legacy snapshot exists; refusing to disable"
-                    .into(),
-            ));
-        }
+        crate::config_writer::lifecycle::disable()?;
 
         self.db.set_active_config(&config)?;
 
@@ -1085,9 +1079,6 @@ impl Service {
                 codex: row.has_codex,
                 gemini: row.has_gemini,
             });
-            if !installed.claude && !installed.codex && !installed.gemini {
-                continue;
-            }
             let (Some(url), Some(home)) = (row.resolved_url.clone(), row.home.clone()) else {
                 let reason = if row.home.is_none() {
                     "WSL home has not been probed"
@@ -1289,6 +1280,35 @@ mod tests {
         assert_eq!(plan.pending.len(), 1);
         assert_eq!(plan.pending[0].name, "Offline Distro");
         assert!(plan.retained_keys.contains("Offline Distro"));
+    }
+
+    #[test]
+    fn disabled_wsl_clients_are_still_scheduled_for_restore() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        db.set_managed_clients(crate::cli_target::ManagedClients::CODEX_ONLY)
+            .unwrap();
+        let mut row = DistroRow {
+            name: "Claude Only".into(),
+            is_default: false,
+            selected: true,
+            home: Some("/home/test".into()),
+            user: None,
+            has_claude: true,
+            has_codex: false,
+            has_gemini: false,
+            resolved_url: None,
+            probed_at: None,
+        };
+        db.upsert_wsl_distro(&row).unwrap();
+        let service = Service::new(db.clone(), Arc::new(NullSink));
+        assert_eq!(service.build_apply_plan().pending.len(), 1);
+        row.resolved_url = Some("http://relay".into());
+        db.upsert_wsl_distro(&row).unwrap();
+        let plan = service.build_apply_plan();
+        assert_eq!(plan.ready.len(), 2);
+        assert!(!plan.ready[1].installed.claude);
+        assert!(!plan.ready[1].installed.codex);
+        assert!(!plan.ready[1].installed.gemini);
     }
 
     #[test]
