@@ -93,7 +93,7 @@ export function DisableRelayDialog({ open, onOpenChange, onDisabled }: Props) {
                           {file.backupExists !== null && ` · bak: ${file.backupExists ? t("disable.present") : t("disable.absent")}`}
                         </span>
                       </div>
-                      {file.error && <p className="mt-1 text-destructive">{file.error}</p>}
+                      {file.error && file.error !== target.pendingReason && <p className="mt-1 text-destructive">{file.error}</p>}
                     </div>
                   ))}
                 </div>

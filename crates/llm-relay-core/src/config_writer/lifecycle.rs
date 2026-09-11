@@ -1129,9 +1129,11 @@ fn restore_state(
         ));
     }
     if state.exists {
-        let content = backend
-            .read_bytes(sidecar)?
-            .ok_or_else(|| AppError::Config("lifecycle sidecar is missing".into()))?;
+        // A locally removed backup is not permission to delete the working
+        // file or capture Relay's configuration as the original. Leave it as-is.
+        let Some(content) = backend.read_bytes(sidecar)? else {
+            return Ok(());
+        };
         // Local users own backup contents; restore their current bytes verbatim.
         backend.write_atomic(working, &content)
     } else {
@@ -1147,9 +1149,8 @@ fn verify_sidecar(
     if !state.exists {
         return Ok(());
     }
-    backend
-        .read_bytes(sidecar)?
-        .ok_or_else(|| AppError::Config("lifecycle sidecar is missing".into()))?;
+    // Only actual read errors block apply; users may remove local backups.
+    backend.read_bytes(sidecar)?;
     Ok(())
 }
 
@@ -1769,7 +1770,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_origin_with_existing_config_reports_specific_error() {
+    fn missing_origin_allows_apply_and_disable_preserves_working_file() {
         let env = MigrationEnv::new();
         let native = target(env.home.path());
         native
@@ -1782,11 +1783,43 @@ mod tests {
             .backend
             .remove(&[".claude", "settings.json.llm-relay.origin"])
             .unwrap();
-        let error = prepare_active_apply(&[target(env.home.path())], &BTreeMap::new()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains(".claude/settings.json.llm-relay.origin"));
+        prepare_active_apply(&[target(env.home.path())], &BTreeMap::new()).unwrap();
         assert!(load().unwrap().unwrap().targets[0].files[0].origin.exists);
+        disable().unwrap();
+        assert_eq!(
+            native
+                .backend
+                .read_bytes(&[".claude", "settings.json"])
+                .unwrap()
+                .unwrap(),
+            b"{}"
+        );
+        assert!(!native
+            .backend
+            .exists(&[".claude", "settings.json.llm-relay.origin"])
+            .unwrap());
+        assert_eq!(load().unwrap().unwrap().phase, LifecyclePhase::Inactive);
+    }
+
+    #[test]
+    fn missing_backup_allows_next_use_without_deleting_working_file() {
+        let env = MigrationEnv::new();
+        let native = target(env.home.path());
+        let working = [".claude", "settings.json"];
+        native.backend.write_atomic(&working, b"original").unwrap();
+        let mut manifest = prepare_use(&[target(env.home.path())], &[], &BTreeMap::new()).unwrap();
+        mark_active(&mut manifest).unwrap();
+        native.backend.write_atomic(&working, b"relay").unwrap();
+        disable().unwrap();
+        native
+            .backend
+            .remove(&[".claude", "settings.json.llm-relay.bak"])
+            .unwrap();
+        prepare_use(&[target(env.home.path())], &[], &BTreeMap::new()).unwrap();
+        assert_eq!(
+            native.backend.read_bytes(&working).unwrap().unwrap(),
+            b"original"
+        );
     }
 
     impl SwitchableBackend {
