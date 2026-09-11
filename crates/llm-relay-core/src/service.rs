@@ -440,6 +440,7 @@ impl Service {
                 &shell_paths,
             )?)
         } else {
+            crate::config_writer::lifecycle::prepare_missing_active(targets, &apply_plan.pending)?;
             crate::config_writer::lifecycle::restore_removed_targets(&apply_plan.retained_keys)?;
             crate::config_writer::lifecycle::prepare_active_apply(&targets, &shell_paths)?
         };

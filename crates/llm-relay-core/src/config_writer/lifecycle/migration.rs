@@ -54,6 +54,9 @@ pub fn migrate_legacy_active() -> Result<(), AppError> {
         return Ok(());
     }
     recover(true)?;
+    if !crate::paths::cli_config_backup_dir().exists() {
+        return Ok(());
+    }
     // Unlike the UI's best-effort index, migration must not silently omit a
     // malformed target and then publish an incomplete manifest.
     let mut index = BTreeMap::new();
@@ -80,6 +83,9 @@ pub fn migrate_legacy_active() -> Result<(), AppError> {
         {
             return Err(AppError::Config("legacy snapshot identity mismatch".into()));
         }
+    }
+    if index.is_empty() {
+        return Ok(());
     }
     let mut manifest = LifecycleManifest {
         version: MANIFEST_VERSION,
