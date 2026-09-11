@@ -1385,6 +1385,82 @@ mod tests {
         assert!(empty.exists);
     }
 
+    #[tokio::test]
+    async fn disable_stops_proxy_even_when_restore_fails_and_stays_disabled() {
+        let env = MigrationEnv::new();
+        crate::keystore::init_test();
+        let db = std::sync::Arc::new(crate::Database::open_in_memory().unwrap());
+        let service = crate::Service::new(db.clone(), std::sync::Arc::new(crate::events::NullSink));
+        let primary = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = primary.local_addr().unwrap();
+        let proxy = crate::proxy_server::start_with_listeners(
+            crate::proxy_server::ProxyState::new(
+                db.clone(),
+                service.switch_lock.clone(),
+                service.sink.clone(),
+            ),
+            primary,
+            None,
+        )
+        .await;
+        let service = service.with_proxy(proxy.clone());
+        // A stale active selection survives a restore error, but cannot restart
+        // the listener or trigger an automatic gateway switch.
+        let mut active = db.get_active_config().unwrap();
+        active.gateway_id = Some(uuid::Uuid::new_v4().to_string());
+        db.set_active_config(&active).unwrap();
+        std::fs::write(
+            env.config.path().join("cli-file-lifecycle.json"),
+            b"invalid manifest",
+        )
+        .unwrap();
+        assert!(service.clear_active().await.is_err());
+        assert!(service.relay_disabled().unwrap());
+        assert!(!proxy.is_running());
+        let _other_owner = std::net::TcpListener::bind(addr).unwrap();
+        service.start_proxy_if_enabled().await.unwrap();
+        assert!(!proxy.is_running());
+        let models = crate::ipc::protocol::ModelSelection {
+            claude: None,
+            claude_subagent: None,
+            claude_small: None,
+            codex: None,
+            codex_subagent: None,
+            gemini: None,
+            claude_extra: crate::ipc::protocol::ClaudeExtraSelection::Inherit,
+        };
+        assert!(!service
+            .auto_set_active(
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                models.clone(),
+                &active
+            )
+            .await
+            .unwrap());
+        std::fs::remove_file(env.config.path().join("cli-file-lifecycle.json")).unwrap();
+        // Explicit Use must report port ownership before touching CLI files.
+        assert!(service
+            .set_active(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), models.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Local proxy port"));
+        assert!(!manifest_exists());
+        service.clear_active().await.unwrap();
+        assert!(db.get_active_config().unwrap().gateway_id.is_none());
+        assert!(!proxy.is_running());
+        drop(_other_owner);
+        // If activation fails after binding, the newly acquired port is released.
+        assert!(service
+            .set_active(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), models)
+            .await
+            .is_err());
+        assert!(!proxy.is_running());
+        assert!(service.relay_disabled().unwrap());
+        std::net::TcpListener::bind(addr).unwrap();
+    }
+
     #[test]
     fn legacy_file_state_ignores_checksum() {
         let state: StoredFileState =

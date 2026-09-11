@@ -48,7 +48,8 @@ export function DisableRelayDialog({ open, onOpenChange, onDisabled }: Props) {
       onDisabled();
       onOpenChange(false);
     } catch (err) {
-      toast.error(t("disable.failed", { error: extractErrorMessage(err) }));
+      const status = await api.getRelayStatus().catch(() => null);
+      toast.error(t(status && !status.running ? "disable.restoreFailed" : "disable.failed", { error: extractErrorMessage(err) }));
       try {
         setTargets(await api.listCliLifecycleStatus());
       } catch {}

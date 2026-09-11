@@ -95,11 +95,9 @@ pub struct Service {
     pub db: Arc<Database>,
     pub switch_lock: Arc<Mutex<()>>,
     pub sink: SharedEventSink,
-    /// Set once the proxy is up via `with_proxy(handle)`. None during the
-    /// brief window between Service construction and proxy startup, and
-    /// in tests. Long-running tasks (WSL state machine, Tauri commands)
-    /// that need rebind/shutdown clone this Arc.
-    pub proxy: Option<Arc<crate::proxy_server::ProxyHandle>>,
+    /// Shared by every Service clone, including the one inside ProxyState.
+    /// Weak ownership avoids a Service/ProxyHandle reference cycle.
+    pub proxy: Arc<std::sync::OnceLock<std::sync::Weak<crate::proxy_server::ProxyHandle>>>,
 }
 
 impl Service {
@@ -108,16 +106,33 @@ impl Service {
             db,
             sink,
             switch_lock: Arc::new(Mutex::new(())),
-            proxy: None,
+            proxy: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
     /// Attach the running proxy handle so callers can reach rebind/shutdown
     /// through the service. Idempotent in test code; production callers
     /// invoke once during startup.
-    pub fn with_proxy(mut self, proxy: Arc<crate::proxy_server::ProxyHandle>) -> Self {
-        self.proxy = Some(proxy);
+    pub fn with_proxy(self, proxy: Arc<crate::proxy_server::ProxyHandle>) -> Self {
+        let _ = self.proxy.set(Arc::downgrade(&proxy));
         self
+    }
+
+    pub fn proxy_handle(&self) -> Option<Arc<crate::proxy_server::ProxyHandle>> {
+        self.proxy.get().and_then(std::sync::Weak::upgrade)
+    }
+
+    pub fn relay_disabled(&self) -> Result<bool, AppError> {
+        Ok(self.db.get_setting("relay_disabled")?.as_deref() == Some("true"))
+    }
+
+    pub async fn start_proxy_if_enabled(&self) -> Result<(), AppError> {
+        if !self.relay_disabled()? && self.db.get_active_config()?.gateway_id.is_some() {
+            if let Some(proxy) = self.proxy_handle() {
+                proxy.start().await?;
+            }
+        }
+        Ok(())
     }
 
     /// Build the full Snapshot returned by `Request::GetSnapshot`.
@@ -334,7 +349,64 @@ impl Service {
         models: ModelSelection,
     ) -> Result<(), AppError> {
         let _g = self.switch_lock.lock().await;
-        self.set_active_locked(gateway_id, key_id, models).await
+        self.activate_locked(gateway_id, key_id, models).await
+    }
+
+    /// Background switching must recheck user intent under the same lock as
+    /// Disable, including when a health check was already in progress.
+    pub async fn auto_set_active(
+        &self,
+        gateway_id: Uuid,
+        key_id: Uuid,
+        models: ModelSelection,
+        expected: &ActiveConfig,
+    ) -> Result<bool, AppError> {
+        let _guard = self.switch_lock.lock().await;
+        let current = self.db.get_active_config()?;
+        if self.relay_disabled()?
+            || current.gateway_id.is_none()
+            || self.proxy_handle().is_some_and(|proxy| !proxy.is_running())
+            || current.gateway_id != expected.gateway_id
+            || current.applied_at != expected.applied_at
+        {
+            return Ok(false);
+        }
+        self.activate_locked(gateway_id, key_id, models).await?;
+        let mut active = self.db.get_active_config()?;
+        active.last_switched_at = Some(chrono::Utc::now().to_rfc3339());
+        self.db.set_active_config(&active)?;
+        Ok(true)
+    }
+
+    async fn activate_locked(
+        &self,
+        gateway_id: Uuid,
+        key_id: Uuid,
+        models: ModelSelection,
+    ) -> Result<(), AppError> {
+        // A previous failed restore must finish before any listener is reopened.
+        if self.relay_disabled()?
+            && crate::config_writer::lifecycle::load()?.is_some_and(|manifest| {
+                manifest.phase != crate::config_writer::lifecycle::LifecyclePhase::Inactive
+            })
+        {
+            crate::config_writer::lifecycle::disable()?;
+        }
+        let proxy = self.proxy_handle();
+        let was_running = proxy.as_ref().is_some_and(|proxy| proxy.is_running());
+        if let Some(proxy) = &proxy {
+            proxy.start().await?;
+        }
+        let result = self
+            .set_active_locked(gateway_id, key_id, models)
+            .await
+            .and_then(|()| self.db.set_setting("relay_disabled", "false"));
+        if result.is_err() && !was_running {
+            if let Some(proxy) = proxy {
+                proxy.shutdown().await;
+            }
+        }
+        result
     }
 
     async fn set_active_locked(
@@ -343,7 +415,8 @@ impl Service {
         key_id: Uuid,
         models: ModelSelection,
     ) -> Result<(), AppError> {
-        let db_active = self.db.get_active_config()?.gateway_id.is_some();
+        let db_active =
+            self.db.get_active_config()?.gateway_id.is_some() && !self.relay_disabled()?;
         crate::config_writer::lifecycle::recover(db_active)?;
         if db_active {
             crate::config_writer::lifecycle::migrate_legacy_active()?;
@@ -431,7 +504,7 @@ impl Service {
         // if that fails, the proxy-visible DB state must remain unchanged.
         let apply_plan = self.build_apply_plan();
         let targets = &apply_plan.ready;
-        let inactive_use = existing.gateway_id.is_none();
+        let inactive_use = existing.gateway_id.is_none() || self.relay_disabled()?;
         let shell_paths = crate::config_writer::shell_rc_paths(targets);
         let mut file_lifecycle = if inactive_use {
             Some(crate::config_writer::lifecycle::prepare_use(
@@ -513,9 +586,16 @@ impl Service {
         Ok(())
     }
 
-    /// Clear the active selection and wipe CLI config files.
+    /// Stop the proxy, restore CLI configuration, then clear the selection.
     pub async fn clear_active(&self) -> Result<(), AppError> {
         let _g = self.switch_lock.lock().await;
+        // Stop traffic even if persistence or configuration restoration fails.
+        // Persist first so an interrupted restore cannot re-enable on restart.
+        let persist = self.db.set_setting("relay_disabled", "true");
+        if let Some(proxy) = self.proxy_handle() {
+            proxy.shutdown().await;
+        }
+        persist?;
         let existing = self.db.get_active_config()?;
         let config = ActiveConfig {
             gateway_id: None,
@@ -788,6 +868,9 @@ impl Service {
     }
 
     async fn retry_active_config_locked(&self, active: ActiveConfig) -> Result<(), AppError> {
+        if self.relay_disabled()? {
+            return Ok(());
+        }
         let gateway_id = active
             .gateway_id
             .as_deref()
@@ -798,7 +881,7 @@ impl Service {
             .ok_or_else(|| AppError::Config("active gateway not found".into()))?;
         let key_id = pick_key_id(&gateway, Some(&active))
             .ok_or_else(|| AppError::Config("active gateway key not found".into()))?;
-        self.set_active_locked(
+        self.activate_locked(
             Uuid::parse_str(gateway_id).map_err(|e| AppError::Config(e.to_string()))?,
             Uuid::parse_str(&key_id).map_err(|e| AppError::Config(e.to_string()))?,
             ModelSelection {
@@ -1123,37 +1206,15 @@ impl Service {
     }
 
     pub async fn retry_pending_wsl_apply(&self) -> Result<(), AppError> {
-        if !crate::config_writer::lifecycle::has_pending_wsl() {
+        let _guard = self.switch_lock.lock().await;
+        if self.relay_disabled()? || !crate::config_writer::lifecycle::has_pending_wsl() {
             return Ok(());
         }
         let active = self.db.get_active_config()?;
-        let Some(gateway_id) = active.gateway_id.as_deref() else {
+        if active.gateway_id.is_none() {
             return Ok(());
-        };
-        let gateway = self
-            .db
-            .get_gateway(gateway_id)?
-            .ok_or_else(|| AppError::Config("active gateway not found".into()))?;
-        let key_id = pick_key_id(&gateway, Some(&active))
-            .ok_or_else(|| AppError::Config("active gateway key not found".into()))?;
-        let gateway_id =
-            Uuid::parse_str(gateway_id).map_err(|error| AppError::Config(error.to_string()))?;
-        let key_id =
-            Uuid::parse_str(&key_id).map_err(|error| AppError::Config(error.to_string()))?;
-        self.set_active(
-            gateway_id,
-            key_id,
-            ModelSelection {
-                claude: active.claude_model,
-                claude_subagent: active.claude_subagent_model,
-                claude_small: active.claude_small_model,
-                codex: active.codex_model,
-                codex_subagent: active.codex_subagent_model,
-                gemini: active.gemini_model,
-                claude_extra: ClaudeExtraSelection::Inherit,
-            },
-        )
-        .await
+        }
+        self.retry_active_config_locked(active).await
     }
 
     /// Build the WSL detection state machine. The caller is responsible for
@@ -1161,7 +1222,7 @@ impl Service {
     /// headless agent, `tauri::async_runtime` for the GUI). Returns `None`
     /// if `proxy` isn't attached (test code or pre-startup).
     pub fn spawn_wsl_state_machine(&self) -> Option<Arc<crate::wsl::state::StateMachine>> {
-        let proxy = self.proxy.as_ref()?.clone();
+        let proxy = self.proxy_handle()?;
         Some(crate::wsl::state::StateMachine::new(
             Arc::new(self.clone()),
             proxy,

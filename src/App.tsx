@@ -13,13 +13,14 @@ import * as api from "@/lib/api";
 import type { GatewayWithHealth, ActiveConfig, ClaudeExtraConfig } from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n } from "@/lib/i18n";
-import { RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle, Menu, ZapOff } from "lucide-react";
+import { RefreshCw, Loader2, AlertTriangle, ChevronDown, BarChart3, HelpCircle, Menu, ZapOff, PowerOff } from "lucide-react";
 
 function App() {
   const { t } = useI18n();
   const [gateways, setGateways] = useState<GatewayWithHealth[]>([]);
   const [extraConfigs, setExtraConfigs] = useState<ClaudeExtraConfig[]>([]);
   const [activeConfig, setActiveConfig] = useState<ActiveConfig | null>(null);
+  const [relayStatus, setRelayStatus] = useState<api.RelayStatus | null>(null);
   const [autoSwitch, setAutoSwitch] = useState(true);
   const [managedClients, setManagedClients] = useState<api.ManagedClients>({
     claude: false,
@@ -99,8 +100,9 @@ function App() {
   const loadAll = useCallback(async () => {
     await Promise.all([loadGateways(), loadSettings(), loadClientName(), loadExtraConfigs()]);
     try {
-      const config = await api.getActiveConfig();
+      const [config, status] = await Promise.all([api.getActiveConfig(), api.getRelayStatus()]);
       setActiveConfig(config);
+      setRelayStatus(status);
     } catch {
       // no active config yet
     }
@@ -140,7 +142,16 @@ function App() {
       }
     });
 
+    const unlisten4 = appWindow.listen<api.RelayStatus>("relay-status-changed", (event) => {
+      setRelayStatus(event.payload);
+    });
+    const statusTimer = setInterval(() => {
+      api.getRelayStatus().then(setRelayStatus).catch(() => setRelayStatus(null));
+    }, 3000);
+
     return () => {
+      clearInterval(statusTimer);
+      unlisten4.then((fn) => fn());
       unlisten1.then((fn) => fn());
       unlisten2.then((fn) => fn());
       unlisten3.then((fn) => fn());
@@ -286,6 +297,21 @@ function App() {
         </div>
       </header>
 
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 bg-card/30 px-5 py-2" role="status">
+        <div className="flex items-center gap-2 text-xs">
+          <span className={`h-2 w-2 rounded-full ${relayStatus?.running ? "bg-success" : "bg-muted-foreground/50"}`} />
+          <span className="font-medium">{t(relayStatus === null ? "header.relayUnknown" : relayStatus.running ? "header.relayRunning" : "header.relayStopped")}</span>
+          <span className="text-muted-foreground">
+            {relayStatus && t(relayStatus.running ? "header.relayPort" : "header.relayStoppedHint", { port: String(relayStatus.port) })}
+          </span>
+        </div>
+        <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => setDisableOpen(true)}
+          disabled={loading || (!relayStatus?.running && !activeConfig?.gatewayId)}>
+          <PowerOff className="h-3.5 w-3.5" />
+          {t(!relayStatus?.running && activeConfig?.gatewayId ? "header.retryRestore" : "header.disableRelay")}
+        </Button>
+      </div>
+
       {/* Main content */}
       <main className="flex-1 overflow-y-auto px-4 py-4 min-h-0">
         {loading ? (
@@ -299,7 +325,7 @@ function App() {
           <div className="max-w-4xl mx-auto space-y-2">
             <GatewayList
               gateways={gateways}
-              activeGatewayId={activeConfig?.gatewayId ?? null}
+              activeGatewayId={relayStatus?.running ? activeConfig?.gatewayId ?? null : null}
               activeKeyId={activeConfig?.keyId ?? null}
               activeKeyName={activeConfig?.keyName ?? null}
               extraConfigs={extraConfigs}
@@ -404,14 +430,7 @@ function App() {
         onAutostartChange={handleAutostartChange}
         clientName={clientName}
         onClientNameChange={setClientName}
-        canDisable={!!activeConfig?.gatewayId}
-        onDisable={() => {
-          // Let the drawer finish sliding out before the dialog takes over,
-          // rather than stacking two Radix overlays. Matches the 200ms
-          // sheetSlideOutRight in index.css.
-          setSettingsOpen(false);
-          setTimeout(() => setDisableOpen(true), 200);
-        }}
+
       />
 
       <DisableRelayDialog

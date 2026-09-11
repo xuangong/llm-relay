@@ -240,6 +240,12 @@ export const readCurrentConfig = () =>
 export const clearConfig = () =>
   invoke<void>("clear_config");
 
+export interface RelayStatus {
+  running: boolean;
+  port: number;
+}
+export const getRelayStatus = () => invoke<RelayStatus>("get_relay_status");
+
 export type LifecyclePhase =
   | "inactive"
   | "preparing_use"

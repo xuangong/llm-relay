@@ -91,7 +91,7 @@ pub async fn check_and_switch(service: &crate::Service) {
         Err(_) => return,
     };
 
-    if !config.auto_switch {
+    if !config.auto_switch || service.relay_disabled().unwrap_or(true) {
         return;
     }
 
@@ -124,10 +124,6 @@ pub async fn check_and_switch(service: &crate::Service) {
                 current_id,
                 best.name
             );
-            do_switch(service, &best.id, &config).await;
-        }
-        (Some(best), None) => {
-            log::info!("Auto-switch: none -> {} (first healthy)", best.name);
             do_switch(service, &best.id, &config).await;
         }
         (None, Some(_)) => {
@@ -195,18 +191,16 @@ pub async fn do_switch(service: &crate::Service, new_gw_id: &str, current_config
         claude_extra: crate::ipc::protocol::ClaudeExtraSelection::Inherit,
     };
 
-    if let Err(e) = service.set_active(gw_uuid, key_uuid, models).await {
-        log::warn!(
-            "Auto-switch apply failed for {}: {e}. Active config left unchanged.",
-            gw.name
-        );
-        return;
-    }
-
-    // Update last_switched_at so hysteresis works.
-    if let Ok(mut cfg) = service.db.get_active_config() {
-        cfg.last_switched_at = Some(chrono::Utc::now().to_rfc3339());
-        let _ = service.db.set_active_config(&cfg);
+    match service
+        .auto_set_active(gw_uuid, key_uuid, models, current_config)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            log::warn!("Auto-switch apply failed for {}: {e}", gw.name);
+            return;
+        }
     }
 
     // Signal tray refresh (Tauri sink intercepts this)

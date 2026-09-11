@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use axum::{
@@ -142,154 +142,293 @@ pub async fn start_with_listener(service: crate::Service, listener: Option<std::
     }
 }
 
-// ─── Multi-listener proxy with hot-swappable WSL gateway listener ───
-//
-// `start_with_listeners` is the new entry point used by lifecycle. It binds
-// the mandatory 127.0.0.1 listener plus, optionally, the WSL2 gateway-IP
-// listener, and returns an `Arc<ProxyHandle>` so callers can:
-//   - rebind the WSL listener when the gateway IP changes
-//   - cleanly shut both listener tasks down on app exit
-//
-// The single-listener `start_with_listener` above remains as a shim for any
-// caller that doesn't need multi-bind / shutdown control yet.
+// Restartable local/WSL listeners. Production starts with ProxyHandle::stopped;
+// start_with_listeners also supports callers that already own bound sockets.
 
 use std::net::IpAddr;
 use std::sync::Mutex as StdMutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+// Wake and close sockets on stop, including clients that stopped reading and
+// therefore prevent the response body from being polled for cancellation.
+struct CancelIo {
+    stream: tokio::net::TcpStream,
+    cancelled: std::pin::Pin<Box<tokio_util::sync::WaitForCancellationFutureOwned>>,
+    stopped: bool,
+}
+
+impl CancelIo {
+    fn check(&mut self, cx: &mut std::task::Context<'_>) -> std::io::Result<()> {
+        use std::future::Future;
+        if self.stopped || self.cancelled.as_mut().poll(cx).is_ready() {
+            self.stopped = true;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "Relay stopped",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for CancelIo {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.check(cx)?;
+        std::pin::Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for CancelIo {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.check(cx)?;
+        std::pin::Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.check(cx)?;
+        std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+struct CancelListener {
+    listener: tokio::net::TcpListener,
+    token: CancellationToken,
+}
+
+impl axum::serve::Listener for CancelListener {
+    type Io = CancelIo;
+    type Addr = std::net::SocketAddr;
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.listener.accept().await {
+                Ok((stream, addr)) => {
+                    return (
+                        CancelIo {
+                            stream,
+                            cancelled: Box::pin(self.token.clone().cancelled_owned()),
+                            stopped: false,
+                        },
+                        addr,
+                    )
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            }
+        }
+    }
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
 /// Owns the running proxy. Drop alone does NOT stop the server — call
 /// `shutdown()` and `.await` it.
 pub struct ProxyHandle {
-    primary_token: CancellationToken,
-    primary_join: StdMutex<Option<JoinHandle<()>>>,
-    wsl: StdMutex<Option<WslBound>>,
+    lifecycle: tokio::sync::Mutex<()>,
+    running: AtomicBool,
+    primary: StdMutex<Option<BoundListener>>,
+    wsl: StdMutex<Option<BoundListener>>,
+    port: u16,
     state: ProxyState,
 }
 
-struct WslBound {
+struct BoundListener {
     ip: IpAddr,
     token: CancellationToken,
     join: JoinHandle<()>,
 }
 
-impl ProxyHandle {
-    /// Cancel `127.0.0.1` + WSL (if any), then await both serve tasks so
-    /// they really exit before this returns.
-    pub async fn shutdown(self: Arc<Self>) {
-        self.primary_token.cancel();
-        let wsl = self.wsl.lock().unwrap().take();
-        if let Some(wsl) = wsl {
-            wsl.token.cancel();
-            let _ = wsl.join.await;
-        }
-        let primary = self.primary_join.lock().unwrap().take();
-        if let Some(j) = primary {
-            let _ = j.await;
+// Cancel both pending upstream requests and streaming response bodies. Graceful
+// listener shutdown alone would let an existing inference stream keep proxying.
+async fn cancel_on_stop(
+    State(token): State<CancellationToken>,
+    request: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        response = next.run(request) => {
+            let (parts, body) = response.into_parts();
+            let stream = body.into_data_stream().take_until(token.cancelled_owned());
+            Response::from_parts(parts, Body::from_stream(stream))
         }
     }
+}
 
-    /// Cancel any existing WSL listener; if `new_ip` is Some, bind it and
-    /// spawn a new serve task. Returns Err on bind failure; the primary
-    /// listener is never touched.
+fn serve_listener(
+    state: ProxyState,
+    listener: std::net::TcpListener,
+) -> Result<BoundListener, crate::AppError> {
+    serve_router(build_router(state), listener)
+}
+
+fn serve_router(
+    router: Router,
+    listener: std::net::TcpListener,
+) -> Result<BoundListener, crate::AppError> {
+    let ip = listener.local_addr()?.ip();
+    listener.set_nonblocking(true)?;
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    let token = CancellationToken::new();
+    let task_token = token.clone();
+    let app = router.layer(axum::middleware::from_fn_with_state(
+        token.clone(),
+        cancel_on_stop,
+    ));
+    let listener = CancelListener {
+        listener,
+        token: token.clone(),
+    };
+    let join = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(task_token.cancelled_owned())
+            .await;
+    });
+    Ok(BoundListener { ip, token, join })
+}
+
+impl ProxyHandle {
+    pub fn stopped(state: ProxyState, port: u16) -> Arc<Self> {
+        Arc::new(Self {
+            lifecycle: tokio::sync::Mutex::new(()),
+            running: AtomicBool::new(false),
+            primary: StdMutex::new(None),
+            wsl: StdMutex::new(None),
+            port,
+            state,
+        })
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+            && self
+                .primary
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(true, |p| !p.join.is_finished())
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    fn emit_status(&self) {
+        self.state.sink.emit(
+            "relay-status-changed",
+            serde_json::json!({
+                "running": self.is_running(), "port": self.port,
+            }),
+        );
+    }
+
+    /// Start on Use, before writing any CLI configuration. Bind errors are
+    /// returned to the user; a disabled app does not reserve the proxy port.
+    pub async fn start(&self) -> Result<(), crate::AppError> {
+        let _guard = self.lifecycle.lock().await;
+        if self.is_running() {
+            return Ok(());
+        }
+        let listener = std::net::TcpListener::bind(("127.0.0.1", self.port))
+            .map_err(|e| crate::AppError::Config(format!("Local proxy port {}: {e}", self.port)))?;
+        *self.primary.lock().unwrap() = Some(serve_listener(self.state.clone(), listener)?);
+        self.running.store(true, Ordering::Release);
+        if let Some(ip) = tokio::task::spawn_blocking(crate::wsl::network::find_wsl_gateway_ip)
+            .await
+            .ok()
+            .flatten()
+        {
+            match std::net::TcpListener::bind((ip, self.port))
+                .map_err(crate::AppError::from)
+                .and_then(|listener| serve_listener(self.state.clone(), listener))
+            {
+                Ok(bound) => *self.wsl.lock().unwrap() = Some(bound),
+                Err(error) => log::warn!("WSL listener startup: {error}"),
+            }
+        }
+        self.emit_status();
+        Ok(())
+    }
+
+    /// Stop both listeners and cancel active requests/streams before returning.
+    /// Serialized with start/rebind so a WSL refresh cannot reopen a stopped server.
+    pub async fn shutdown(self: Arc<Self>) {
+        let _guard = self.lifecycle.lock().await;
+        let primary = self.primary.lock().unwrap().take();
+        let wsl = self.wsl.lock().unwrap().take();
+        for bound in [&primary, &wsl].into_iter().flatten() {
+            bound.token.cancel();
+        }
+        for bound in [primary, wsl].into_iter().flatten() {
+            let _ = bound.join.await;
+        }
+        self.running.store(false, Ordering::Release);
+        self.emit_status();
+    }
+
     pub async fn rebind_wsl(
         self: &Arc<Self>,
         new_ip: Option<IpAddr>,
     ) -> Result<(), crate::AppError> {
+        let _guard = self.lifecycle.lock().await;
         let old = self.wsl.lock().unwrap().take();
         if let Some(old) = old {
             old.token.cancel();
             let _ = old.join.await;
         }
+        if !self.is_running() {
+            return Ok(());
+        }
         let Some(ip) = new_ip else {
             return Ok(());
         };
-        let port = crate::paths::proxy_port();
-        let std_listener = std::net::TcpListener::bind((ip, port))
-            .map_err(|e| crate::AppError::Config(format!("WSL bind {ip}:{port} failed: {e}")))?;
-        std_listener
-            .set_nonblocking(true)
-            .map_err(|e| crate::AppError::Config(format!("WSL nonblocking: {e}")))?;
-        let tokio_listener = tokio::net::TcpListener::from_std(std_listener)
-            .map_err(|e| crate::AppError::Config(format!("WSL wrap: {e}")))?;
-        let token = CancellationToken::new();
-        let state = self.state.clone();
-        let tok = token.clone();
-        let join = tokio::spawn(async move {
-            let app = build_router(state);
-            let _ = axum::serve(tokio_listener, app)
-                .with_graceful_shutdown(async move { tok.cancelled().await })
-                .await;
-        });
-        *self.wsl.lock().unwrap() = Some(WslBound { ip, token, join });
-        log::info!("WSL listener bound on {ip}:{port}");
+        let listener = std::net::TcpListener::bind((ip, self.port)).map_err(|e| {
+            crate::AppError::Config(format!("WSL bind {ip}:{} failed: {e}", self.port))
+        })?;
+        *self.wsl.lock().unwrap() = Some(serve_listener(self.state.clone(), listener)?);
         Ok(())
     }
 
-    /// Current WSL listener IP, if any.
     pub fn wsl_ip(&self) -> Option<IpAddr> {
         self.wsl.lock().unwrap().as_ref().map(|w| w.ip)
     }
 }
 
-/// Multi-listener proxy startup.
-///
-/// `primary` is the pre-bound 127.0.0.1 listener (mandatory, from
-/// `LifecycleGuard`). `initial_wsl` is the pre-bound WSL gateway-IP
-/// listener and the IP it's on; pass `None` when the WSL adapter isn't
-/// present.
+/// Compatibility entry point for callers holding pre-bound listeners.
 pub async fn start_with_listeners(
     state: ProxyState,
     primary: std::net::TcpListener,
     initial_wsl: Option<(IpAddr, std::net::TcpListener)>,
 ) -> Arc<ProxyHandle> {
-    primary
-        .set_nonblocking(true)
-        .expect("primary listener nonblocking");
-    let primary_tokio = tokio::net::TcpListener::from_std(primary).expect("wrap primary listener");
-    let primary_token = CancellationToken::new();
-    let state_for_task = state.clone();
-    let tok = primary_token.clone();
-    let primary_join = tokio::spawn(async move {
-        let app = build_router(state_for_task);
-        let _ = axum::serve(primary_tokio, app)
-            .with_graceful_shutdown(async move { tok.cancelled().await })
-            .await;
-    });
-    let handle = Arc::new(ProxyHandle {
-        primary_token,
-        primary_join: StdMutex::new(Some(primary_join)),
-        wsl: StdMutex::new(None),
-        state,
-    });
-    log::info!(
-        "Local proxy started on 127.0.0.1:{}",
-        crate::paths::proxy_port()
-    );
-
-    if let Some((ip, listener)) = initial_wsl {
-        if let Err(e) = listener.set_nonblocking(true) {
-            log::warn!("WSL listener nonblocking failed: {e}");
-        } else {
-            match tokio::net::TcpListener::from_std(listener) {
-                Ok(tokio_l) => {
-                    let token = CancellationToken::new();
-                    let st = handle.state.clone();
-                    let tk = token.clone();
-                    let join = tokio::spawn(async move {
-                        let app = build_router(st);
-                        let _ = axum::serve(tokio_l, app)
-                            .with_graceful_shutdown(async move { tk.cancelled().await })
-                            .await;
-                    });
-                    *handle.wsl.lock().unwrap() = Some(WslBound { ip, token, join });
-                    log::info!("WSL listener bound on {ip}:{}", crate::paths::proxy_port());
-                }
-                Err(e) => log::warn!("WSL wrap failed: {e}"),
-            }
+    let port = primary.local_addr().expect("primary address").port();
+    let handle = ProxyHandle::stopped(state, port);
+    *handle.primary.lock().unwrap() =
+        Some(serve_listener(handle.state.clone(), primary).expect("primary listener"));
+    handle.running.store(true, Ordering::Release);
+    if let Some((_, listener)) = initial_wsl {
+        match serve_listener(handle.state.clone(), listener) {
+            Ok(bound) => *handle.wsl.lock().unwrap() = Some(bound),
+            Err(error) => log::warn!("WSL listener: {error}"),
         }
     }
-
     handle
 }
 
@@ -1439,6 +1578,128 @@ mod tests {
             service: None,
             consecutive_errors: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_both_ports_and_wsl_cannot_restart_it() {
+        let primary = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = primary.local_addr().unwrap();
+        let wsl = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
+        let wsl_addr = wsl.local_addr().unwrap();
+        let proxy = start_with_listeners(test_state(), primary, Some((wsl_addr.ip(), wsl))).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for address in [addr, wsl_addr] {
+            assert_eq!(
+                client
+                    .get(format!("http://{address}/_relay/ping"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), proxy.clone().shutdown())
+            .await
+            .unwrap();
+        assert!(!proxy.is_running());
+        let primary_owner = std::net::TcpListener::bind(addr).unwrap();
+        let _wsl_owner = std::net::TcpListener::bind(wsl_addr).unwrap();
+        proxy.rebind_wsl(Some(wsl_addr.ip())).await.unwrap();
+        assert!(proxy.wsl_ip().is_none());
+        assert!(proxy.start().await.is_err());
+        assert!(!proxy.is_running());
+        drop(primary_owner);
+        proxy.start().await.unwrap();
+        assert_eq!(
+            client
+                .get(format!("http://{addr}/_relay/ping"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        proxy.shutdown().await;
+        std::net::TcpListener::bind(addr).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_streams_and_pending_requests() {
+        use std::convert::Infallible;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let router = Router::new()
+            .route(
+                "/flood",
+                get(|| async {
+                    Body::from_stream(futures_util::stream::repeat(Ok::<_, Infallible>(vec![
+                        b'x';
+                        65536
+                    ])))
+                }),
+            )
+            .route(
+                "/stream",
+                get(|| async {
+                    Body::from_stream(
+                        futures_util::stream::once(async { Ok::<_, Infallible>("first chunk") })
+                            .chain(futures_util::stream::pending()),
+                    )
+                }),
+            )
+            .route(
+                "/pending",
+                get(move || {
+                    let signal = signal.clone();
+                    async move {
+                        signal.notify_one();
+                        std::future::pending::<String>().await
+                    }
+                }),
+            );
+        let proxy = ProxyHandle::stopped(test_state(), addr.port());
+        *proxy.primary.lock().unwrap() = Some(serve_router(router, listener).unwrap());
+        proxy.running.store(true, Ordering::Release);
+        let mut streaming = tokio::net::TcpStream::connect(addr).await.unwrap();
+        streaming
+            .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut first = [0; 1024];
+        assert!(streaming.read(&mut first).await.unwrap() > 0);
+        let mut pending = tokio::net::TcpStream::connect(addr).await.unwrap();
+        pending
+            .write_all(b"GET /pending HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        entered.notified().await;
+        // An idle connection with incomplete headers must not hold shutdown open.
+        let mut idle = tokio::net::TcpStream::connect(addr).await.unwrap();
+        idle.write_all(b"GET /pending HTTP/1.1\r\n").await.unwrap();
+        let mut slow = tokio::net::TcpStream::connect(addr).await.unwrap();
+        slow.write_all(b"GET /flood HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        slow.read(&mut first).await.unwrap();
+        // Allow this client's unread response to fill the socket buffer.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), proxy.clone().shutdown())
+            .await
+            .unwrap();
+        for mut connection in [streaming, pending, idle] {
+            let mut remaining = Vec::new();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                connection.read_to_end(&mut remaining),
+            )
+            .await
+            .unwrap();
+        }
+        std::net::TcpListener::bind(addr).unwrap();
     }
 
     #[tokio::test]

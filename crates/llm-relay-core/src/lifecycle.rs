@@ -72,6 +72,16 @@ pub struct LifecycleGuard {
 impl LifecycleGuard {
     /// Acquire the global lock + bind port + write pidfile.
     pub fn acquire() -> Result<Self, AcquireError> {
+        Self::acquire_inner(true)
+    }
+
+    /// The management app can run while Relay is disabled, without owning any
+    /// proxy port. The process lock still excludes a second GUI/agent.
+    pub fn acquire_without_proxy() -> Result<Self, AcquireError> {
+        Self::acquire_inner(false)
+    }
+
+    fn acquire_inner(bind_proxy: bool) -> Result<Self, AcquireError> {
         std::fs::create_dir_all(paths::config_dir())?;
         std::fs::create_dir_all(paths::runtime_dir())?;
 
@@ -92,9 +102,13 @@ impl LifecycleGuard {
         //    lock + bind succeed. If another LLM Relay process were still
         //    alive, lock_exclusive() would have failed above and we'd never
         //    reach here, so we won't yank a live agent's socket.
-        let proxy_listener = match TcpListener::bind(("127.0.0.1", paths::proxy_port())) {
-            Ok(l) => l,
-            Err(e) => return Err(AcquireError::PortInUse(e)),
+        let proxy_listener = if bind_proxy {
+            match TcpListener::bind(("127.0.0.1", paths::proxy_port())) {
+                Ok(l) => Some(l),
+                Err(e) => return Err(AcquireError::PortInUse(e)),
+            }
+        } else {
+            None
         };
 
         // 3. Clean stale runtime files from a prior unclean exit.
@@ -109,22 +123,23 @@ impl LifecycleGuard {
         // 5. Best-effort WSL2 listener bind. Failure here is non-fatal:
         //    no WSL adapter, port already taken on that IP, etc. all
         //    leave the agent fully functional for Windows-side CLIs.
-        let wsl_listener = crate::wsl::network::find_wsl_gateway_ip().and_then(|ip| {
-            match TcpListener::bind((ip, paths::proxy_port())) {
-                Ok(l) => Some((ip, l)),
-                Err(e) => {
-                    log::warn!(
-                        "WSL bind {ip}:{} skipped: {e}",
-                        paths::proxy_port()
-                    );
-                    None
+        let wsl_listener = if bind_proxy {
+            crate::wsl::network::find_wsl_gateway_ip().and_then(|ip| {
+                match TcpListener::bind((ip, paths::proxy_port())) {
+                    Ok(l) => Some((ip, l)),
+                    Err(e) => {
+                        log::warn!("WSL bind {ip}:{} skipped: {e}", paths::proxy_port());
+                        None
+                    }
                 }
-            }
-        });
+            })
+        } else {
+            None
+        };
 
         Ok(Self {
             _lock: lock,
-            proxy_listener: Some(proxy_listener),
+            proxy_listener,
             wsl_listener,
         })
     }
@@ -194,7 +209,9 @@ pub fn request_agent_stop(timeout: std::time::Duration) -> Result<(), String> {
         stream
             .write_all(&(body.len() as u32).to_be_bytes())
             .map_err(|e| format!("write len: {e}"))?;
-        stream.write_all(&body).map_err(|e| format!("write body: {e}"))?;
+        stream
+            .write_all(&body)
+            .map_err(|e| format!("write body: {e}"))?;
         stream.flush().ok();
         // Drain a few bytes (best effort) so the agent's response write
         // doesn't EPIPE before it processes the request.
@@ -224,7 +241,9 @@ pub fn request_agent_stop(timeout: std::time::Duration) -> Result<(), String> {
         stream
             .write_all(&(body.len() as u32).to_be_bytes())
             .map_err(|e| format!("write len: {e}"))?;
-        stream.write_all(&body).map_err(|e| format!("write body: {e}"))?;
+        stream
+            .write_all(&body)
+            .map_err(|e| format!("write body: {e}"))?;
         stream.flush().ok();
         let mut buf = [0u8; 64];
         let _ = stream.read(&mut buf);

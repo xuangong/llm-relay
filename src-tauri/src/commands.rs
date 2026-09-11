@@ -401,6 +401,15 @@ pub fn list_cli_lifecycle_status(
 }
 
 #[tauri::command]
+pub fn get_relay_status(state: State<'_, AppState>) -> serde_json::Value {
+    let proxy = state.service.proxy_handle();
+    serde_json::json!({
+        "running": proxy.as_ref().is_some_and(|p| p.is_running()),
+        "port": proxy.map(|p| p.port()).unwrap_or_else(llm_relay_core::paths::proxy_port),
+    })
+}
+
+#[tauri::command]
 pub async fn clear_config(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,

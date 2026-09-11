@@ -25,6 +25,18 @@ pub trait Backend: Send + Sync {
 static BACKEND: OnceLock<Box<dyn Backend>> = OnceLock::new();
 static CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
+#[cfg(test)]
+pub(crate) fn init_test() {
+    struct MemoryBackend;
+    impl Backend for MemoryBackend {
+        fn load(&self) -> HashMap<String, String> {
+            HashMap::new()
+        }
+        fn save(&self, _: &HashMap<String, String>) {}
+    }
+    let _ = BACKEND.set(Box::new(MemoryBackend));
+}
+
 use crate::ipc::protocol::KeystoreKind;
 static CURRENT_KIND: OnceLock<KeystoreKind> = OnceLock::new();
 

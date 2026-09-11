@@ -7,9 +7,8 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<()> {
     init_log();
-    // LifecycleGuard binds port 18080 atomically with the file lock — no separate
-    // probe step (which would race a competing process between probe and proxy bind).
-    let mut guard = lifecycle::LifecycleGuard::acquire().map_err(|e| {
+    // Keep the process lock while disabled; proxy ports are bound only on Use.
+    let guard = lifecycle::LifecycleGuard::acquire_without_proxy().map_err(|e| {
         eprintln!("{e}");
         anyhow::anyhow!("{e}")
     })?;
@@ -42,14 +41,7 @@ async fn main() -> Result<()> {
         log::warn!("CLI lifecycle recovery blocked: {error}");
     }
 
-    // Spawn proxy + health. Hand off the pre-bound listeners so we don't
-    // re-bind and risk a TOCTOU race against another process. The WSL
-    // listener (if present) gets a serve task too, sharing the same
-    // ProxyState.
-    let primary = guard
-        .take_listener()
-        .expect("primary listener pre-bound by lifecycle");
-    let initial_wsl = guard.wsl_listener.take();
+    // Share the restartable proxy with IPC, health checks and WSL detection.
     let service_arc = Arc::new(service.clone());
     let proxy_state = llm_relay_core::proxy_server::ProxyState::new(
         service.db.clone(),
@@ -58,8 +50,9 @@ async fn main() -> Result<()> {
     )
     .with_service(service_arc);
     let proxy_handle =
-        llm_relay_core::proxy_server::start_with_listeners(proxy_state, primary, initial_wsl).await;
+        llm_relay_core::proxy_server::ProxyHandle::stopped(proxy_state, paths::proxy_port());
     let service = service.with_proxy(proxy_handle.clone());
+    service.start_proxy_if_enabled().await?;
     let s2 = service.clone();
     tokio::spawn(async move { llm_relay_core::health::health_check_loop(s2).await });
 

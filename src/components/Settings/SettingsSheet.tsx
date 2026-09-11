@@ -1,8 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { PowerOff } from "lucide-react";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
-import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { WslDistros } from "@/components/Settings/WslDistros";
@@ -21,8 +19,6 @@ interface SettingsSheetProps {
   onAutostartChange: (checked: boolean) => void;
   clientName: string;
   onClientNameChange: (name: string) => void;
-  canDisable: boolean;
-  onDisable: () => void;
 }
 
 /// Set-once configuration, kept off the main surface. Auto-failover lives here
@@ -40,8 +36,6 @@ export function SettingsSheet({
   onAutostartChange,
   clientName,
   onClientNameChange,
-  canDisable,
-  onDisable,
 }: SettingsSheetProps) {
   const { t, lang, toggleLang } = useI18n();
   const [nameDraft, setNameDraft] = useState(clientName);
@@ -191,26 +185,7 @@ export function SettingsSheet({
           {/* Windows only; renders nothing elsewhere, border included. */}
           <WslDistros />
 
-          {/* Last, and only while the relay is actually active. It's a rare,
-              one-way action that rewrites every CLI's config back — the header
-              is the wrong place for something you click once and then not
-              again for weeks. */}
-          {canDisable && (
-            <div className="border-t border-border/60 pt-4">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onDisable}
-                className="h-8 w-full gap-1.5 border-destructive/30 bg-destructive/5 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
-              >
-                <PowerOff className="h-3.5 w-3.5" />
-                {t("header.disableRelay")}
-              </Button>
-              <p className="mt-1.5 text-[11px] text-muted-foreground">
-                {t("settings.disableHint")}
-              </p>
-            </div>
-          )}
+
         </div>
       </SheetContent>
     </Sheet>

@@ -91,12 +91,19 @@ impl StateMachine {
             }
         };
 
+        // Serialize probing/hosts writes with Disable so an in-flight refresh
+        // cannot recreate proxy configuration after restoration completes.
+        let switch_guard = self.service.switch_lock.lock().await;
         // 2. Re-bind WSL listener if gateway IP changed.
         let current_ip = self.proxy.wsl_ip();
-        let new_ip = tokio::task::spawn_blocking(crate::wsl::network::find_wsl_gateway_ip)
-            .await
-            .ok()
-            .flatten();
+        let new_ip = if self.proxy.is_running() {
+            tokio::task::spawn_blocking(crate::wsl::network::find_wsl_gateway_ip)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
         if current_ip != new_ip {
             if let Err(e) = self.proxy.rebind_wsl(new_ip).await {
                 log::warn!("rebind_wsl: {e}");
@@ -114,7 +121,9 @@ impl StateMachine {
             .get_active_config()
             .ok()
             .and_then(|c| c.gateway_id)
-            .is_some();
+            .is_some()
+            && !self.service.relay_disabled().unwrap_or(true)
+            && self.proxy.is_running();
         if has_active_gateway {
             let gw_ip = self.proxy.wsl_ip();
             let binds = crate::wsl::resolve::ListenerBinds {
@@ -148,6 +157,7 @@ impl StateMachine {
             }
         }
 
+        drop(switch_guard);
         if has_active_gateway && crate::config_writer::lifecycle::has_pending_wsl() {
             if let Err(error) = self.service.retry_pending_wsl_apply().await {
                 log::warn!("retry pending WSL apply: {error}");
