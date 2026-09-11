@@ -1802,6 +1802,54 @@ mod tests {
     }
 
     #[test]
+    fn full_apply_with_missing_codex_origin_succeeds_and_disable_preserves_config() {
+        let env = MigrationEnv::new();
+        let mut native = target(env.home.path());
+        native.installed.codex = true;
+        let targets = [native];
+        let backend = &targets[0].backend;
+        let config = [".codex", "config.toml"];
+        let origin = [".codex", "config.toml.llm-relay.origin"];
+        backend
+            .write_atomic(&config, b"model = \"original\"\n")
+            .unwrap();
+        let mut manifest = prepare_use(&targets, &[], &BTreeMap::new()).unwrap();
+        mark_active(&mut manifest).unwrap();
+        backend.remove(&origin).unwrap();
+
+        // Exercise the real writer (including snapshot_for_apply), then retry.
+        for model in ["codex-first", "codex-retry"] {
+            let mut manifest = prepare_active_apply(&targets, &BTreeMap::new())
+                .unwrap()
+                .unwrap();
+            let report = super::super::apply_to_targets(
+                &targets,
+                None,
+                "relay",
+                Some("claude-test"),
+                None,
+                None,
+                Some(model),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(report.failed.is_empty(), "{:?}", report.failed);
+            assert_eq!(report.succeeded.len(), 1);
+            mark_targets_active(&mut manifest, &report.succeeded).unwrap();
+            let contents = backend.read(&config).unwrap().unwrap();
+            assert!(contents.contains(model), "{contents}");
+            assert!(!backend.exists(&origin).unwrap());
+        }
+        let current = backend.read_bytes(&config).unwrap().unwrap();
+        disable().unwrap();
+        assert_eq!(backend.read_bytes(&config).unwrap().unwrap(), current);
+        assert!(!backend.exists(&origin).unwrap());
+        assert_eq!(load().unwrap().unwrap().phase, LifecyclePhase::Inactive);
+    }
+
+    #[test]
     fn missing_backup_allows_next_use_without_deleting_working_file() {
         let env = MigrationEnv::new();
         let native = target(env.home.path());

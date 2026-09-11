@@ -152,7 +152,7 @@ pub fn migrate_legacy_active() -> Result<(), AppError> {
     Ok(())
 }
 
-/// Derive writer defaults from immutable full-file origins. No second on-disk
+/// Derive writer defaults from available full-file origins. No second on-disk
 /// field snapshot is created. Only the names of managed Extra keys are tracked.
 pub fn snapshot_for_apply(
     target: &CliTarget,
@@ -201,11 +201,11 @@ pub fn snapshot_for_apply(
         verify_origin(target, file)?;
         if file.origin.exists {
             let path = sidecar_path(&file.path, ORIGIN_SUFFIX)?;
-            let bytes = target
-                .backend
-                .read_bytes(&refs(&path))?
-                .ok_or_else(|| AppError::Config("origin disappeared".into()))?;
-            memory.write_atomic(&refs(&file.path), &bytes)?;
+            // Users may delete local backups. Missing origins contribute no
+            // defaults; never recapture the live Relay configuration as origin.
+            if let Some(bytes) = target.backend.read_bytes(&refs(&path))? {
+                memory.write_atomic(&refs(&file.path), &bytes)?;
+            }
         }
     }
     let mut snap = snapshot::capture_from_backend(&target.snapshot_meta, &memory)?;
