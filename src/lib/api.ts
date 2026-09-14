@@ -263,6 +263,7 @@ export interface LifecycleFileStatus {
 }
 
 export interface LifecycleTargetStatus {
+  releasedClients: { provider: "claude" | "codex" | "gemini"; officialLogin: boolean; cleanupPending: boolean; error: string | null }[];
   targetType: "native" | "wsl";
   distroName: string | null;
   label: string;
@@ -274,6 +275,9 @@ export interface LifecycleTargetStatus {
 
 export const listCliLifecycleStatus = () =>
   invoke<LifecycleTargetStatus[]>("list_cli_lifecycle_status");
+
+export const getWindowsHostEnabled = () => invoke<boolean>("get_windows_host_enabled");
+export const setWindowsHostEnabled = (enabled: boolean) => invoke<void>("set_windows_host_enabled", { enabled });
 
 // ─── Settings ───
 

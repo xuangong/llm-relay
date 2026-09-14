@@ -150,6 +150,10 @@ pub fn run() {
 
             // Start health check loop
             {
+                let svc_for_login = (*service).clone();
+                tauri::async_runtime::spawn(svc_for_login.monitor_official_logins());
+            }
+            {
                 let svc_for_health = service.clone();
                 tauri::async_runtime::spawn(async move {
                     llm_relay_core::health::health_check_loop((*svc_for_health).clone()).await;
@@ -192,6 +196,8 @@ pub fn run() {
             commands::clear_config,
             commands::get_relay_status,
             commands::list_cli_lifecycle_status,
+            commands::get_windows_host_enabled,
+            commands::set_windows_host_enabled,
             commands::get_active_config_cmd,
             commands::get_settings,
             commands::update_settings,

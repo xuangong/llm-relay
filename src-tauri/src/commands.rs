@@ -401,6 +401,26 @@ pub fn list_cli_lifecycle_status(
 }
 
 #[tauri::command]
+pub fn get_windows_host_enabled(state: State<'_, AppState>) -> Result<bool, String> {
+    state
+        .service
+        .windows_host_enabled()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_windows_host_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    state
+        .service
+        .set_environment_enabled(None, enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn get_relay_status(state: State<'_, AppState>) -> serde_json::Value {
     let proxy = state.service.proxy_handle();
     serde_json::json!({

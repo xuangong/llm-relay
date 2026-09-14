@@ -73,6 +73,9 @@ impl StateMachine {
     }
 
     async fn tick(&self) {
+        // Discovery also writes selection rows. Serialize it with environment
+        // changes so an older probe cannot reselect a disabled environment.
+        let switch_guard = self.service.switch_lock.lock().await;
         // 1. Reconcile distros + their installed-tools cache.
         let distros = match tokio::task::spawn_blocking({
             let db = self.db.clone();
@@ -93,7 +96,6 @@ impl StateMachine {
 
         // Serialize probing/hosts writes with Disable so an in-flight refresh
         // cannot recreate proxy configuration after restoration completes.
-        let switch_guard = self.service.switch_lock.lock().await;
         // 2. Re-bind WSL listener if gateway IP changed.
         let current_ip = self.proxy.wsl_ip();
         let new_ip = if self.proxy.is_running() {

@@ -2109,6 +2109,7 @@ pub(crate) fn write_one_target(
     original_snapshot: Option<&snapshot::TargetSnapshot>,
 ) -> Result<(), AppError> {
     let b = &*target.backend;
+    lifecycle::login::before_apply(target)?;
     if target.installed.claude {
         write_claude_config_with_extra(
             b,
@@ -2153,6 +2154,7 @@ pub(crate) fn write_one_target(
     if target.installed.gemini {
         write_gemini_config_with(b, &target.base_url, api_key)?;
     }
+    lifecycle::login::after_apply(target)?;
     Ok(())
 }
 

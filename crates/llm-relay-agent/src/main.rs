@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
         llm_relay_core::proxy_server::ProxyHandle::stopped(proxy_state, paths::proxy_port());
     let service = service.with_proxy(proxy_handle.clone());
     service.start_proxy_if_enabled().await?;
+    tokio::spawn(service.clone().monitor_official_logins());
     let s2 = service.clone();
     tokio::spawn(async move { llm_relay_core::health::health_check_loop(s2).await });
 

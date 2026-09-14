@@ -8,6 +8,7 @@ import { TrafficLogPanel } from "@/components/TrafficLogPanel";
 import { UsagePanel } from "@/components/UsagePanel";
 import { DisableRelayDialog } from "@/components/DisableRelayDialog";
 import { SettingsSheet } from "@/components/Settings/SettingsSheet";
+import { WslSyncStatus } from "@/components/WslSyncStatus";
 import { Button } from "@/components/ui/button";
 import * as api from "@/lib/api";
 import type { GatewayWithHealth, ActiveConfig, ClaudeExtraConfig } from "@/lib/api";
@@ -145,18 +146,25 @@ function App() {
     const unlisten4 = appWindow.listen<api.RelayStatus>("relay-status-changed", (event) => {
       setRelayStatus(event.payload);
     });
+    const unlisten5 = appWindow.listen("cli-login-changed", () => {
+      toast.info(t("wsl.loginDetected"), { duration: 8000 });
+      void loadAll();
+    });
+    const unlisten6 = appWindow.listen("active_changed", () => { void loadAll(); });
     const statusTimer = setInterval(() => {
       api.getRelayStatus().then(setRelayStatus).catch(() => setRelayStatus(null));
     }, 3000);
 
     return () => {
       clearInterval(statusTimer);
+      unlisten5.then((fn) => fn());
+      unlisten6.then((fn) => fn());
       unlisten4.then((fn) => fn());
       unlisten1.then((fn) => fn());
       unlisten2.then((fn) => fn());
       unlisten3.then((fn) => fn());
     };
-  }, [loadAll]);
+  }, [loadAll, t]);
 
   const handleAutoSwitchChange = async (checked: boolean) => {
     setAutoSwitch(checked);
@@ -298,12 +306,13 @@ function App() {
       </header>
 
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 bg-card/30 px-5 py-2" role="status">
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className={`h-2 w-2 rounded-full ${relayStatus?.running ? "bg-success" : "bg-muted-foreground/50"}`} />
           <span className="font-medium">{t(relayStatus === null ? "header.relayUnknown" : relayStatus.running ? "header.relayRunning" : "header.relayStopped")}</span>
           <span className="text-muted-foreground">
             {relayStatus && t(relayStatus.running ? "header.relayPort" : "header.relayStoppedHint", { port: String(relayStatus.port) })}
           </span>
+          <WslSyncStatus onOpenSettings={() => setSettingsOpen(true)} />
         </div>
         <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => setDisableOpen(true)}
           disabled={loading || (!relayStatus?.running && !activeConfig?.gatewayId)}>

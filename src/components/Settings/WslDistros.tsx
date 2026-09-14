@@ -3,7 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
-import { listCliLifecycleStatus } from "@/lib/api";
+import { listCliLifecycleStatus, type LifecycleTargetStatus } from "@/lib/api";
+import { toast } from "sonner";
+import { extractErrorMessage } from "@/lib/error";
+import { EnvironmentStatus } from "@/components/Settings/EnvironmentStatus";
 
 type WslDistroStatus = "ready" | "unreachable" | "unknown";
 
@@ -35,6 +38,8 @@ export function WslDistros() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [pendingReasons, setPendingReasons] = useState<Record<string, string | null>>({});
+  const [clientStatus, setClientStatus] = useState<LifecycleTargetStatus[]>([]);
+  const [changing, setChanging] = useState<string | null>(null);
 
   const load = useCallback(async (background = false) => {
     if (!background) setLoading(true);
@@ -44,6 +49,7 @@ export function WslDistros() {
         listCliLifecycleStatus(),
       ]);
       setDistros(list);
+      setClientStatus(status);
       setPendingReasons(Object.fromEntries(status
         .filter((target) => target.targetType === "wsl" && target.pending && target.distroName)
         .map((target) => [target.distroName!, target.pendingReason])));
@@ -77,11 +83,15 @@ export function WslDistros() {
   };
 
   const handleToggle = async (name: string, selected: boolean) => {
+    setChanging(name);
     try {
       await invoke("toggle_wsl_distro", { name, selected });
       setDistros((d) => d.map((x) => (x.name === name ? { ...x, selected } : x)));
     } catch (e) {
-      console.error("toggle_wsl_distro failed", e);
+      toast.error(extractErrorMessage(e));
+    } finally {
+      await load(true);
+      setChanging(null);
     }
   };
 
@@ -134,6 +144,7 @@ export function WslDistros() {
                 type="checkbox"
                 className="mt-1"
                 checked={d.selected}
+                disabled={changing !== null}
                 onChange={(e) => handleToggle(d.name, e.target.checked)}
               />
               <div className="flex-1 text-xs">
@@ -157,7 +168,8 @@ export function WslDistros() {
                     gemini {d.hasGemini ? "✓" : "✗"}
                   </span>
                 </div>
-                {d.name in pendingReasons ? (
+                <EnvironmentStatus target={clientStatus.find((target) => target.distroName === d.name)} />
+                {!d.selected ? <p className="text-muted-foreground">{t("wsl.environmentDisabled")}</p> : d.name in pendingReasons ? (
                   <div className="text-amber-500" role="status">
                     {d.status === "ready" ? (
                       <>

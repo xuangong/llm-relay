@@ -127,6 +127,14 @@ impl Service {
     }
 
     pub async fn start_proxy_if_enabled(&self) -> Result<(), AppError> {
+        if self.relay_disabled()? {
+            return Ok(());
+        }
+        self.persist_disabled_environments()?;
+        if !self.any_environment_enabled()? {
+            self.db.set_setting("relay_disabled", "true")?;
+            return Ok(());
+        }
         if !self.relay_disabled()? && self.db.get_active_config()?.gateway_id.is_some() {
             if let Some(proxy) = self.proxy_handle() {
                 proxy.start().await?;
@@ -417,6 +425,15 @@ impl Service {
     ) -> Result<(), AppError> {
         let db_active =
             self.db.get_active_config()?.gateway_id.is_some() && !self.relay_disabled()?;
+        crate::config_writer::lifecycle::login::detect(false)?;
+        self.persist_disabled_environments()?;
+        if !self.any_environment_enabled()? {
+            self.clear_active_locked().await?;
+            return Err(AppError::Config(
+                "Select Windows Host or a WSL environment before Use".into(),
+            ));
+        }
+        crate::config_writer::lifecycle::login::scan(false)?;
         crate::config_writer::lifecycle::recover(db_active)?;
         if db_active {
             crate::config_writer::lifecycle::migrate_legacy_active()?;
@@ -502,7 +519,38 @@ impl Service {
         // new active selection. In particular, an old snapshot may need an
         // atomic on-disk upgrade before `apply_to_targets` can write anything;
         // if that fails, the proxy-visible DB state must remain unchanged.
-        let apply_plan = self.build_apply_plan();
+        // Key lookup can await the network: check again immediately before
+        // preparing files so a login during that wait is not overwritten.
+        crate::config_writer::lifecycle::login::detect(false)?;
+        self.persist_disabled_environments()?;
+        if !self.any_environment_enabled()? {
+            self.clear_active_locked().await?;
+            return Err(AppError::Config(
+                "Select Windows Host or a WSL environment before Use".into(),
+            ));
+        }
+        crate::config_writer::lifecycle::login::scan(false)?;
+        let mut apply_plan = self.build_apply_plan();
+        if let Some(manifest) = crate::config_writer::lifecycle::load()? {
+            for target in &mut apply_plan.ready {
+                if let Some(stored) = manifest
+                    .targets
+                    .iter()
+                    .find(|stored| stored.distro_name == target.snapshot_meta.distro_name)
+                {
+                    target.installed = stored.login.filter(target.installed);
+                }
+            }
+            for target in &mut apply_plan.pending {
+                if let Some(stored) = manifest
+                    .targets
+                    .iter()
+                    .find(|stored| stored.distro_name.as_deref() == Some(&target.name))
+                {
+                    target.installed = stored.login.filter(target.installed);
+                }
+            }
+        }
         let targets = &apply_plan.ready;
         let inactive_use = existing.gateway_id.is_none() || self.relay_disabled()?;
         let shell_paths = crate::config_writer::shell_rc_paths(targets);
@@ -589,6 +637,10 @@ impl Service {
     /// Stop the proxy, restore CLI configuration, then clear the selection.
     pub async fn clear_active(&self) -> Result<(), AppError> {
         let _g = self.switch_lock.lock().await;
+        self.clear_active_locked().await
+    }
+
+    async fn clear_active_locked(&self) -> Result<(), AppError> {
         // Stop traffic even if persistence or configuration restoration fails.
         // Persist first so an interrupted restore cannot re-enable on restart.
         let persist = self.db.set_setting("relay_disabled", "true");
@@ -1138,20 +1190,22 @@ impl Service {
             .unwrap_or(crate::cli_target::ManagedClients::ALL);
         let mut ready: Vec<CliTarget> = Vec::new();
         let mut pending = Vec::new();
-        let mut retained_keys = std::collections::HashSet::from(["windows".to_string()]);
+        let mut retained_keys = std::collections::HashSet::new();
 
-        ready.push(CliTarget {
-            backend: Box::new(WindowsFsBackend::new()),
-            base_url: crate::proxy_server::proxy_base_url(),
-            installed: managed.intersect(InstalledTools::ALL),
-            label: "windows".into(),
-            snapshot_meta: SnapshotMeta {
-                target_type: TargetType::Windows,
-                distro_name: None,
-                home: None,
-            },
-        });
-
+        if self.windows_host_enabled().unwrap_or(false) {
+            retained_keys.insert("windows".into());
+            ready.push(CliTarget {
+                backend: Box::new(WindowsFsBackend::new()),
+                base_url: crate::proxy_server::proxy_base_url(),
+                installed: managed.intersect(InstalledTools::ALL),
+                label: "windows".into(),
+                snapshot_meta: SnapshotMeta {
+                    target_type: TargetType::Windows,
+                    distro_name: None,
+                    home: None,
+                },
+            });
+        }
         let rows = self.db.list_wsl_distros().unwrap_or_default();
         for row in rows {
             if !row.selected {
@@ -1217,6 +1271,104 @@ impl Service {
         self.retry_active_config_locked(active).await
     }
 
+    pub fn windows_host_enabled(&self) -> Result<bool, AppError> {
+        Ok(self.db.get_setting("windows_host_enabled")?.as_deref() != Some("false"))
+    }
+
+    fn any_environment_enabled(&self) -> Result<bool, AppError> {
+        Ok(self.windows_host_enabled()? || self.db.list_wsl_distros()?.iter().any(|d| d.selected))
+    }
+
+    fn persist_disabled_environments(&self) -> Result<(), AppError> {
+        if let Some(manifest) = crate::config_writer::lifecycle::load()? {
+            for target in manifest
+                .targets
+                .iter()
+                .filter(|t| t.login.environment_disabled)
+            {
+                if let Some(distro) = &target.distro_name {
+                    self.db.set_wsl_distro_selected(distro, false)?;
+                } else {
+                    self.db.set_setting("windows_host_enabled", "false")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn set_environment_enabled(
+        &self,
+        distro: Option<&str>,
+        enabled: bool,
+    ) -> Result<(), AppError> {
+        let _guard = self.switch_lock.lock().await;
+        crate::config_writer::lifecycle::login::detect(false)?;
+        self.persist_disabled_environments()?;
+        if let Some(name) = distro {
+            if !self.db.list_wsl_distros()?.iter().any(|d| d.name == name) {
+                return Err(AppError::Config("Unknown WSL environment".into()));
+            }
+        }
+        if enabled {
+            crate::config_writer::lifecycle::login::enable_environment(distro)?;
+        } else {
+            crate::config_writer::lifecycle::login::disable_environment(distro)?;
+        }
+        if let Some(name) = distro {
+            self.db.set_wsl_distro_selected(name, enabled)?;
+        } else {
+            self.db.set_setting(
+                "windows_host_enabled",
+                if enabled { "true" } else { "false" },
+            )?;
+        }
+        // Last environment off always stops both listeners before restoration.
+        if !self.any_environment_enabled()? {
+            return self.clear_active_locked().await;
+        }
+        crate::config_writer::lifecycle::login::scan(false)?;
+        if enabled && !self.relay_disabled()? {
+            let active = self.db.get_active_config()?;
+            if active.gateway_id.is_some() {
+                self.retry_active_config_locked(active).await?;
+            }
+        }
+        self.sink
+            .emit("environment-selection-changed", serde_json::json!({}));
+        Ok(())
+    }
+
+    pub(crate) async fn check_official_logins(&self) -> Result<(), AppError> {
+        let _guard = self.switch_lock.lock().await;
+        let changed =
+            tokio::task::spawn_blocking(|| crate::config_writer::lifecycle::login::detect(true))
+                .await
+                .map_err(|e| AppError::Config(e.to_string()))??;
+        self.persist_disabled_environments()?;
+        if changed {
+            self.sink.emit("cli-login-changed", serde_json::json!({}));
+        }
+        if !self.any_environment_enabled()?
+            && (!self.relay_disabled()? || self.db.get_active_config()?.gateway_id.is_some())
+        {
+            self.clear_active_locked().await?;
+        } else {
+            tokio::task::spawn_blocking(|| crate::config_writer::lifecycle::login::scan(true))
+                .await
+                .map_err(|e| AppError::Config(e.to_string()))??;
+        }
+        Ok(())
+    }
+
+    pub async fn monitor_official_logins(self) {
+        loop {
+            if let Err(error) = self.check_official_logins().await {
+                log::warn!("Official login monitor: {error}");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    }
+
     /// Build the WSL detection state machine. The caller is responsible for
     /// spawning `sm.clone().run()` on the appropriate runtime (tokio for the
     /// headless agent, `tauri::async_runtime` for the GUI). Returns `None`
@@ -1261,8 +1413,7 @@ impl Service {
 
     /// Toggle whether a WSL distro is included in apply targets.
     pub async fn toggle_wsl_distro(&self, name: String, selected: bool) -> Result<(), AppError> {
-        self.db.set_wsl_distro_selected(&name, selected)?;
-        Ok(())
+        self.set_environment_enabled(Some(&name), selected).await
     }
 }
 

@@ -9,6 +9,7 @@ const MANIFEST_VERSION: u32 = 1;
 const ORIGIN_SUFFIX: &str = ".llm-relay.origin";
 const BACKUP_SUFFIX: &str = ".llm-relay.bak";
 
+pub mod login;
 mod migration;
 pub use migration::{migrate_legacy_active, snapshot_for_apply};
 
@@ -70,6 +71,8 @@ pub struct ManagedFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedTarget {
+    #[serde(default)]
+    pub login: login::LoginState,
     /// Missing lifecycle history: rebuild managed CLI files from .bak (or
     /// absence) on the next apply, including after an offline WSL reconnect.
     #[serde(default)]
@@ -154,6 +157,7 @@ pub struct LifecycleFileStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleTargetStatus {
+    pub released_clients: Vec<login::ReleasedClient>,
     pub target_type: String,
     pub distro_name: Option<String>,
     pub label: String,
@@ -223,6 +227,7 @@ pub fn status() -> Result<Vec<LifecycleTargetStatus>, AppError> {
         .targets
         .into_iter()
         .map(|target| LifecycleTargetStatus {
+            released_clients: target.login.released,
             target_type: target.target_type,
             distro_name: target.distro_name,
             label: target.label,
@@ -292,11 +297,26 @@ pub fn prepare_use(
                 }
             }
         }
-        manifest.targets.push(stored_target(target, files));
+        let mut stored = stored_target(target, files);
+        if let Some(previous) = previous_target {
+            stored.login = previous.login.clone();
+        }
+        stored.login.codex_armed = false;
+        stored.login.claude = None;
+        manifest.targets.push(stored);
         save(&mut manifest)?;
     }
     for pending in pending {
         manifest.targets.push(ManagedTarget {
+            login: previous
+                .as_ref()
+                .and_then(|m| {
+                    m.targets
+                        .iter()
+                        .find(|t| t.distro_name.as_deref() == Some(&pending.name))
+                })
+                .map(|t| t.login.clone())
+                .unwrap_or_default(),
             rebuild_from_backup: false,
             target_type: "wsl".into(),
             distro_name: Some(pending.name.clone()),
@@ -311,6 +331,19 @@ pub fn prepare_use(
             pending: true,
             pending_reason: Some(pending.reason.clone()),
         });
+    }
+    // Deselecting a distro must not forget its per-client official-login choice.
+    if let Some(previous) = previous {
+        for stored in previous.targets {
+            if !stored.login.released.is_empty()
+                && !manifest
+                    .targets
+                    .iter()
+                    .any(|t| stored_key(t) == stored_key(&stored))
+            {
+                manifest.targets.push(stored);
+            }
+        }
     }
     save(&mut manifest)?;
     Ok(manifest)
@@ -559,6 +592,7 @@ pub fn prepare_missing_active(
     };
     for row in pending {
         manifest.targets.push(ManagedTarget {
+            login: login::LoginState::default(),
             rebuild_from_backup: true,
             target_type: "wsl".into(),
             distro_name: Some(row.name.clone()),
@@ -652,6 +686,7 @@ pub fn record_pending_wsl(pending: &[crate::service::PendingWslTarget]) -> Resul
             stored.pending_reason = Some(row.reason.clone());
         } else {
             manifest.targets.push(ManagedTarget {
+                login: login::LoginState::default(),
                 rebuild_from_backup: false,
                 target_type: "wsl".into(),
                 distro_name: Some(row.name.clone()),
@@ -722,6 +757,7 @@ pub fn rollback_use(manifest: &mut LifecycleManifest) -> Result<(), AppError> {
 }
 
 pub fn disable() -> Result<(), AppError> {
+    login::scan(false)?;
     let Some(mut manifest) = load()? else {
         return Ok(());
     };
@@ -863,6 +899,7 @@ pub fn build_targets(manifest: &LifecycleManifest) -> Result<Vec<TargetHandle>, 
 
 fn stored_target(target: &CliTarget, files: Vec<ManagedFile>) -> ManagedTarget {
     ManagedTarget {
+        login: login::LoginState::default(),
         rebuild_from_backup: false,
         target_type: match target.snapshot_meta.target_type {
             TargetType::Windows => "native".into(),
@@ -1026,7 +1063,11 @@ fn validate_manifest(manifest: &LifecycleManifest) -> Result<(), AppError> {
         if !identities.insert(stored_key(target)) {
             return Err(AppError::Config("duplicate lifecycle target".into()));
         }
-        for file in &target.files {
+        for file in target
+            .files
+            .iter()
+            .chain(target.login.released.iter().flat_map(|entry| &entry.files))
+        {
             validate_path(&file.path)?;
         }
     }
@@ -1509,16 +1550,16 @@ mod tests {
         );
     }
 
-    struct MigrationEnv {
+    pub(super) struct MigrationEnv {
         _lock: MutexGuard<'static, ()>,
-        home: TempDir,
+        pub(super) home: TempDir,
         config: TempDir,
         old_home: Option<std::ffi::OsString>,
         old_native: Option<std::ffi::OsString>,
     }
 
     impl MigrationEnv {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let guard = env_lock();
             let home = TempDir::new().unwrap();
             let config = TempDir::new().unwrap();
@@ -2232,6 +2273,7 @@ mod tests {
             phase: LifecyclePhase::PreparingUse,
             updated_at: "now".into(),
             targets: vec![ManagedTarget {
+                login: login::LoginState::default(),
                 rebuild_from_backup: false,
                 target_type: "native".into(),
                 distro_name: None,

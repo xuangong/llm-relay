@@ -4,6 +4,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { WslDistros } from "@/components/Settings/WslDistros";
+import { WindowsHost } from "@/components/Settings/WindowsHost";
 import * as api from "@/lib/api";
 import { extractErrorMessage } from "@/lib/error";
 import { useI18n, type Lang } from "@/lib/i18n";
@@ -184,6 +185,7 @@ export function SettingsSheet({
 
           {/* Windows only; renders nothing elsewhere, border included. */}
           <WslDistros />
+          <WindowsHost />
 
 
         </div>
