@@ -953,20 +953,73 @@ fn verify_origin_for_backend(backend: &dyn CliBackend, file: &ManagedFile) -> Re
 fn capture_origin(
     target: &CliTarget,
     file: &mut ManagedFile,
-    reject_existing_sidecar: bool,
+    preserve_existing_sidecar: bool,
 ) -> Result<(), AppError> {
+    recover_working_file(&*target.backend, &file.path)?;
     let origin = sidecar_path(&file.path, ORIGIN_SUFFIX)?;
     let origin_refs = refs(&origin);
-    if reject_existing_sidecar && target.backend.exists(&origin_refs)? {
-        return Err(AppError::Config(format!(
-            "orphan origin sidecar exists for {}:{}",
-            target.label,
-            file.path.join("/")
-        )));
+    if preserve_existing_sidecar {
+        if let Some(bytes) = target.backend.read_bytes(&origin_refs)? {
+            // Local backups remain authoritative even without a manifest entry.
+            // Without prior metadata an empty backup represents an empty file;
+            // never infer absence and delete the user's working file.
+            file.origin = state_from(Some(&bytes), true);
+            return Ok(());
+        }
     }
     let current = target.backend.read_bytes(&refs(&file.path))?;
     write_state(&*target.backend, &origin_refs, current.as_deref())?;
     file.origin = state_from(current.as_deref(), true);
+    Ok(())
+}
+
+/// Recover structured CLI files without replacing valid local edits or
+/// discarding the damaged bytes. Shell profiles are deliberately excluded.
+pub fn recover_working_configs(target: &CliTarget) -> Result<(), AppError> {
+    for file in descriptors(target.installed, None) {
+        recover_working_file(&*target.backend, &file.path)?;
+    }
+    Ok(())
+}
+
+fn recover_working_file(backend: &dyn CliBackend, path: &[String]) -> Result<(), AppError> {
+    let name = path.last().map(String::as_str).unwrap_or_default();
+    if !name.ends_with(".json") && !name.ends_with(".toml") {
+        return Ok(());
+    }
+    let valid = |bytes: &[u8]| {
+        if name.ends_with(".json") {
+            serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|v| v.is_object())
+        } else {
+            std::str::from_utf8(bytes).is_ok_and(|s| s.parse::<toml_edit::DocumentMut>().is_ok())
+        }
+    };
+    let current = backend.read_bytes(&refs(path))?;
+    if current.as_deref().is_some_and(valid) {
+        return Ok(());
+    }
+    for suffix in [BACKUP_SUFFIX, ORIGIN_SUFFIX] {
+        let Some(bytes) = backend.read_bytes(&refs(&sidecar_path(path, suffix)?))? else {
+            continue;
+        };
+        if !valid(&bytes) {
+            continue;
+        }
+        if let Some(damaged) = &current {
+            let suffix = format!(".llm-relay.damaged-{}", uuid::Uuid::new_v4());
+            backend.write_atomic(&refs(&sidecar_path(path, &suffix)?), damaged)?;
+        }
+        if backend.read_bytes(&refs(path))? != current {
+            return Err(AppError::Config(format!(
+                "Configuration changed during recovery: {}",
+                path.join("/")
+            )));
+        }
+        backend.write_atomic(&refs(path), &bytes)?;
+        return Ok(());
+    }
+    // With no usable backup, preserve the existing writer's behavior. In
+    // particular, a missing file can still be initialized by its CLI writer.
     Ok(())
 }
 
@@ -1416,6 +1469,110 @@ mod tests {
         assert_eq!(
             sidecar_path(&[".claude.json".into()], BACKUP_SUFFIX).unwrap(),
             vec![".claude.json.llm-relay.bak"]
+        );
+    }
+
+    #[test]
+    fn enabling_claude_adopts_untracked_origin_and_restores_it() {
+        let env = MigrationEnv::new();
+        let mut initial = target(env.home.path());
+        initial.installed.claude = false;
+        let mut manifest = prepare_use(&[initial], &[], &BTreeMap::new()).unwrap();
+        mark_active(&mut manifest).unwrap();
+        let targets = [target(env.home.path())];
+        let backend = &targets[0].backend;
+        let original = br#"{"hasCompletedOnboarding":false,"localPreference":"keep"}"#;
+        backend
+            .write_atomic(&[".claude.json.llm-relay.origin"], original)
+            .unwrap();
+        backend
+            .write_atomic(&[".claude.json"], br#"{"hasCompletedOnboarding":true}"#)
+            .unwrap();
+        for _ in 0..2 {
+            prepare_active_apply(&targets, &BTreeMap::new()).unwrap();
+            assert_eq!(
+                backend
+                    .read_bytes(&[".claude.json.llm-relay.origin"])
+                    .unwrap()
+                    .unwrap(),
+                original
+            );
+        }
+        disable().unwrap();
+        assert_eq!(
+            backend.read_bytes(&[".claude.json"]).unwrap().unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn first_use_adopts_empty_untracked_origin_as_empty_file() {
+        let env = MigrationEnv::new();
+        let targets = [target(env.home.path())];
+        let backend = &targets[0].backend;
+        backend
+            .write_atomic(&[".claude.json.llm-relay.origin"], b"")
+            .unwrap();
+        backend.write_atomic(&[".claude.json"], b"{}").unwrap();
+        let mut manifest = prepare_use(&targets, &[], &BTreeMap::new()).unwrap();
+        assert!(
+            manifest.targets[0]
+                .files
+                .iter()
+                .find(|f| f.path == [".claude.json"])
+                .unwrap()
+                .origin
+                .exists
+        );
+        mark_active(&mut manifest).unwrap();
+        disable().unwrap();
+        assert_eq!(
+            backend.read_bytes(&[".claude.json"]).unwrap(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn damaged_config_recovers_from_valid_origin_and_keeps_damaged_bytes() {
+        let env = MigrationEnv::new();
+        let target = target(env.home.path());
+        let backend = &target.backend;
+        let path = vec![".claude.json".to_string()];
+        backend.write_atomic(&[".claude.json"], b"{broken").unwrap();
+        backend
+            .write_atomic(&[".claude.json.llm-relay.bak"], b"bad backup")
+            .unwrap();
+        backend
+            .write_atomic(&[".claude.json.llm-relay.origin"], b"{\"local\":true}")
+            .unwrap();
+        recover_working_file(&**backend, &path).unwrap();
+        assert_eq!(
+            backend.read_bytes(&[".claude.json"]).unwrap().unwrap(),
+            b"{\"local\":true}"
+        );
+        let damaged = std::fs::read_dir(env.home.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".claude.json.llm-relay.damaged-")
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(damaged.path()).unwrap(), b"{broken");
+        backend
+            .write_atomic(&[".claude.json"], b"{\"edited\":true}")
+            .unwrap();
+        recover_working_file(&**backend, &path).unwrap();
+        assert_eq!(
+            backend.read_bytes(&[".claude.json"]).unwrap().unwrap(),
+            b"{\"edited\":true}"
+        );
+        backend.remove(&[".claude.json"]).unwrap();
+        recover_working_file(&**backend, &path).unwrap();
+        assert_eq!(
+            backend.read_bytes(&[".claude.json"]).unwrap().unwrap(),
+            b"{\"local\":true}"
         );
     }
 

@@ -2109,6 +2109,7 @@ pub(crate) fn write_one_target(
     original_snapshot: Option<&snapshot::TargetSnapshot>,
 ) -> Result<(), AppError> {
     let b = &*target.backend;
+    lifecycle::recover_working_configs(target)?;
     lifecycle::login::before_apply(target)?;
     if target.installed.claude {
         write_claude_config_with_extra(
