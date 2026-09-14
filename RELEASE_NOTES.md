@@ -21,6 +21,8 @@ v0.5.0 改进了 Relay 的环境管理、配置恢复和桌面交互：Windows H
 ## 配置恢复与 WSL 同步
 
 - **本地备份可自由编辑**：移除 `.llm-relay.origin` 和 `.llm-relay.bak` 的 SHA-256 校验，恢复时读取备份当前内容，旧清单中的哈希字段不再参与校验。
+- **接续未登记的本地备份**：已有 `.origin` 但恢复清单缺少对应记录时，沿用备份内容，修复启用 Claude 时出现 `orphan origin sidecar exists` 的问题；不覆盖用户保留或编辑的备份。
+- **恢复缺失或损坏的配置**：应用配置前，对 JSON/TOML 文件尝试从有效的 `.bak`、`.origin` 恢复；正常文件不覆盖，损坏文件先另存副本。恢复清单损坏仍会隔离并提示错误，不会自动重建。
 - **保留完整配置**：正常停用时保存当前工作配置到 `.bak` 并恢复 `.origin`；下次 Use 捕获当时的工作配置作为 `.origin`，再恢复已有 `.bak`。原文件不存在与空文件仍分别记录。
 - **备份缺失不再卡住同步**：修复 checksum mismatch、lifecycle sidecar is missing 和 origin disappeared 等阻断场景。本地删除备份后，Use、Save 和 WSL 自动重试可以继续；恢复时缺少原有文件的备份则保留当前文件，实际读取错误仍会提示。
 - **恢复记录缺失时可重建**：仍处于启用状态但恢复记录丢失时，优先从已有 `.bak` 重建，没有备份则从空配置生成；不会把 Relay 配置误存为原始配置。离线 WSL 重连后继续处理。
@@ -52,7 +54,7 @@ v0.5.0 改进了 Relay 的环境管理、配置恢复和桌面交互：Windows H
 | Windows x64 | [EXE 安装包](https://github.com/xuangong/llm-relay/releases/download/v0.5.0/LLM.Relay_0.5.0_x64-setup.exe) · [MSI 安装包](https://github.com/xuangong/llm-relay/releases/download/v0.5.0/LLM.Relay_0.5.0_x64_en-US.msi) |
 | macOS Universal | [DMG 安装包](https://github.com/xuangong/llm-relay/releases/download/v0.5.0/LLM.Relay_0.5.0_universal.dmg) |
 
-Windows 安装包包含上述最新改动，构建源码为 `a5748b9`。macOS DMG 保留此前的 v0.5.0 构建，尚未包含本次环境交还等后续改动。
+Windows 安装包包含上述最新改动，构建源码为 `571e16e`。macOS DMG 保留此前的 v0.5.0 构建，尚未包含本次环境交还等后续改动。
 
 macOS 安装包未做 Apple 公证。若首次打开出现“已损坏”或“无法验证开发者”，将应用拖入 `/Applications` 后执行：
 
@@ -62,4 +64,4 @@ xattr -dr com.apple.quarantine "/Applications/LLM Relay.app"
 
 ## 验证
 
-131 项核心测试通过，覆盖环境隔离、官方登录后的凭证保留与恢复，以及全部环境关闭后的监听端口释放。桌面端和 agent 编译检查、前端类型检查与生产构建通过；未执行真实 OAuth 登录流程验证。
+134 项核心测试通过，覆盖环境隔离、官方登录后的凭证保留与恢复，以及全部环境关闭后的监听端口释放。桌面端和 agent 编译检查、前端类型检查与生产构建通过；未执行真实 OAuth 登录流程验证。
