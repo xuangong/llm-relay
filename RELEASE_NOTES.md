@@ -1,36 +1,53 @@
 # LLM Relay v0.5.0
 
+## Windows 安装包更新
+
+Windows EXE / MSI 已按提交 a5748b9 重新构建；macOS DMG 沿用此前构建。
+
+- Windows Host 与各 WSL 发行版独立勾选；关闭一个环境不影响其他环境。
+- 检测到 Codex / Claude 官方登录后，取消对应环境的 Relay 接管，保留新登录状态，并在设置中提示。清理成功后移除旧备份，重新勾选时捕获当前配置作为新的恢复基准。
+- 所有环境关闭时，总开关自动关闭，停止本机及 WSL 监听并释放端口；Use 不会自动勾回已关闭的环境。
+- 主窗口显示 WSL 同步进度与失败提示；修复后台探测可能用旧状态重新勾选环境的竞态。
+
+验证：131 项核心测试、桌面端及 agent 编译检查、前端类型检查与生产构建通过。官方登录识别基于可观察的配置与凭证文件变化，未执行真实 OAuth 登录验证；系统凭据库或自定义 CLI home 等情况不保证识别。
+
 ## 新增
 
 ### ⚙️ 设置侧边抽屉
+
 - Header 右端新增 `≡`，点开右侧抽屉
-- 收进抽屉：设备名称、语言、开机启动、自动故障转移、WSL2 发行版、停用中继
-- 主界面只保留盯着网关列表时真正会用的：使用指南、健康检查刷新、抽屉入口
+- 收进抽屉：设备名称、语言、开机启动、自动故障转移、WSL2 发行版和 Windows Host
+- 主界面提供使用指南、健康检查刷新、抽屉入口、Disable Relay 开关和 WSL 同步状态
 - 自动故障转移**关闭时**，header 显示琥珀色提示 chip —— 回答"为什么故障网关还挂着"
 - WSL2 发行版从主列表移入抽屉，不再是常驻的视觉干扰；顺带补齐了它缺失的中文翻译
 
 ### 🖥️ 关闭窗口后不留痕
+
 - macOS：关闭主窗口后 Dock 图标消失，只保留菜单栏图标
 - Windows：任务栏无图标，托盘常驻；**单击托盘打开窗口，右击出菜单**
 - 托盘 "Open Main Window"、macOS Dock 重新激活、第二实例启动，都会正确把窗口带到最前
 
 ### 🔧 写入的配置现在真的能启动起来
+
 - Claude Code：补上 `~/.claude.json` 的 `hasCompletedOnboarding`，否则它会走首次运行向导、压根不读我们写的 settings.json（已存在则不写，文件损坏则原样保留）
 - Codex CLI：`OPENAI_API_KEY` 统一写 `llm-relay-ignore`，按当前 `$SHELL` 决定写哪个文件与语法（`.zshrc` / macOS `.bash_profile` / `.bashrc` / `config.fish` / `.profile`），已有赋值就地替换而非追加
 - 你自己设置的真实 key 不会被动到——代理本来就会在链路上替换它
 - host 与每个 WSL 发行版分别处理（WSL 的登录 shell 读 passwd，而非 `$SHELL`）
 
 ### 🔇 错误日志按路径屏蔽
+
 - 悬停某行即可屏蔽该路径（例如 Claude Code 的 `/api/hello` 预检探活，在不提供该路由的网关上必然 404）
 - 屏蔽在 SQL 层过滤，条数上限只统计可见行——高频噪音不再把真实错误挤出视野
 - Errors 徽标同样跳过已屏蔽路径
 
 ### 🆔 心跳上报 OS 机器标识
+
 - 修掉网关面板上同一台机器堆成好几行的问题
 - 额外上报 macOS `IOPlatformUUID` / Windows `MachineGuid` / Linux `/etc/machine-id`，只在重装系统时才变
 - `clientId` 仍照发以便服务端合并历史；读不到时该字段整个省略，不发占位值
 
 ### 其他
+
 - 网关行内重命名与置顶
 - 点击网关地址在系统浏览器中打开
 - TUI 首次运行主密钥向导
@@ -53,11 +70,9 @@
 
 | 平台 | 文件 |
 |------|------|
-| macOS Universal | `LLM Relay_0.5.0_universal.dmg` |
-| Windows GUI | `LLM Relay_0.5.0_x64-setup.exe` |
-| TUI/agent Linux x64 | `llm-relay-agent-x86_64-unknown-linux-gnu`, `llm-relay-tui-x86_64-unknown-linux-gnu` |
-| TUI/agent macOS Apple Silicon | `llm-relay-agent-aarch64-apple-darwin`, `llm-relay-tui-aarch64-apple-darwin` |
-| TUI/agent macOS Intel | `llm-relay-agent-x86_64-apple-darwin`, `llm-relay-tui-x86_64-apple-darwin` |
+| Windows x64 EXE | `LLM.Relay_0.5.0_x64-setup.exe` |
+| Windows x64 MSI | `LLM.Relay_0.5.0_x64_en-US.msi` |
+| macOS Universal（此前构建） | `LLM.Relay_0.5.0_universal.dmg` |
 
 > macOS 首次打开：dmg 未做 Apple 公证（仅 ad-hoc 签名），Gatekeeper 会提示"已损坏"或"无法验证开发者"。拖入 `/Applications` 后执行一次：
 >
