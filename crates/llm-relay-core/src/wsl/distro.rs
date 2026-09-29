@@ -34,15 +34,7 @@ pub fn discover_distros() -> Result<Vec<DiscoveredDistro>, AppError> {
 
 #[cfg(target_os = "windows")]
 pub fn discover_distros() -> Result<Vec<DiscoveredDistro>, AppError> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let out = match Command::new("wsl.exe")
-        .args(["-l", "-v"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-    {
+    let out = match super::command::run(&["-l", "-v"], None) {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(AppError::Config(format!("wsl.exe -l -v: {e}"))),
@@ -304,11 +296,20 @@ pub fn refresh_distros_in_db(db: &crate::Database) -> Result<Vec<DistroRow>, App
     let mut out = Vec::with_capacity(discovered.len());
     for d in discovered {
         let prior = existing.iter().find(|e| e.name == d.name);
-        let probe = match probe_distro(&d.name) {
-            Ok(p) => p,
+        let (probe, probe_ok) = match probe_distro(&d.name) {
+            Ok(p) => (p, true),
             Err(e) => {
                 log::warn!("probe_distro({}) failed: {e}", d.name);
-                ProbeResult::default()
+                (
+                    ProbeResult {
+                        home: prior.and_then(|p| p.home.clone()),
+                        user: prior.and_then(|p| p.user.clone()),
+                        has_claude: prior.is_some_and(|p| p.has_claude),
+                        has_codex: prior.is_some_and(|p| p.has_codex),
+                        has_gemini: prior.is_some_and(|p| p.has_gemini),
+                    },
+                    false,
+                )
             }
         };
         let row = DistroRow {
@@ -320,8 +321,16 @@ pub fn refresh_distros_in_db(db: &crate::Database) -> Result<Vec<DistroRow>, App
             has_claude: probe.has_claude,
             has_codex: probe.has_codex,
             has_gemini: probe.has_gemini,
-            resolved_url: prior.and_then(|p| p.resolved_url.clone()),
-            probed_at: Some(now.clone()),
+            resolved_url: if probe_ok {
+                prior.and_then(|p| p.resolved_url.clone())
+            } else {
+                None
+            },
+            probed_at: if probe_ok {
+                Some(now.clone())
+            } else {
+                prior.and_then(|p| p.probed_at.clone())
+            },
         };
         db.upsert_wsl_distro(&row)?;
         out.push(row);

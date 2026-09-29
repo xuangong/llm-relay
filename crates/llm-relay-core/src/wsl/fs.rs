@@ -7,14 +7,6 @@
 
 use crate::AppError;
 
-#[cfg(target_os = "windows")]
-use std::io::Write;
-#[cfg(target_os = "windows")]
-use std::process::{Command, Stdio};
-
-#[cfg(target_os = "windows")]
-const WSL_TIMEOUT_SECS: u64 = 5;
-
 #[cfg(not(target_os = "windows"))]
 pub fn wsl_read_bytes(_distro: &str, _path: &str) -> Result<Option<Vec<u8>>, AppError> {
     Err(AppError::Config(
@@ -138,37 +130,8 @@ pub(crate) fn __wsl_run_script_root(distro: &str, script: &str) -> Result<String
 
 #[cfg(target_os = "windows")]
 fn run_wsl_capture(distro: &str, script: &str) -> Result<Vec<u8>, AppError> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let mut cmd = Command::new("wsl.exe");
-    cmd.args(["-d", distro, "-e", "sh", "-c", script]);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.stdin(Stdio::null());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::Config(format!("wsl.exe spawn ({distro}): {e}")))?;
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if start.elapsed().as_secs() >= WSL_TIMEOUT_SECS {
-                    let _ = child.kill();
-                    return Err(AppError::Config(format!(
-                        "wsl.exe -d {distro} timed out after {WSL_TIMEOUT_SECS}s"
-                    )));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(e) => return Err(AppError::Config(format!("wsl wait: {e}"))),
-        }
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| AppError::Config(format!("wsl output: {e}")))?;
+    let out = super::command::run(&["-d", distro, "-e", "sh", "-c", script], None)
+        .map_err(|e| AppError::Config(format!("wsl.exe -d {distro}: {e}")))?;
     Ok(out.stdout)
 }
 
@@ -184,52 +147,13 @@ fn run_wsl_as(
     stdin_bytes: Option<&[u8]>,
     as_root: bool,
 ) -> Result<Vec<u8>, AppError> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let mut cmd = Command::new("wsl.exe");
-    if as_root {
-        cmd.args(["-d", distro, "-u", "root", "-e", "sh", "-c", script]);
+    let args = if as_root {
+        vec!["-d", distro, "-u", "root", "-e", "sh", "-c", script]
     } else {
-        cmd.args(["-d", distro, "-e", "sh", "-c", script]);
-    }
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    if stdin_bytes.is_some() {
-        cmd.stdin(Stdio::piped());
-    } else {
-        cmd.stdin(Stdio::null());
-    }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::Config(format!("wsl.exe spawn ({distro}): {e}")))?;
-    if let (Some(bytes), Some(mut stdin)) = (stdin_bytes, child.stdin.take()) {
-        stdin
-            .write_all(bytes)
-            .map_err(|e| AppError::Config(format!("wsl stdin: {e}")))?;
-        drop(stdin);
-    }
-    // Manual timeout: wait_timeout would be nicer but introduces a new dep.
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_status)) => break,
-            Ok(None) => {
-                if start.elapsed().as_secs() >= WSL_TIMEOUT_SECS {
-                    let _ = child.kill();
-                    return Err(AppError::Config(format!(
-                        "wsl.exe -d {distro} timed out after {WSL_TIMEOUT_SECS}s"
-                    )));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(e) => return Err(AppError::Config(format!("wsl wait: {e}"))),
-        }
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| AppError::Config(format!("wsl output: {e}")))?;
+        vec!["-d", distro, "-e", "sh", "-c", script]
+    };
+    let out = super::command::run(&args, stdin_bytes)
+        .map_err(|e| AppError::Config(format!("wsl.exe -d {distro}: {e}")))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(AppError::Config(format!(

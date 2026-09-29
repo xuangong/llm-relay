@@ -216,7 +216,11 @@ fn scan_with(
     }
     let running = if background && manifest.targets.iter().any(|t| t.target_type == "wsl") {
         Some(
-            crate::wsl::distro::discover_distros()?
+            crate::wsl::distro::discover_distros()
+                .unwrap_or_else(|error| {
+                    log::warn!("Skipping WSL login scan: {error}");
+                    Vec::new()
+                })
                 .into_iter()
                 .filter(|d| d.running)
                 .map(|d| d.name)

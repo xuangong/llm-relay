@@ -77,6 +77,7 @@ impl StateMachine {
         // changes so an older probe cannot reselect a disabled environment.
         let switch_guard = self.service.switch_lock.lock().await;
         // 1. Reconcile distros + their installed-tools cache.
+        let mut refresh_failed = false;
         let distros = match tokio::task::spawn_blocking({
             let db = self.db.clone();
             move || crate::wsl::distro::refresh_distros_in_db(&db)
@@ -86,10 +87,12 @@ impl StateMachine {
             Ok(Ok(d)) => d,
             Ok(Err(e)) => {
                 log::warn!("refresh_distros: {e}");
+                refresh_failed = true;
                 Vec::new()
             }
             Err(e) => {
                 log::warn!("refresh_distros join: {e}");
+                refresh_failed = true;
                 Vec::new()
             }
         };
@@ -168,7 +171,9 @@ impl StateMachine {
 
         // 4. Keep probing while a selected lifecycle target is pending, even
         // when one transient discovery call returned no distros.
-        let mode_new = if distros.is_empty() && !crate::config_writer::lifecycle::has_pending_wsl()
+        let mode_new = if !refresh_failed
+            && distros.is_empty()
+            && !crate::config_writer::lifecycle::has_pending_wsl()
         {
             Mode::Lazy
         } else {

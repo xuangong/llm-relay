@@ -279,25 +279,24 @@ pub fn prepare_use(
         });
         let mut files = descriptors(target.installed, shell_paths.get(&key).cloned());
         for file in &mut files {
-            capture_origin(target, file, previous_target.is_none())?;
-            let rel = refs(&file.path);
-
             if let Some(previous_file) = previous_target.and_then(|stored| {
                 stored
                     .files
                     .iter()
                     .find(|candidate| candidate.path == file.path)
             }) {
-                let backup_path = sidecar_path(&file.path, BACKUP_SUFFIX)?;
-                let backup_refs = refs(&backup_path);
-                if previous_file.backup.complete {
-                    verify_sidecar(&*target.backend, &backup_refs, &previous_file.backup)?;
-                    restore_state(&*target.backend, &rel, &backup_refs, &previous_file.backup)?;
-                    file.backup = previous_file.backup.clone();
-                }
+                file.backup = previous_file.backup.clone();
             }
         }
+        let result = finish_use_preparation(target, &mut files, previous_target.is_none());
         let mut stored = stored_target(target, files);
+        if let Err(error) = result {
+            if target.snapshot_meta.target_type != TargetType::Wsl {
+                return Err(error);
+            }
+            stored.pending = true;
+            stored.pending_reason = Some(format!("Waiting to prepare WSL: {error}"));
+        }
         if let Some(previous) = previous_target {
             stored.login = previous.login.clone();
         }
@@ -349,6 +348,34 @@ pub fn prepare_use(
     Ok(manifest)
 }
 
+// Retry only untouched files: completed origins must never be recaptured from
+// Relay configuration after a partially successful setup.
+fn finish_use_preparation(
+    target: &CliTarget,
+    files: &mut [ManagedFile],
+    preserve_existing_sidecar: bool,
+) -> Result<(), AppError> {
+    for file in files
+        .iter_mut()
+        .filter(|file| file.managed && !file.touched)
+    {
+        if !file.origin.complete {
+            capture_origin(target, file, preserve_existing_sidecar)?;
+        }
+        if file.backup.complete {
+            let backup = sidecar_path(&file.path, BACKUP_SUFFIX)?;
+            verify_sidecar(&*target.backend, &refs(&backup), &file.backup)?;
+            restore_state(
+                &*target.backend,
+                &refs(&file.path),
+                &refs(&backup),
+                &file.backup,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn prepare_active_apply(
     targets: &[CliTarget],
     shell_paths: &BTreeMap<String, Vec<String>>,
@@ -380,6 +407,7 @@ pub fn prepare_active_apply(
                 .iter()
                 .position(|stored| stored_key(stored) == key)
             {
+                finish_use_preparation(target, &mut manifest.targets[index].files, true)?;
                 for file in &mut manifest.targets[index].files {
                     if reconcile_deleted_origin(&*target.backend, file)? {
                         changed = true;
@@ -735,6 +763,10 @@ pub fn rollback_use(manifest: &mut LifecycleManifest) -> Result<(), AppError> {
         }
         let backend = backend_for(target)?;
         for file in &mut target.files {
+            // An unavailable target may never have completed its first capture.
+            if !file.origin.complete && !file.touched {
+                continue;
+            }
             let rel = refs(&file.path);
             let origin = sidecar_path(&file.path, ORIGIN_SUFFIX)?;
             if let Err(error) = restore_state(&*backend, &rel, &refs(&origin), &file.origin) {
@@ -841,6 +873,10 @@ pub fn disable() -> Result<(), AppError> {
         }
         let backend = backend_for(target)?;
         for file in &mut target.files {
+            // An unavailable target may never have completed its first capture.
+            if !file.origin.complete && !file.touched {
+                continue;
+            }
             let origin = sidecar_path(&file.path, ORIGIN_SUFFIX)?;
             match restore_state(&*backend, &refs(&file.path), &refs(&origin), &file.origin) {
                 Ok(()) => {
@@ -2097,6 +2133,105 @@ mod tests {
             self.check()?;
             self.fs.exists(path)
         }
+    }
+
+    #[test]
+    fn offline_wsl_first_use_keeps_native_active_and_retries_origin_capture() {
+        let env = MigrationEnv::new();
+        let wsl_home = TempDir::new().unwrap();
+        let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wsl = CliTarget {
+            backend: Box::new(SwitchableBackend {
+                fs: WindowsFsBackend {
+                    home: wsl_home.path().into(),
+                },
+                online: online.clone(),
+            }),
+            snapshot_meta: SnapshotMeta {
+                target_type: TargetType::Wsl,
+                distro_name: Some("Offline Test".into()),
+                home: Some("/home/test".into()),
+            },
+            base_url: "http://relay".into(),
+            label: "wsl:Offline Test".into(),
+            installed: InstalledTools {
+                claude: true,
+                codex: false,
+                gemini: false,
+            },
+        };
+        let working = [".claude", "settings.json"];
+        let local_wsl = WindowsFsBackend {
+            home: wsl_home.path().into(),
+        };
+        let original = br#"{"env":{"ANTHROPIC_BASE_URL":"https://original"}}"#;
+        local_wsl.write_atomic(&working, original).unwrap();
+        let targets = [target(env.home.path()), wsl];
+        let mut manifest = prepare_use(&targets, &[], &BTreeMap::new()).unwrap();
+        assert!(manifest.targets[1].pending);
+        assert!(!manifest.targets[1].files[0].origin.complete);
+        // Abandoning an incomplete first setup must also leave WSL files alone.
+        rollback_use(&mut manifest).unwrap();
+        prepare_use(&targets, &[], &BTreeMap::new()).unwrap();
+        disable().unwrap();
+        manifest = prepare_use(&targets, &[], &BTreeMap::new()).unwrap();
+        let report = super::super::apply_to_targets(
+            &targets,
+            None,
+            "relay",
+            Some("first"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(report.succeeded.contains("windows"));
+        assert!(report.failed.contains_key("Offline Test"));
+        mark_targets_active(&mut manifest, &report.succeeded).unwrap();
+        assert!(has_pending_wsl());
+        assert_eq!(local_wsl.read_bytes(&working).unwrap().unwrap(), original);
+        assert!(targets[0]
+            .backend
+            .read(&working)
+            .unwrap()
+            .unwrap()
+            .contains("first"));
+
+        online.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut manifest = prepare_active_apply(&targets, &BTreeMap::new())
+            .unwrap()
+            .unwrap();
+        let report = super::super::apply_to_targets(
+            &targets,
+            None,
+            "relay",
+            Some("latest"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        mark_targets_active(&mut manifest, &report.succeeded).unwrap();
+        assert!(!has_pending_wsl());
+        assert!(local_wsl
+            .read(&working)
+            .unwrap()
+            .unwrap()
+            .contains("latest"));
+        assert_eq!(
+            local_wsl
+                .read_bytes(&[".claude", "settings.json.llm-relay.origin"])
+                .unwrap()
+                .unwrap(),
+            original,
+        );
     }
 
     #[test]
